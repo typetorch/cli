@@ -1,0 +1,22 @@
+{
+	"name": "typetorch-cli-fixture",
+	"private": true,
+	"description": "Minimal roblox-ts Model project for testing the TypeTorch CLI (typetorch build / deploy --dry-run).",
+	"scripts": {
+		"build": "rbxtsc"
+	},
+	"dependencies": {
+		"@rbxts/services": "^1.6.0",
+		"@typetorch/framework": "file:./stubs/framework",
+		"rbxts-transform-debug": "2.2.0"
+	},
+	"devDependencies": {
+		"@rbxts/compiler-types": "^3.0.0-types.0",
+		"@rbxts/types": "^1.0.956",
+		"roblox-ts": "^3.0.0",
+		"typescript": "5.5.3"
+	},
+	"overrides": {
+		"typescript": "5.5.3"
+	}
+}

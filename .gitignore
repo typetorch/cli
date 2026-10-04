@@ -1,0 +1,24 @@
+# dependencies and build output
+node_modules/
+.typetorch/
+dist/
+*.tsbuildinfo
+
+# secrets
+.env
+.env.*
+!.env.example
+
+# private working notes (not published)
+CHANGELOG.md
+
+# test fixture: generated and installed files, and its local config (may hold real ids)
+test-fixture/node_modules/
+test-fixture/out/
+test-fixture/include/
+test-fixture/.typetorch/
+test-fixture/.payload.gen.project.json
+test-fixture/src/shared/build.ts
+test-fixture/typetorch.json
+test-fixture/bun.lock
+test-fixture/.git/

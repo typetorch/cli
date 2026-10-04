@@ -1,0 +1,17 @@
+{
+	"name": "TypeTorchPayload",
+	"globIgnorePaths": ["**/package.json", "**/tsconfig.json"],
+	"tree": {
+		"$className": "Model",
+		"Server": { "$path": "out/server" },
+		"Shared": { "$path": "out/shared" },
+		"Client": { "$path": "out/client" },
+		"include": {
+			"$path": "include",
+			"node_modules": {
+				"$className": "Folder",
+				"@rbxts": { "$path": "node_modules/@rbxts" }
+			}
+		}
+	}
+}

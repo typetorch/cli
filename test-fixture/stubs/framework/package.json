@@ -1,0 +1,7 @@
+{
+	"name": "@typetorch/framework",
+	"version": "0.0.0-stub",
+	"private": true,
+	"description": "Type-only stand-in for @typetorch/framework (the fixture only imports BuildInfo as a type).",
+	"types": "index.d.ts"
+}

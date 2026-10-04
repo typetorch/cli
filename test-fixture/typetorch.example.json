@@ -1,0 +1,11 @@
+{
+	"project": "fixture",
+	"universeId": 1,
+	"placeId": 2,
+	"creator": { "groupId": 3 },
+	"defaultBranch": "prod",
+	"branches": { "main": "prod" },
+	"channels": { "prod": "prod" },
+	"members": { "1": "owner" },
+	"devBadgeId": null
+}
