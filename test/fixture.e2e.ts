@@ -6,7 +6,7 @@
  *   TT_E2E_CONFIG=path/to/typetorch.json bun test/fixture.e2e.ts
  *                                                 also reads the real registry (read-only) for that experience
  */
-import { cpSync, existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, existsSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -135,6 +135,40 @@ if (process.env.TT_E2E_CONFIG) {
 	check("deploy --dry-run with registry read (or fallback)", r.code === 0 && typeof r.json?.registry?.readable === "boolean", r.stderr || r.json);
 	console.log(`registry: ${JSON.stringify(r.json?.registry)}\nstderr: ${r.stderr.trim()}`);
 }
+
+// 7. Revisions: a clean commit already deployed with other (or unknown) bytes gets .r2, .r3, ...; the final id is the
+// one stamped last, and the dry-run asset name, description and message all carry it.
+sh(["git", "checkout", "--", "."]);
+const logLine = (seq: number, artifactId: string, sha256?: string) =>
+	JSON.stringify({ ...entries[0], seq, artifactId, commit: c2, commitHash: sh(["git", "rev-parse", "HEAD"]), sha256 }) + "\n";
+appendFileSync(join(dir, ".typetorch", "deployments.jsonl"), logLine(4, `dev-${c2}`)); // logged before sha256 existed
+const stampedIds = (stderr: string) => [...stderr.matchAll(/stamped ArtifactId=([a-z0-9.-]+)/g)].map((m) => m[1]);
+r = tt("build", "--json", "--verbose");
+check(
+	"same commit, unknown bytes -> .r2 (stamped last)",
+	r.code === 0 && r.json?.artifactId === `dev-${c2}.r2` && r.json?.revision === 2 && stampedIds(r.stderr).at(-1) === `dev-${c2}.r2`,
+	r.stderr || r.json,
+);
+appendFileSync(join(dir, ".typetorch", "deployments.jsonl"), logLine(5, `dev-${c2}.r2`, r.json?.sha256));
+r = tt("deploy", "--dry-run", "--no-registry", "--no-build", "--json");
+check(
+	"identical bytes redeploy keeps the id; name, description and message agree",
+	r.code === 0 &&
+		r.json?.artifactId === `dev-${c2}.r2` &&
+		r.json?.asset?.displayName === `tt-feature-thing-${c2}-r2` &&
+		r.json?.asset?.description.split("\n")[0] === `artifact=dev-${c2}.r2` &&
+		r.json?.message?.data?.i === `dev-${c2}.r2`,
+	r.stderr || r.json,
+);
+r = tt("build", "--json", "--verbose");
+check(
+	"rebuild (other bytes) -> .r3, stamped .r2 first",
+	r.code === 0 && r.json?.artifactId === `dev-${c2}.r3` && stampedIds(r.stderr).join(",") === `dev-${c2}.r2,dev-${c2}.r3`,
+	r.stderr || r.json,
+);
+appendFileSync(join(dir, ".typetorch", "deployments.jsonl"), logLine(6, `dev-${c2}.r3`, "0".repeat(64)));
+r = tt("deploy", "--dry-run", "--no-registry", "--no-build");
+check("--no-build refuses an id that went out with other bytes", r.code === 1 && /already deployed with a different payload/.test(r.stderr), r.stderr);
 
 console.log(failures ? `${failures} failure(s) (${dir})` : `all e2e checks passed (${dir})`);
 process.exit(failures ? 1 : 0);

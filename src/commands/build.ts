@@ -5,7 +5,7 @@ import { branchNameError } from "../naming";
 import { UsageError } from "../args";
 import { dim, emitJson, formatBytes, formatSeconds, formatTimings, info, isJson, Stopwatch } from "../log";
 import { fixCensoredName, logUpload, uploadPayload } from "../upload";
-import { channelFlag, openCloud, project } from "./common";
+import { channelFlag, earlierArtifacts, openCloud, project } from "./common";
 
 export const buildFlags = { branch: "string", channel: "string" } as const;
 
@@ -16,7 +16,11 @@ export function describeBuild(meta: PayloadMeta): string {
 
 export async function buildCommand(args: ParsedArgs) {
 	const proj = project(args);
-	const { meta, timings } = await buildPayload(proj, { branch: flagString(args, "branch"), channel: channelFlag(args) });
+	const { meta, timings } = await buildPayload(proj, {
+		branch: flagString(args, "branch"),
+		channel: channelFlag(args),
+		earlier: earlierArtifacts(proj, openCloud(true)),
+	});
 	if (isJson()) return emitJson({ ...meta, timings });
 	info(`built ${describeBuild(meta)}`);
 	info(`  ${PAYLOAD_FILE}  ${formatBytes(meta.bytes)}  sha256 ${meta.sha256.slice(0, 16)}…`);
@@ -40,7 +44,8 @@ export async function uploadCommand(args: ParsedArgs) {
 	if (flagBool(args, "no-build")) {
 		({ meta, bytes } = readBuiltPayload(proj.root));
 	} else {
-		meta = (await watch.stage("build", () => buildPayload(proj, { branch: flagString(args, "branch"), channel: channelFlag(args) }))).meta;
+		const earlier = earlierArtifacts(proj, oc);
+		meta = (await watch.stage("build", () => buildPayload(proj, { branch: flagString(args, "branch"), channel: channelFlag(args), earlier }))).meta;
 		bytes = payloadBytes(proj.root);
 		info(`  build       ${formatSeconds(watch.timings.build)}  ${describeBuild(meta)}`);
 	}

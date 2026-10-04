@@ -83,3 +83,21 @@ export function withLocal(proj: Project, snapshot: RegistrySnapshot | undefined,
 export function registryApi(oc: OpenCloud | undefined, proj: Project, disabled: boolean): RegistryApi | undefined {
 	return oc && !disabled ? new RegistryApi(oc, proj.config.universeId) : undefined;
 }
+
+/**
+ * Earlier artifacts for picking a build's revision (`buildPayload`'s `earlier`): the local log plus the registry when
+ * there is a key and it is readable. The registry read starts now, alongside the build; when it fails, only the local
+ * log is checked (`deploy --no-build` checks again).
+ */
+export function earlierArtifacts(proj: Project, oc: OpenCloud | undefined): () => Promise<DeploymentRow[]> {
+	const api = registryApi(oc, proj, false);
+	const read: Promise<{ snapshot?: RegistrySnapshot; unavailable?: string; failed?: boolean }> = api
+		? tryReadRegistry(api).catch((error) => ({ unavailable: (error as Error).message ?? String(error), failed: true }))
+		: Promise.resolve({ unavailable: "no API key" });
+	return async () => {
+		const result = await read;
+		if (result.failed) warn(`could not read the registry (${result.unavailable}); checking revisions against the local log only`);
+		else if (result.unavailable) debug(`revision check without the registry: ${result.unavailable}`);
+		return withLocal(proj, result.snapshot, result.unavailable).rows;
+	};
+}

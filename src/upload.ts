@@ -16,6 +16,7 @@ export function assetNaming(config: ProjectConfig, meta: PayloadMeta, branch: st
 		dirty: meta.dirty,
 		channel: meta.channel,
 		impliedChannel: branchChannel(config, branch),
+		revision: meta.revision,
 	});
 	const description = assetDescription({
 		artifactId: meta.artifactId,

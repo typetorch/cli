@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import type { Project } from "./config";
+import { readLocalLog } from "./deployments";
 import { gitInfo, type GitInfo } from "./git";
 import { isRecord, parseJsonc } from "./json";
 import { debug, Stopwatch, warn } from "./log";
@@ -15,8 +16,12 @@ import {
 	branchFromGit,
 	branchNameError,
 	buildFileSource,
+	chooseRevision,
+	compareEarlier,
+	latestRevision,
 	provisionalArtifactId,
 	type Channel,
+	type EarlierArtifact,
 } from "./naming";
 import { run } from "./proc";
 
@@ -33,6 +38,8 @@ export const GENERATED_PATHS = [BUILD_FILE, GEN_PROJECT, `${OUT_DIR}/`];
 
 export interface PayloadMeta {
 	artifactId: string;
+	/** 2+ when the id carries a `.r<N>` suffix (this commit was deployed before with other bytes); absent otherwise. */
+	revision?: number;
 	project: string;
 	channel: Channel;
 	/** TypeTorch branch the build is for. */
@@ -164,10 +171,26 @@ export interface BuildResult {
 	target: BuildTarget;
 }
 
-export async function buildPayload(
-	project: Project,
-	options: { branch?: string; channel?: Channel } = {},
-): Promise<BuildResult> {
+export interface BuildOptions {
+	branch?: string;
+	channel?: Channel;
+	/**
+	 * Earlier deployed artifacts, to pick a clean build's revision (default: the local log). Called after rbxtsc, so
+	 * a registry read started with the build has usually finished by then. Not called for dirty builds.
+	 */
+	earlier?: () => Promise<EarlierArtifact[]> | EarlierArtifact[];
+}
+
+/** Refuses to reuse a built payload whose clean id was already deployed with other bytes (`--no-build`). */
+export function assertNotRedeployedWithOtherBytes(meta: PayloadMeta, earlier: EarlierArtifact[]) {
+	if (meta.dirty) return; // a dirty id is named by the payload's own hash
+	if (compareEarlier(meta.artifactId, meta.sha256, earlier) !== "different") return;
+	throw new BuildError(
+		`${meta.artifactId} was already deployed with a different payload (or one logged without a sha256); build again (drop --no-build) to give it a new revision`,
+	);
+}
+
+export async function buildPayload(project: Project, options: BuildOptions = {}): Promise<BuildResult> {
 	const root = project.root;
 	const watch = new Stopwatch();
 	const git = gitInfo(root, GENERATED_PATHS);
@@ -205,6 +228,7 @@ export async function buildPayload(
 		BuiltAt: Math.floor(Date.parse(builtAt) / 1000), // unix seconds, like $compileTime()
 	});
 	const rojoBuild = async (id: string): Promise<Uint8Array> => {
+		debug(`rojo build stamped ArtifactId=${id}`);
 		writeFileSync(genPath, JSON.stringify(stampProject(projectJson, attributes(id)), null, "\t"));
 		try {
 			await run([rojoBinary(), "build", GEN_PROJECT, "-o", PAYLOAD_FILE], root);
@@ -213,7 +237,10 @@ export async function buildPayload(
 		}
 		return new Uint8Array(readFileSync(payloadPath));
 	};
+	// Earlier artifacts (clean builds only): the registry read a deploy starts alongside the build is awaited here.
+	const earlier = git.dirty ? [] : options.earlier ? await options.earlier() : readLocalLog(root, project.config.universeId);
 	let id: string;
+	let revision = 1;
 	let bytes: Uint8Array;
 	await watch.stage("rojo", async () => {
 		if (git.dirty) {
@@ -221,14 +248,27 @@ export async function buildPayload(
 			// with the provisional id, then stamp the final id.
 			const provisional = await rojoBuild(provisionalArtifactId({ channel: target.channel, commit: git.commit }));
 			id = makeArtifactId({ channel: target.channel, commit: git.commit, dirty: true, sha256: sha256(provisional) });
-		} else {
-			id = makeArtifactId({ channel: target.channel, commit: git.commit, dirty: false });
+			bytes = await rojoBuild(id);
+			return;
 		}
-		bytes = await rojoBuild(id);
+		// A clean id gets a revision when this commit was deployed before with other bytes. Stamp the newest known id
+		// of the family (else the base id) and hash: identical bytes keep that id, anything else is restamped with the
+		// next revision.
+		const base = makeArtifactId({ channel: target.channel, commit: git.commit, dirty: false });
+		const stampedId = latestRevision(base, earlier)?.artifactId ?? base;
+		bytes = await rojoBuild(stampedId);
+		const chosen = chooseRevision({ base, stampedId, sha256: sha256(bytes), earlier });
+		id = chosen.artifactId;
+		revision = chosen.revision;
+		if (id !== stampedId) {
+			debug(`${stampedId} was deployed before with other bytes; building ${id}`);
+			bytes = await rojoBuild(id);
+		}
 	});
 
 	const meta: PayloadMeta = {
 		artifactId: id!,
+		...(revision > 1 ? { revision } : {}),
 		project: project.config.project,
 		channel: target.channel,
 		branch: target.branch,

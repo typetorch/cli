@@ -4,7 +4,7 @@
  * scope) is known before anything is uploaded.
  */
 import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args";
-import { buildPayload, payloadBytes, readBuiltPayload, type PayloadMeta } from "../build";
+import { assertNotRedeployedWithOtherBytes, buildPayload, payloadBytes, readBuiltPayload, type PayloadMeta } from "../build";
 import { gitInfo } from "../git";
 import { bold, dim, emitJson, formatBytes, formatSeconds, formatTimings, info, isJson, Stopwatch, warn } from "../log";
 import { branchChannel, branchNameError, strictest, type Channel } from "../naming";
@@ -66,15 +66,25 @@ export async function deployCommand(args: ParsedArgs) {
 	const api = registryApi(oc, proj, noRegistry);
 	const watch = new Stopwatch();
 
-	// Registry read runs while we build.
+	// Registry read runs while we build (the build awaits it after rbxtsc, to pick the artifact's revision).
 	const registryRead: Promise<{ snapshot?: RegistrySnapshot; unavailable?: string; error?: unknown }> = api
 		? tryReadRegistry(api).catch((error) => ({ error }))
 		: Promise.resolve({ unavailable: noRegistry ? "--no-registry" : "no API key (dry run)" });
+	const readRegistryOrThrow = async () => {
+		const read = await registryRead;
+		if (read.error) {
+			throw new Error(
+				`could not read the registry: ${(read.error as Error).message ?? read.error} (pass --no-registry to deploy without it)`,
+			);
+		}
+		return read;
+	};
 
+	const noBuild = flagBool(args, "no-build");
 	let meta: PayloadMeta;
 	let bytes: Uint8Array;
 	let by: string;
-	if (flagBool(args, "no-build")) {
+	if (noBuild) {
 		({ meta, bytes } = readBuiltPayload(proj.root));
 		if (channelOverride && channelOverride !== meta.channel) {
 			throw new UsageError(`the built payload is channel ${meta.channel}; rebuild for --channel ${channelOverride}`);
@@ -82,7 +92,11 @@ export async function deployCommand(args: ParsedArgs) {
 		by = gitInfo(proj.root).userName;
 		info(`using ${describeBuild(meta)}`);
 	} else {
-		const built = await watch.stage("build", () => buildPayload(proj, { branch: branchFlag, channel: channelOverride }));
+		const earlier = async () => {
+			const read = await readRegistryOrThrow();
+			return withLocal(proj, read.snapshot, read.unavailable).rows;
+		};
+		const built = await watch.stage("build", () => buildPayload(proj, { branch: branchFlag, channel: channelOverride, earlier }));
 		meta = built.meta;
 		by = built.target.git.userName;
 		bytes = payloadBytes(proj.root);
@@ -90,16 +104,13 @@ export async function deployCommand(args: ParsedArgs) {
 	}
 	const branch = branchFlag ?? meta.branch;
 
-	const read = await registryRead;
-	if (read.error) {
-		throw new Error(
-			`could not read the registry: ${(read.error as Error).message ?? read.error} (pass --no-registry to deploy without it)`,
-		);
-	}
+	const read = await readRegistryOrThrow();
 	const snapshot = read.snapshot;
 	if (!snapshot && api) warnRegistryFallback(read.unavailable ?? "unknown");
 	if (snapshot) assertNoForeignDraft(snapshot, force);
 	const history = withLocal(proj, snapshot, read.unavailable);
+	// A payload built earlier picked its revision then; refuse it if that id has since gone out with other bytes.
+	if (noBuild) assertNotRedeployedWithOtherBytes(meta, history.rows);
 
 	const targetChannel = strictest(branchChannel(proj.config, branch), snapshot?.value.channels[branch]);
 	checkChannelGuard({ branch, branchChannel: targetChannel, artifactChannel: meta.channel, dirty: meta.dirty, force });
@@ -119,6 +130,7 @@ export async function deployCommand(args: ParsedArgs) {
 		const plan = {
 			dryRun: true,
 			artifactId: meta.artifactId,
+			revision: meta.revision,
 			branch,
 			branchChannel: targetChannel,
 			channel: meta.channel,
@@ -134,6 +146,7 @@ export async function deployCommand(args: ParsedArgs) {
 		};
 		if (isJson()) return emitJson(plan);
 		info(bold(`dry run: would deploy ${meta.artifactId} to ${branch} (branch channel ${targetChannel}) as #${entry.seq}`));
+		if (meta.revision) info(`  revision     ${meta.revision} (commit ${meta.commit} was deployed before with other bytes)`);
 		info(`  asset name   ${displayName}`);
 		info(`  description  ${description.split("\n").join(dim(" | "))}`);
 		info(`  creator      ${JSON.stringify(proj.config.creator)}`);
@@ -166,6 +179,7 @@ export async function deployCommand(args: ParsedArgs) {
 		note,
 		assetName: displayName,
 		watch,
+		extra: { sha256: meta.sha256 },
 	});
 	// Command start -> message published: the deploy latency that matters (servers swap ~1-2 s later).
 	const timings = watch.total();

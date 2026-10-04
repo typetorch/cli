@@ -105,6 +105,7 @@ export async function rollbackCommand(args: ParsedArgs) {
 		force,
 		note,
 		watch,
+		extra: target.sha256 ? { sha256: target.sha256 } : undefined,
 	});
 	const timings = watch.total();
 	if (isJson()) return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, timings });

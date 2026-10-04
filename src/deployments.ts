@@ -14,6 +14,8 @@ export interface LocalDeployment extends RegistryDeployment {
 	universeId?: number;
 	project?: string;
 	assetName?: string;
+	/** sha256 of the payload bytes (recorded since revisions were added; older entries lack it). */
+	sha256?: string;
 	message?: string;
 	/** What happened to the registry for this entry. */
 	registry?: "published" | "unchanged" | "unavailable" | "failed" | "skipped";

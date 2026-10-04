@@ -54,7 +54,7 @@ Gitignore `.typetorch/`, `src/shared/build.ts` and `.payload.gen.project.json` i
 |---|---|
 | `typetorch build [--branch <b>] [--channel prod\|dev]` | writes `src/shared/build.ts`, runs rbxtsc (`bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root (`ArtifactId`, `KernelApi`, `Channel`, `Commit`, `BuiltAt`); writes `.typetorch/payload.json` |
 | `typetorch upload [--no-build]` | build, then upload as a new Model asset and wait for moderation; no deploy |
-| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--no-registry]` | build, upload, wait until Approved, update the registry, publish the deploy message, append `.typetorch/deployments.jsonl`; prints per-stage timings |
+| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--no-registry]` | build, upload, wait until Approved, update the registry, publish the deploy message, append `.typetorch/deployments.jsonl` (with the payload `sha256`); prints per-stage timings |
 | `typetorch rollback [--branch] [--to <commit\|artifactId\|assetId\|#seq>] [--force] [--dry-run]` | point the branch at an earlier, already approved asset (no build or upload) and tell its servers |
 | `typetorch deployments [--branch] [--limit n]` | deployment history with git identity; `*` = each branch's live head |
 | `typetorch branch ls` | branches, channels and live heads |
@@ -69,13 +69,24 @@ Every command takes `--json` (one JSON document on stdout; human lines go to std
 
 - **Branch:** `--branch`, else `typetorch.json` `branches[gitBranch]`, else the git branch lowercased with `/` → `-`.
 - **Channel:** `--channel`, else `channels[branch]`, else `prod` for `defaultBranch`, else `dev`.
-- **Artifact id:** `<channel>-<commit>` (commit = first 7 hex of HEAD, the same value `$git("Commit")` compiles in), or
-  `<channel>-<commit>-dirty-<sha6>` for a dirty tree (sha6 = first 6 hex of the sha256 of the payload stamped with
-  the provisional id `<channel>-<commit>-dirty`).
-- **Asset name:** `tt-<branch>-<commit>[-dirty][-<channel>]` (only `[a-z0-9-]`, at most 50 characters; the channel is
-  added only when `--channel` overrides the branch's). Roblox's text filter still censors some of these to `####`,
-  unpredictably (`tt-main-a17a22c` passes, `tt-dev-59daad8` doesn't), so after the deploy message is out the CLI reads
-  the stored name back and renames a censored asset to `TypeTorch payload`. The description is not censored and
+- **Artifact id:** `<channel>-<commit>[.r<N>]` (commit = first 7 hex of HEAD, the same value `$git("Commit")` compiles
+  in), or `<channel>-<commit>-dirty-<sha6>` for a dirty tree (sha6 = first 6 hex of the sha256 of the payload stamped
+  with the provisional id `<channel>-<commit>-dirty`). Ids use only `[a-z0-9.-]`.
+- **Revisions:** the kernel ignores a deploy message whose id equals the running one, so a clean build whose commit
+  already went out with other bytes (say only `@typetorch/framework` changed) gets the next revision:
+  `dev-12b63b9`, then `dev-12b63b9.r2`, `.r3`, … The build checks earlier deployments in `.typetorch/deployments.jsonl`
+  and in the registry when it is readable (without it, only this machine's log): it stamps the newest known id of the
+  commit (or the plain id), hashes the payload, keeps that id when an earlier deploy had exactly these bytes (a no-op
+  redeploy), and otherwise restamps with one above the highest revision. Log entries record the payload `sha256`; older
+  entries without one count as different. Since `BuiltAt` is stamped, every rebuild has new bytes, so in practice a
+  repeat deploy of a commit gets a new revision and only `deploy --no-build` of the same payload reuses its id.
+  `deploy --no-build` refuses a payload whose id has since gone out with other bytes (build again). Dirty builds keep
+  their hash-named ids.
+- **Asset name:** `tt-<branch>-<commit>[-r<N>][-dirty][-<channel>]` (only `[a-z0-9-]`, at most 50 characters; `-r<N>`
+  is the revision; the channel is added only when `--channel` overrides the branch's). Roblox's text filter still
+  censors some of these to `####`, unpredictably (`tt-main-a17a22c` passes, `tt-dev-59daad8` doesn't), so after the
+  deploy message is out the CLI reads the stored name back and renames a censored asset to `TypeTorch payload`. The
+  description is not censored and
   carries the full identity: `artifact=`, `commit=` (full hash), `branch=`, `channel=`, `dirty=`, `built=`,
   `sha256=`, and `ci=` in GitHub Actions.
 - **`src/shared/build.ts`** ends with a `// <build time>` line so its text changes on every build: rbxtsc's
