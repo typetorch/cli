@@ -278,6 +278,15 @@ export function verifySignedPin(trust: TrustRoots, fields: PinFields, signatures
 	return verifyCanonicalStrict(trust, text, signatures);
 }
 
+/**
+ * A key's short fingerprint, as the kernel shows it (dev menu, `api:keys()`): the first 8 hex digits of the SHA-256 of
+ * the raw 32 key bytes. "?" for something that isn't a key.
+ */
+export function keyFingerprint(publicKey: string): string {
+	if (publicKeyError(publicKey)) return "?";
+	return createHash("sha256").update(Buffer.from(publicKey, "base64")).digest("hex").slice(0, 8);
+}
+
 /** True for the public test-vector keys from plans/03. */
 export function isTestVectorKey(publicKey: string | undefined): boolean {
 	return publicKey !== undefined && TEST_VECTOR_PUBLIC_KEYS.includes(publicKey);

@@ -18,7 +18,7 @@ import { OpenCloud } from "../opencloud";
 import { REGISTRY_FALLBACK_NOTE, RegistryApi, tryReadRegistry, type RegistrySnapshot } from "../registry";
 import { stateDir } from "../state";
 import { keyFilePaths, loadSigner, type KeyRole } from "../keyfiles";
-import type { DualSigner } from "../signing";
+import { keyFingerprint, type DualSigner } from "../signing";
 
 export function project(args: ParsedArgs): Project {
 	const loaded = loadProject(flagString(args, "config"));
@@ -141,6 +141,6 @@ export function signingStatus(proj: Project, branchChannel: Channel, paths: Reco
 
 export function describeSigning(status: SigningStatus): string {
 	if (!status.required) return "unsigned (dev-channel branch)";
-	if (status.ready) return `sig (main ${status.mainKey.slice(0, 8)}...) + sigF (fallback ${status.fallbackKey.slice(0, 8)}...), made when published`;
+	if (status.ready) return `sig (main key ${keyFingerprint(status.mainKey)}) + sigF (fallback key ${keyFingerprint(status.fallbackKey)}), made when published`;
 	return `NOT READY: ${status.problem}`;
 }

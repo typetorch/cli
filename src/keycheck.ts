@@ -13,6 +13,7 @@ import type { ProjectConfig } from "./config";
 import { parseKeyList, placeKeysScript } from "./keyasset";
 import { inspectKeyFile, type KeyFileInfo, type KeyRole } from "./keyfiles";
 import { isRecord } from "./json";
+import { keyFingerprint } from "./signing";
 import type { OpenCloud } from "./opencloud";
 
 export type Status = "ok" | "warn" | "fail";
@@ -41,7 +42,8 @@ export interface KeyFacts {
 	place?: { keyAssetId?: number; fallbackPublicKey?: string; source: string } | { error: string; source: string };
 }
 
-const short = (key: string) => `${key.slice(0, 8)}...`;
+/** Keys are shown by fingerprint, like the kernel's dev menu (first 8 hex of the SHA-256 of the raw key). */
+const short = (key: string) => keyFingerprint(key);
 const list = (keys: readonly string[] | undefined) => (keys?.length ? keys.map(short).join(", ") : "(none)");
 const sameSet = (a: readonly string[] | undefined, b: readonly string[] | undefined) => {
 	const x = new Set(a ?? []);
@@ -63,7 +65,7 @@ function keyFileCheck(role: KeyRole, facts: KeyFileFacts, config: KeyFacts["conf
 		return { name, status: "warn", detail: `${facts.path} (public ${key}) doesn't match typetorch.json "fallbackPublicKey" (${config.fallbackPublicKey ?? "none"})` };
 	}
 	if (revoked) return { name, status: "warn", detail: `${facts.path} (public ${key}) is revoked in typetorch.json "revokedKeys"` };
-	return { name, status: "ok", detail: `${facts.path}, public ${key}` };
+	return { name, status: "ok", detail: `${facts.path}, public ${key} (fingerprint ${keyFingerprint(key)})` };
 }
 
 /** The signing checks, from gathered facts. Mismatches are warnings. */
