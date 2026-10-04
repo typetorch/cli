@@ -4,7 +4,7 @@ import { buildPayload, readBuiltPayload, payloadBytes, PAYLOAD_FILE, type Payloa
 import { branchNameError } from "../naming";
 import { UsageError } from "../args";
 import { dim, emitJson, formatBytes, formatSeconds, formatTimings, info, isJson, Stopwatch } from "../log";
-import { logUpload, uploadPayload } from "../upload";
+import { fixCensoredName, logUpload, uploadPayload } from "../upload";
 import { channelFlag, openCloud, project } from "./common";
 
 export const buildFlags = { branch: "string", channel: "string" } as const;
@@ -53,7 +53,9 @@ export async function uploadCommand(args: ParsedArgs) {
 	watch.set("upload", result.uploadSeconds);
 	watch.set("moderation", result.moderationSeconds);
 	const timings = watch.total();
-	logUpload(proj.root, { artifactId: meta.artifactId, assetId: result.assetId, name: result.displayName, sha256: meta.sha256, universeId: proj.config.universeId, timings });
-	if (isJson()) return emitJson({ ...meta, branch, asset: result, timings });
-	info(`uploaded ${meta.artifactId} as asset ${result.assetId} (${result.displayName}), ${result.moderationState}, ${formatSeconds(timings.total)}`);
+	const name = await fixCensoredName(oc, result);
+	if (name.renamed) info(dim(`  asset name was censored by Roblox's text filter; renamed to "${name.name}" (identity is in the description)`));
+	logUpload(proj.root, { artifactId: meta.artifactId, assetId: result.assetId, name: name.name ?? result.displayName, sha256: meta.sha256, universeId: proj.config.universeId, timings });
+	if (isJson()) return emitJson({ ...meta, branch, asset: { ...result, storedName: name.name }, timings });
+	info(`uploaded ${meta.artifactId} as asset ${result.assetId} (${name.name ?? result.displayName}), ${result.moderationState}, ${formatSeconds(timings.total)}`);
 }

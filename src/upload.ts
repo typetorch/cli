@@ -3,7 +3,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { PayloadMeta } from "./build";
 import type { ProjectConfig } from "./config";
-import { seconds } from "./log";
+import { seconds, warn } from "./log";
 import { assetDescription, assetDisplayName, branchChannel, ciRunUrl } from "./naming";
 import type { OpenCloud } from "./opencloud";
 
@@ -48,6 +48,8 @@ export class ModerationError extends Error {
 export interface UploadResult {
 	assetId: number;
 	displayName: string;
+	/** The name Roblox stored (after its text filter), when the operation response has it. */
+	storedName?: string;
 	description: string;
 	moderationState: string;
 	uploadSeconds: number;
@@ -93,7 +95,36 @@ export async function uploadPayload(
 	const moderationSeconds = seconds(performance.now() - moderationStarted);
 	options.onStage?.("moderation", moderationSeconds, state ?? "unknown");
 	if (state !== "Approved") throw new ModerationError(assetId, state, timedOut);
-	return { assetId, displayName, description, moderationState: state, uploadSeconds, moderationSeconds };
+	const storedName = typeof operation?.response?.displayName === "string" ? operation.response.displayName : undefined;
+	return { assetId, displayName, description, storedName, moderationState: state, uploadSeconds, moderationSeconds };
+}
+
+/** A name Roblox's text filter has always let through (2026-10-04). */
+export const FALLBACK_ASSET_NAME = "TypeTorch payload";
+
+/**
+ * Roblox's text filter turns some names into "####" (seen: tt-dev-59daad8, tt-dev-c3698d4, even "tt dev"; while
+ * tt-main-a17a22c passed), unpredictably. The identity is in the description either way; a censored name is renamed
+ * to FALLBACK_ASSET_NAME so the Creator Hub list stays readable. Run it after the deploy message (off the critical
+ * path). Returns the final name, or undefined when it couldn't tell.
+ */
+export async function fixCensoredName(oc: OpenCloud, upload: UploadResult): Promise<{ name?: string; renamed: boolean }> {
+	try {
+		const stored =
+			upload.storedName ??
+			(await oc.call("GET", `/assets/v1/assets/${upload.assetId}?readMask=displayName`))?.displayName;
+		// Our names never contain "#", so any "#" is the filter's.
+		if (typeof stored !== "string" || !stored.includes("#")) return { name: stored, renamed: false };
+		const form = new FormData();
+		form.append("request", JSON.stringify({ assetId: upload.assetId, displayName: FALLBACK_ASSET_NAME }));
+		const op = await oc.call("PATCH", `/assets/v1/assets/${upload.assetId}?updateMask=displayName`, { body: form });
+		const operationId = op?.operationId ?? String(op?.path ?? "").split("/").pop();
+		if (operationId && !op?.done) await oc.waitForOperation(operationId, 60);
+		return { name: FALLBACK_ASSET_NAME, renamed: true };
+	} catch (error) {
+		warn(`could not check or fix the asset name: ${(error as Error).message}`);
+		return { renamed: false };
+	}
 }
 
 export function logUpload(root: string, record: Record<string, unknown>) {

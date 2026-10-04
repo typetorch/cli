@@ -73,9 +73,16 @@ Every command takes `--json` (one JSON document on stdout; human lines go to std
   `<channel>-<commit>-dirty-<sha6>` for a dirty tree (sha6 = first 6 hex of the sha256 of the payload stamped with
   the provisional id `<channel>-<commit>-dirty`).
 - **Asset name:** `tt-<branch>-<commit>[-dirty][-<channel>]` (only `[a-z0-9-]`, at most 50 characters; the channel is
-  added only when `--channel` overrides the branch's). Roblox's text filter censored the older
-  `TT <project> <branch>@<commit>` names. The description carries the full identity: `artifact=`, `commit=` (full
-  hash), `branch=`, `channel=`, `dirty=`, `built=`, `sha256=` and `ci=` in GitHub Actions.
+  added only when `--channel` overrides the branch's). Roblox's text filter still censors some of these to `####`,
+  unpredictably (`tt-main-a17a22c` passes, `tt-dev-59daad8` doesn't), so after the deploy message is out the CLI reads
+  the stored name back and renames a censored asset to `TypeTorch payload`. The description is not censored and
+  carries the full identity: `artifact=`, `commit=` (full hash), `branch=`, `channel=`, `dirty=`, `built=`,
+  `sha256=`, and `ci=` in GitHub Actions.
+- **`src/shared/build.ts`** ends with a `// <build time>` line so its text changes on every build: rbxtsc's
+  incremental compile skips unchanged files, which would keep an old `$git()` commit compiled in. The build checks the
+  compiled file carries the current commit. Repo build scripts that write build.ts themselves should skip it when
+  `TYPETORCH_SKIP_BUILD_INFO=1` (the CLI sets it when it runs `bun run build`).
+- **Payload root attributes:** `ArtifactId`, `KernelApi` (1), `Channel`, `Commit`, `BuiltAt` (unix seconds).
 - A prod-channel branch refuses a dev-channel or dirty artifact unless `--force`.
 
 ### Deploy message

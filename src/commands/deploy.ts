@@ -10,7 +10,7 @@ import { bold, dim, emitJson, formatBytes, formatSeconds, formatTimings, info, i
 import { branchChannel, branchNameError, strictest, type Channel } from "../naming";
 import { DEPLOY_TOPIC, deployMessage } from "../opencloud";
 import { assertNoForeignDraft, tryReadRegistry, type RegistrySnapshot } from "../registry";
-import { assetNaming, uploadPayload } from "../upload";
+import { assetNaming, fixCensoredName, uploadPayload } from "../upload";
 import { channelFlag, openCloud, project, registryApi, warnRegistryFallback, withLocal } from "./common";
 import { describeBuild } from "./build";
 import { makeEntry, registryMessage, release } from "./release";
@@ -167,8 +167,14 @@ export async function deployCommand(args: ParsedArgs) {
 		assetName: displayName,
 		watch,
 	});
+	// Command start -> message published: the deploy latency that matters (servers swap ~1-2 s later).
 	const timings = watch.total();
-	if (isJson()) return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, timings });
+	// After the message, off the critical path: rename the asset if Roblox's text filter censored its name.
+	const name = await fixCensoredName(oc!, upload);
+	if (name.renamed) info(dim(`  asset name was censored by Roblox's text filter; renamed to "${name.name}" (identity is in the description)`));
+	if (isJson()) {
+		return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, assetName: name.name, timings });
+	}
 	info(
 		bold(`deployed #${result.entry.seq} ${branch}@${meta.commit || "uncommitted"}${meta.dirty ? "*" : ""} -> ${meta.artifactId} (asset ${upload.assetId}) in ${formatSeconds(timings.total)}`),
 	);
