@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { deployMessage, encodeDeployMessage, encodeRekeyMessage } from "../src/opencloud";
+import { deployMessage, encodeDeployMessage, encodePinMessage, encodeRekeyMessage, pinMessage } from "../src/opencloud";
 import {
+	canonicalPinString,
 	canonicalString,
 	generateSigningKey,
 	isTestVectorKey,
@@ -9,12 +10,15 @@ import {
 	publicKeyError,
 	signDual,
 	signFields,
+	signPinDual,
 	TEST_VECTOR_FALLBACK_LABEL,
 	TEST_VECTOR_FALLBACK_SEED,
 	TEST_VECTOR_MAIN_SEED,
 	TEST_VECTOR_PUBLIC_KEYS,
 	verifyFields,
 	verifySigned,
+	verifySignedPin,
+	type PinFields,
 	type SignedFields,
 } from "../src/signing";
 
@@ -117,27 +121,108 @@ describe("canonical string and test vectors (plans/03)", () => {
 	});
 });
 
-describe("the kernel's rule: sig with a trusted main key OR sigF with the fallback key (plans/03)", () => {
+describe("the kernel's STRICT rule (plans/03): sig once the key asset has loaded, else sigF", () => {
 	const { fields, sig, sigF } = VECTOR.prod;
-	const trust = { publicKeys: [VECTOR.main.publicKey], revokedKeys: [] as string[], fallbackPublicKey: VECTOR.fallback.publicKey };
-	test("either signature is enough", () => {
-		expect(verifySigned(trust, fields, { sig, sigF })).toBe("sig");
-		expect(verifySigned(trust, fields, { sigF })).toBe("sigF");
-		expect(verifySigned({ ...trust, publicKeys: [] }, fields, { sig, sigF })).toBe("sigF"); // key asset never loaded
-		expect(verifySigned({ ...trust, fallbackPublicKey: undefined }, fields, { sig })).toBe("sig");
+	const loaded = { assetLoaded: true, publicKeys: [VECTOR.main.publicKey], revokedKeys: [] as string[], fallbackPublicKey: VECTOR.fallback.publicKey };
+	const never = { assetLoaded: false, publicKeys: [] as string[], revokedKeys: [] as string[], fallbackPublicKey: VECTOR.fallback.publicKey };
+	test("key asset loaded: only sig counts, sigF is ignored", () => {
+		expect(verifySigned(loaded, fields, { sig, sigF })).toBe("sig");
+		expect(verifySigned(loaded, fields, { sigF })).toBeUndefined();
+		expect(verifySigned({ ...loaded, publicKeys: [] }, fields, { sig, sigF })).toBeUndefined();
+		// revoked: untrusted even if still listed in PublicKeys, and sigF doesn't rescue it
+		expect(verifySigned({ ...loaded, revokedKeys: [VECTOR.main.publicKey] }, fields, { sig, sigF })).toBeUndefined();
+		// after a rotation the old head is invalid (keys rotate re-signs heads), the re-signed one is valid
+		const fresh = parseSigningKey(generateSigningKey().seed);
+		const rotated = { ...loaded, publicKeys: [fresh.publicKey], revokedKeys: [VECTOR.main.publicKey] };
+		expect(verifySigned(rotated, fields, { sig, sigF })).toBeUndefined();
+		const resigned = { ...fields, s: fields.s + 1, r: "resign" as const };
+		expect(verifySigned(rotated, resigned, { sig: signFields(fresh, resigned) })).toBe("sig");
 	});
-	test("after a rotation (main revoked) old heads stay valid through sigF; revoking both makes them invalid", () => {
-		const rotated = { publicKeys: [generateSigningKey().publicKey], revokedKeys: [VECTOR.main.publicKey], fallbackPublicKey: VECTOR.fallback.publicKey };
-		expect(verifySigned(rotated, fields, { sig, sigF })).toBe("sigF");
-		expect(verifySigned({ ...rotated, revokedKeys: [VECTOR.main.publicKey, VECTOR.fallback.publicKey] }, fields, { sig, sigF })).toBeUndefined();
-		// a revoked key stays untrusted even if it is still listed in PublicKeys
-		expect(verifySigned({ ...trust, revokedKeys: [VECTOR.main.publicKey], fallbackPublicKey: undefined }, fields, { sig })).toBeUndefined();
+	test("key asset never loaded: only sigF against the baked fallback key counts", () => {
+		expect(verifySigned(never, fields, { sig, sigF })).toBe("sigF");
+		expect(verifySigned(never, fields, { sig })).toBeUndefined();
+		expect(verifySigned({ ...never, fallbackPublicKey: undefined }, fields, { sig, sigF })).toBeUndefined();
+		expect(verifySigned({ ...never, revokedKeys: [VECTOR.fallback.publicKey] }, fields, { sig, sigF })).toBeUndefined();
 	});
 	test("unsigned, swapped or forged signatures are invalid", () => {
-		expect(verifySigned(trust, fields, {})).toBeUndefined();
-		expect(verifySigned(trust, fields, { sig: sigF, sigF: sig })).toBeUndefined();
-		const forger = parseSigningKey(generateSigningKey().seed);
-		expect(verifySigned(trust, fields, { sig: signFields(forger, fields), sigF: signFields(forger, fields) })).toBeUndefined();
+		for (const trust of [loaded, never]) {
+			expect(verifySigned(trust, fields, {})).toBeUndefined();
+			expect(verifySigned(trust, fields, { sig: sigF, sigF: sig })).toBeUndefined();
+			const forger = parseSigningKey(generateSigningKey().seed);
+			expect(verifySigned(trust, fields, { sig: signFields(forger, fields), sigF: signFields(forger, fields) })).toBeUndefined();
+		}
+	});
+});
+
+describe("re-signed heads (r = resign, plans/03 vector 4)", () => {
+	const v = {
+		fields: { b: "prod", a: 138576381221184, i: "12b63b9-8be210", s: 20, c: "12b63b9", ch: "prod", t: 1759580180000, r: "resign" } as SignedFields,
+		canonical: "tt1\nprod\n138576381221184\n12b63b9-8be210\n20\n12b63b9\nprod\n1759580180000\nresign",
+		sig: "HHni5U92bF9gQOYzm4/yPHi2fw0d6kqEt/zem9XHGOBcdfDnh9ty8Djl1NDPVuzlNx9xr60dzQNogtNyoa+pAw==",
+		sigF: "YTwE+4JbN9R63AxJCSjmfp/rNKCqV6ORZjvcr5lYB9Zv7FLg09jofDDYodkKjyYfKLCurS1G9oRlKPPDqMIoAw==",
+	};
+	test("canonical string ends with resign; both signatures; the message carries r: \"resign\"", () => {
+		expect(canonicalString(v.fields)).toBe(v.canonical);
+		expect(signDual(signer, v.fields)).toEqual({ sig: v.sig, sigF: v.sigF });
+		const message = deployMessage({ b: "prod", a: 138576381221184, i: "12b63b9-8be210", s: 20, c: "12b63b9", ch: "prod", t: 1759580180000, resign: true }, signer);
+		expect(message).toMatchObject({ r: "resign", sig: v.sig, sigF: v.sigF });
+		expect(verifyFields(VECTOR.main.publicKey, { ...v.fields, r: undefined }, v.sig)).toBe(false);
+		expect(verifyFields(VECTOR.main.publicKey, { ...v.fields, r: 1 }, v.sig)).toBe(false);
+	});
+});
+
+describe("signed pins (plans/03 \"Signed pins\")", () => {
+	const PIN = {
+		jobs: {
+			fields: { b: "prod", a: 134192491895548, j: ["5f0c1a2b-0000-4000-8000-000000000001", "5f0c1a2b-0000-4000-8000-000000000002"], by: 12345, t: 1759580240000 } as PinFields,
+			canonical: "tt1pin\nprod\n134192491895548\n5f0c1a2b-0000-4000-8000-000000000001,5f0c1a2b-0000-4000-8000-000000000002\n\n12345\n1759580240000\n",
+			sig: "h3gbOZ3rrFWZA7u/7RdBf8VmwaPzahnR6r5E1Tx67MUWgbruDpZpER1iosmQdfvbfXwAfwPwfiUil9xTY2g+Cg==",
+			sigF: "4VDOk9Uvr2fA6gBZaBnR5cNdnSQCFm/eXlO6HPapckNEAu0RfdHLbG9/ppmhJowp7p9RMe3u0xAtljUjuIQrAQ==",
+			message:
+				'{"j":["5f0c1a2b-0000-4000-8000-000000000001","5f0c1a2b-0000-4000-8000-000000000002"],"a":134192491895548,"b":"prod","by":12345,"t":1759580240000,"sig":"h3gbOZ3rrFWZA7u/7RdBf8VmwaPzahnR6r5E1Tx67MUWgbruDpZpER1iosmQdfvbfXwAfwPwfiUil9xTY2g+Cg==","sigF":"4VDOk9Uvr2fA6gBZaBnR5cNdnSQCFm/eXlO6HPapckNEAu0RfdHLbG9/ppmhJowp7p9RMe3u0xAtljUjuIQrAQ=="}',
+		},
+		pct: {
+			fields: { b: "prod", a: 134192491895548, pct: 10, by: 12345, t: 1759580300000 } as PinFields,
+			canonical: "tt1pin\nprod\n134192491895548\n\n10\n12345\n1759580300000\n",
+			sig: "/DY1Wv/FusH1mnlcPjCYR+ps4O5IvIRUyhpAjOO9WYbMYyZZMhHSBRw1fJjgmU/H+RdGJBHHtZ/BahrphqRuBw==",
+			sigF: "gkELYitaulVNd/oAVtLCfXAgJdTLwNTqlysNDU5iISPg61/6hDEnVRBqDOpzCx1SWuKWmH4yVZcKWLMrv5d7Cw==",
+		},
+		unpinAll: {
+			fields: { b: "prod", pct: 100, by: 12345, t: 1759580360000, unpin: true } as PinFields,
+			canonical: "tt1pin\nprod\n\n\n100\n12345\n1759580360000\n1",
+			sig: "ZQjBKNEzYxD4e6oms1hERX/C7KC5wG6oTk3Vu/WfWEOvrPAWeFhMyfLxNgh/ZJ2Zd7eJb6PkHvMFAE2BXoHqBg==",
+			sigF: "3eF+apTrzSXaxKfGkCVMUYPj5vkCwlA1JNf9MjZkVf4ivjTlmBiX7gZ0TIyNEBqCsbNMjnU9vfCzEFs2/5H1BQ==",
+		},
+	};
+	test("canonical strings and signatures for the vectors", () => {
+		for (const v of Object.values(PIN)) {
+			expect(canonicalPinString(v.fields)).toBe(v.canonical);
+			expect(signPinDual(signer, v.fields)).toEqual({ sig: v.sig, sigF: v.sigF });
+		}
+	});
+	test("the full message of pin vector 1 (field order j, pct, a, b, by, t, unpin, sig, sigF)", () => {
+		const message = pinMessage({ ...PIN.jobs.fields }, signer);
+		expect(encodePinMessage(message)).toBe(PIN.jobs.message);
+		expect(Object.keys(pinMessage({ ...PIN.unpinAll.fields }, signer))).toEqual(["pct", "b", "by", "t", "unpin", "sig", "sigF"]);
+		expect(JSON.stringify(pinMessage({ b: "dev", a: 5, pct: 10, by: 1, t: 2 }))).toBe('{"pct":10,"a":5,"b":"dev","by":1,"t":2}');
+	});
+	test("the strict rule applies to pins too; any changed field (or the job order) breaks them", () => {
+		const loaded = { assetLoaded: true, publicKeys: [VECTOR.main.publicKey], revokedKeys: [] as string[], fallbackPublicKey: VECTOR.fallback.publicKey };
+		const { fields, sig, sigF } = PIN.jobs;
+		expect(verifySignedPin(loaded, fields, { sig, sigF })).toBe("sig");
+		expect(verifySignedPin({ ...loaded, assetLoaded: false, publicKeys: [] }, fields, { sig, sigF })).toBe("sigF");
+		expect(verifySignedPin(loaded, { ...fields, j: [...fields.j!].reverse() }, { sig })).toBeUndefined();
+		for (const changed of [{ b: "dev" }, { a: 1 }, { pct: 5 }, { by: 1 }, { t: fields.t + 1 }, { unpin: true as const }]) {
+			expect(verifySignedPin(loaded, { ...fields, ...changed }, { sig })).toBeUndefined();
+		}
+		// a deploy signature never verifies as a pin (different version tag)
+		expect(verifySignedPin(loaded, fields, { sig: VECTOR.prod.sig })).toBeUndefined();
+		expect(() => canonicalPinString({ ...fields, j: ["bad,id"] })).toThrow(/JobId/);
+	});
+	test("a signed pin with 15 JobIds and the longest branch fits in 1 KiB; one with 30 is refused (the pin command splits)", () => {
+		const jobs = (n: number) => Array.from({ length: n }, (_, i) => `5f0c1a2b-0000-4000-8000-${String(i).padStart(12, "0")}`);
+		expect(new TextEncoder().encode(encodePinMessage(pinMessage({ b: "b".repeat(64), a: 999999999999999, j: jobs(15), by: 999999999999, t: 1759580240000 }, signer))).length).toBeLessThanOrEqual(1024);
+		expect(() => encodePinMessage(pinMessage({ b: "prod", a: 1, j: jobs(30), by: 1 }, signer))).toThrow(/1024-byte/);
 	});
 });
 

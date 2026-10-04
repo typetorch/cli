@@ -21,7 +21,8 @@ import { keysCommand, keysFlags } from "../src/commands/keys";
 import { promoteArguments } from "../src/commands/promote";
 import { messageFor, release, SIGNATURE_PLACEHOLDER, SigningRequiredError } from "../src/commands/release";
 import { loadProject, type Project } from "../src/config";
-import { readLocalLog } from "../src/deployments";
+import { appendLocalLog, readLocalLog } from "../src/deployments";
+import { readProposals } from "../src/proposals";
 import { redact, Settings, useSettings } from "../src/env";
 import { scriptedInteraction } from "../src/interact";
 import { keyAssetRbxm, parseKeyList, readKeyAssetRbxm } from "../src/keyasset";
@@ -111,6 +112,8 @@ function mockOpenCloud(options: { patchFails?: boolean; assetId?: number } = {})
 			return json(200, { done: true, response: { assetId: String(assetId), revisionId: "2", moderationResult: { moderationState: "Approved" } } });
 		}
 		if (method === "POST" && url.pathname === "/cloud/v2/universes/42:publishMessage") return json(200, {});
+		// the registry: no universe:read on this key, so releases fall back to the local log
+		if (url.pathname.startsWith("/creator-configs-public-api/")) return json(403, { message: "Scope not authorized" });
 		return json(404, { message: `not mocked: ${method} ${url.pathname}` });
 	}) as typeof fetch;
 	return calls;
@@ -333,6 +336,101 @@ describe("keys init --fallback", () => {
 	});
 });
 
+describe("keys rotate re-signs the current prod heads; keys resign", () => {
+	const head = (branch: string, seq: number, channel: "prod" | "dev" = "prod") => ({
+		seq,
+		at: `2026-10-04T12:00:0${seq}.000Z`,
+		action: "deploy" as const,
+		branch,
+		channel,
+		artifactId: `12b63b9-00000${seq}`,
+		assetId: 900000000 + seq,
+		commit: "12b63b9",
+		commitHash: "12b63b9".padEnd(40, "0"),
+		dirty: false,
+		by: "me",
+		universeId: 42,
+	});
+	function withHeads(approval: "none" | "all") {
+		const dir = keyDir();
+		const main = newKeyFile("main", 42);
+		const fallback = newKeyFile("fallback", 42);
+		writeKeyFile(paths(dir).main, main);
+		writeKeyFile(paths(dir).fallback, fallback);
+		const proj = project({ signingPublicKeys: [main.publicKey], fallbackPublicKey: fallback.publicKey, keyAssetId: 555, approval, channels: { prod: "prod", staging: "prod" } });
+		const state = join(proj.root, ".typetorch");
+		appendLocalLog(state, head("prod", 1));
+		appendLocalLog(state, head("staging", 2));
+		appendLocalLog(state, head("dev", 3, "dev"));
+		appendLocalLog(state, head("prod", 4));
+		return { dir, main, fallback, proj, state };
+	}
+	const deployMessages = (calls: Call[]) => calls.filter((c) => c.json?.topic === "TypeTorch/deploy").map((c) => JSON.parse(c.json.message));
+	const keyFlags = (dir: string) => ["--key-file", paths(dir).main, "--fallback-key-file", paths(dir).fallback];
+
+	test("approval none: each prod-channel head goes out again: same artifact and asset, new seq, r = resign, signed with the NEW key", async () => {
+		const { dir, main, proj, state } = withHeads("none");
+		const calls = mockOpenCloud();
+		await captureOutput(() => keys(proj, ["rotate", "--yes", ...keyFlags(dir)]));
+		const fresh = reload(proj).config.signingPublicKeys![0];
+		const messages = deployMessages(calls);
+		expect(messages.map((m) => [m.b, m.a, m.i, m.s, m.r])).toEqual([
+			["prod", 900000004, "12b63b9-000004", 5, "resign"],
+			["staging", 900000002, "12b63b9-000002", 6, "resign"],
+		]);
+		const trust = { assetLoaded: true, publicKeys: [fresh], revokedKeys: [main.publicKey] };
+		for (const m of messages) expect(verifySigned(trust, m, m)).toBe("sig");
+		// the dev-channel head is left alone; the old prod head no longer verifies under the rotated key set
+		expect(messages.some((m) => m.b === "dev")).toBe(false);
+		const log = readLocalLog(state, 42);
+		expect(log.filter((e) => e.action === "resign").map((e) => [e.branch, e.seq, e.fromArtifactId, e.r])).toEqual([
+			["prod", 5, "12b63b9-000004", "resign"],
+			["staging", 6, "12b63b9-000002", "resign"],
+		]);
+		// the order: PATCH the key asset, the rekey hint, then the re-signed heads
+		const order = calls.map((c) => (c.method === "PATCH" ? "patch" : c.json?.topic)).filter(Boolean);
+		expect(order).toEqual(["patch", "TypeTorch/rekey", "TypeTorch/deploy", "TypeTorch/deploy"]);
+	});
+	test("approval all, nobody at a terminal: the re-signs become proposals; approve publishes them signed", async () => {
+		const { dir, proj, state } = withHeads("all");
+		const calls = mockOpenCloud();
+		await captureOutput(() => keys(proj, ["rotate", "--yes", ...keyFlags(dir)]));
+		expect(deployMessages(calls)).toEqual([]);
+		const pending = readProposals(state).filter((p) => p.status === "pending");
+		expect(pending.map((p) => [p.proposal.kind, p.proposal.branch, p.proposal.artifact.assetId])).toEqual([
+			["resign", "prod", 900000004],
+			["resign", "staging", 900000002],
+		]);
+		const published: string[] = [];
+		const oc = { publishMessage: async (_u: number, _t: string, m: string) => void published.push(m) } as unknown as OpenCloud;
+		const fresh = reload(proj);
+		await captureOutput(() => approveProposal(fresh, pending[0], { io: scriptedInteraction({ answers: ["y"] }), oc, noRegistry: true, keyPaths: paths(dir) }));
+		const message = JSON.parse(published[0]);
+		expect(message).toMatchObject({ b: "prod", a: 900000004, r: "resign", s: 5 });
+		expect(verifySigned({ assetLoaded: true, publicKeys: fresh.config.signingPublicKeys!, revokedKeys: fresh.config.revokedKeys! }, message, message)).toBe("sig");
+	});
+	test("a re-sign proposal whose branch moved since is refused", async () => {
+		const { dir, proj, state } = withHeads("all");
+		mockOpenCloud();
+		await captureOutput(() => keys(proj, ["resign", ...keyFlags(dir)]));
+		const pending = readProposals(state).find((p) => p.status === "pending" && p.proposal.branch === "prod")!;
+		appendLocalLog(state, head("prod", 9));
+		const oc = { publishMessage: async () => {} } as unknown as OpenCloud;
+		await expect(approveProposal(reload(proj), pending, { io: scriptedInteraction({ answers: ["y"] }), oc, noRegistry: true, keyPaths: paths(dir) })).rejects.toThrow(/moved since/);
+	});
+	test("keys resign alone re-signs the live prod heads with the current keys", async () => {
+		const { dir, main, proj } = withHeads("none");
+		const calls = mockOpenCloud();
+		await captureOutput(() => keys(proj, ["resign", ...keyFlags(dir)]));
+		const messages = deployMessages(calls);
+		expect(messages.map((m) => [m.b, m.s, m.r])).toEqual([
+			["prod", 5, "resign"],
+			["staging", 6, "resign"],
+		]);
+		expect(verifySigned({ assetLoaded: true, publicKeys: [main.publicKey], revokedKeys: [] }, messages[0], messages[0])).toBe("sig");
+	});
+});
+
 describe("keys rotate", () => {
 	function rotated() {
 		const dir = keyDir();
@@ -412,7 +510,7 @@ describe("prod-only signing in releases", () => {
 		const proj = project({ signingPublicKeys: [main.publicKey], fallbackPublicKey: fallback.publicKey, keyAssetId: 555, approval: "none" });
 		const published: string[] = [];
 		const oc = { publishMessage: async (_u: number, _t: string, m: string) => void published.push(m) } as unknown as OpenCloud;
-		const trust = { publicKeys: [main.publicKey], revokedKeys: [], fallbackPublicKey: fallback.publicKey };
+		const trust = { assetLoaded: true, publicKeys: [main.publicKey], revokedKeys: [], fallbackPublicKey: fallback.publicKey };
 		return { dir, main, fallback, proj, oc, published, trust };
 	}
 	const request = (patch: Partial<ReleaseRequest> = {}): ReleaseRequest => ({ kind: "deploy", branch: "prod", branchChannel: "prod", artifact, force: false, by: "me", ...patch });
@@ -435,7 +533,7 @@ describe("prod-only signing in releases", () => {
 		const message = JSON.parse(published[0]);
 		expect(Object.keys(message)).toEqual(["b", "a", "i", "s", "c", "ch", "t", "sig", "sigF"]);
 		expect(verifySigned(trust, message, message)).toBe("sig");
-		expect(verifySigned({ ...trust, publicKeys: [] }, message, message)).toBe("sigF");
+		expect(verifySigned({ ...trust, assetLoaded: false, publicKeys: [] }, message, message)).toBe("sigF");
 		const head = written.branches.prod;
 		expect(head).toMatchObject({ sig: message.sig, sigF: message.sigF, t: message.t });
 		// the head verifies exactly like the message: b = its key, a/i/s/c/ch/t/r from the head

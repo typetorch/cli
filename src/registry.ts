@@ -39,8 +39,8 @@ export interface BranchHead {
 	by: string;
 	/** The deploy message's `t` (unix ms). */
 	t?: number;
-	/** 1 when the message was a rollback. */
-	r?: 1;
+	/** 1 when the message was a rollback; "resign" for a head re-signed by `keys rotate`. */
+	r?: 1 | "resign";
 	/** Prod-channel branches: the message's signatures (main and fallback key). */
 	sig?: string;
 	sigF?: string;
@@ -51,7 +51,8 @@ export interface BranchHead {
 export interface RegistryDeployment {
 	seq: number;
 	at: string;
-	action: "deploy" | "rollback" | "promote";
+	/** "resign": `keys rotate` re-signed the branch's current head (same artifact, new seq). */
+	action: "deploy" | "rollback" | "promote" | "resign";
 	branch: string;
 	channel: Channel;
 	artifactId: string;
@@ -66,7 +67,7 @@ export interface RegistryDeployment {
 	sources?: BuildSources;
 	/** The deploy message's `t`, `r`, `sig` and `sigF` (kept on the branch head; not in the registry's deployments list). */
 	t?: number;
-	r?: 1;
+	r?: 1 | "resign";
 	sig?: string;
 	sigF?: string;
 }
@@ -132,7 +133,7 @@ export function headFromDeployment(entry: RegistryDeployment): BranchHead {
 		by: entry.by,
 	};
 	if (entry.t !== undefined) head.t = entry.t;
-	if (entry.r === 1) head.r = 1;
+	if (entry.r !== undefined) head.r = entry.r;
 	if (entry.sig) head.sig = entry.sig;
 	if (entry.sigF) head.sigF = entry.sigF;
 	if (entry.sources) head.sources = entry.sources;

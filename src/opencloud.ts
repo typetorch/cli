@@ -6,7 +6,7 @@
 import { debug } from "./log";
 import { redact } from "./env";
 import type { Channel } from "./naming";
-import { signDual, type DualSigner } from "./signing";
+import { RESIGN, signDual, signPinDual, type DualSigner, type PinFields } from "./signing";
 
 export const API = "https://apis.roblox.com";
 
@@ -227,6 +227,8 @@ export class OpenCloud {
 export const DEPLOY_TOPIC = "TypeTorch/deploy";
 /** Tells servers to re-read the key asset now (plans/03 "Rekey hint"): `{"t": unixMs}`, unsigned, a hint only. */
 export const REKEY_TOPIC = "TypeTorch/rekey";
+/** Experiment pins (kernel 0.2.3; signed for prod-channel branches, plans/03 "Signed pins"). */
+export const PIN_TOPIC = "TypeTorch/pin";
 export const MESSAGE_LIMIT = 1024;
 
 /**
@@ -251,8 +253,8 @@ export interface DeployMessage {
 	ch: Channel;
 	/** Sent at (unix ms, publisher clock). */
 	t: number;
-	/** 1 for rollbacks. */
-	r?: 1;
+	/** 1 for rollbacks; "resign" for a head re-signed after `keys rotate` (same artifact, new seq, no swap). */
+	r?: 1 | typeof RESIGN;
 	/** Prod only: base64 Ed25519 signature by the main key. */
 	sig?: string;
 	/** Prod only: base64 Ed25519 signature by the fallback key. */
@@ -260,7 +262,10 @@ export interface DeployMessage {
 }
 
 /** Builds a deploy message; signed with both keys when a signer is given (prod-channel branches only). */
-export function deployMessage(input: Omit<DeployMessage, "t" | "r" | "sig" | "sigF"> & { rollback?: boolean; t?: number }, signer?: DualSigner): DeployMessage {
+export function deployMessage(
+	input: Omit<DeployMessage, "t" | "r" | "sig" | "sigF"> & { rollback?: boolean; resign?: boolean; t?: number },
+	signer?: DualSigner,
+): DeployMessage {
 	const message: DeployMessage = {
 		b: input.b,
 		a: input.a,
@@ -271,8 +276,39 @@ export function deployMessage(input: Omit<DeployMessage, "t" | "r" | "sig" | "si
 		t: input.t ?? Date.now(),
 	};
 	if (input.rollback) message.r = 1;
+	else if (input.resign) message.r = RESIGN;
 	if (signer) Object.assign(message, signDual(signer, message));
 	return message;
+}
+
+/** The `TypeTorch/pin` message: kernel 0.2.3's fields, in this order, plus `sig`/`sigF` for prod-channel branches. */
+export interface PinMessage extends PinFields {
+	sig?: string;
+	sigF?: string;
+}
+
+/** Builds a pin message (absent fields are left out); signed with both keys when a signer is given. */
+export function pinMessage(input: Omit<PinFields, "t"> & { t?: number }, signer?: DualSigner): PinMessage {
+	const message: PinMessage = { b: input.b, by: input.by, t: input.t ?? Date.now() };
+	const ordered: PinMessage = {
+		...(input.j !== undefined ? { j: [...input.j] } : {}),
+		...(input.pct !== undefined ? { pct: input.pct } : {}),
+		...(input.a !== undefined ? { a: input.a } : {}),
+		b: message.b,
+		by: message.by,
+		t: message.t,
+		...(input.unpin ? { unpin: true as const } : {}),
+	};
+	if (signer) Object.assign(ordered, signPinDual(signer, ordered));
+	return ordered;
+}
+
+/** The pin message's JSON text; throws over MessagingService's 1 KiB limit. */
+export function encodePinMessage(message: PinMessage): string {
+	const text = JSON.stringify(message);
+	const size = new TextEncoder().encode(text).length;
+	if (size > MESSAGE_LIMIT) throw new Error(`the pin message is ${size} bytes, over MessagingService's ${MESSAGE_LIMIT}-byte limit (list fewer servers, or use --pct)`);
+	return text;
 }
 
 /** The rekey hint's text. */

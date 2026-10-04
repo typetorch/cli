@@ -22,7 +22,7 @@ export const PROPOSALS_LOG = "proposals.jsonl";
 export const PROPOSAL_TTL_MS = 24 * 60 * 60 * 1000;
 export const PROPOSER_PATTERN = /^[a-z0-9][a-z0-9/._-]{0,47}$/;
 
-export type ProposalKind = "deploy" | "rollback" | "promote";
+export type ProposalKind = "deploy" | "rollback" | "promote" | "resign";
 export type ProposalStatus = "pending" | "approved" | "rejected" | "expired";
 
 export interface ProposalArtifact {

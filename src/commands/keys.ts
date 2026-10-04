@@ -12,25 +12,36 @@
  *     --force               replaces the fallback pair: the old public key is first added to the key asset's
  *                           RevokedKeys (PATCH + rekey hint); then run `typetorch kernel deploy`.
  *   keys rotate             a new MAIN pair: the key asset gets a new version trusting only it and revoking the old
- *                           main key(s), the key file is replaced, typetorch.json updated, and the rekey hint
- *                           (TypeTorch/rekey) is published. For a lost or leaked main key; no restart.
+ *                           main key(s), the key file is replaced, typetorch.json updated, the rekey hint
+ *                           (TypeTorch/rekey) is published, and every prod-channel branch's CURRENT head is re-signed
+ *                           (`keys resign`). For a lost or leaked main key; no restart.
+ *   keys resign             republishes each prod-channel branch's current head as a fresh signed deploy message:
+ *                           same artifact and asset, a NEW seq, r = "resign" (kernels update the head, no swap). Under
+ *                           the strict rule a head signed by a revoked main key is no longer valid, so this keeps new
+ *                           servers booting. Goes through the approval policy like any prod publish.
  */
 import { existsSync, renameSync, rmSync } from "node:fs";
 import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args";
 import { updateProjectConfig, type Project } from "../config";
 import { registerSecret } from "../env";
+import { gitInfo } from "../git";
 import { interaction, NotInteractiveError, type Interaction } from "../interact";
 import { contentFromConfig, createKeyAsset, mergeKeys, publishRekey, REKEY_TOPIC, updateKeyAsset, type KeyAssetContent } from "../keyasset";
 import { assertOutsideRepos, KeyFileError, keyFilePaths, newKeyFile, readKeyFile, writeKeyFile, type KeyRole } from "../keyfiles";
-import { bold, dim, emitJson, info, isJson, warn } from "../log";
+import { bold, dim, emitJson, info, isJson, Stopwatch, warn } from "../log";
+import { branchChannel, strictest } from "../naming";
 import type { OpenCloud } from "../opencloud";
-import { KEY_FILE_FLAGS, openCloud, project } from "./common";
+import { finishRelease, modeFor, type ReleaseRequest } from "./approve";
+import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common";
 
 export const keysFlags = {
 	fallback: "boolean",
 	force: "boolean",
 	yes: "boolean",
 	"moderation-timeout": "string",
+	"no-registry": "boolean",
+	propose: "boolean",
+	"proposed-by": "string",
 	...KEY_FILE_FLAGS,
 } as const;
 
@@ -45,9 +56,12 @@ export interface KeysDeps {
 
 export interface KeysContext {
 	proj: Project;
+	/** The command line (the approval flags for re-signed heads). */
+	args: ParsedArgs;
 	paths: Record<KeyRole, string>;
 	force: boolean;
 	yes: boolean;
+	noRegistry: boolean;
 	moderationTimeout: number;
 	deps: KeysDeps;
 }
@@ -280,29 +294,114 @@ export async function rotateMain(ctx: KeysContext) {
 	updateProjectConfig(proj, { signingPublicKeys: [fresh.publicKey], revokedKeys });
 	moderationNote(asset.moderation, asset.assetId);
 	const hint = await rekey(ctx);
-	if (isJson()) {
-		return emitJson({ status: "rotated", keyFile: path, publicKey: fresh.publicKey, revokedKeys, keyAsset: asset, rekey: hint, config: proj.configPath });
-	}
 	info(bold(`main signing key rotated: public ${fresh.publicKey}`));
 	info(`  key file     ${path} (replaced)`);
 	info(`  key asset    ${asset.assetId}: PublicKeys = the new key; RevokedKeys = ${revokedKeys.length} key(s)${asset.revisionId ? `; revision ${asset.revisionId}` : ""}`);
 	info(`  rekey        ${hint.published ? `${REKEY_TOPIC} published: servers re-read the key asset now` : "not sent (servers re-read the key asset within 10 minutes)"}`);
 	info(`  typetorch.json  "signingPublicKeys" and "revokedKeys" updated (${proj.configPath}); commit it`);
-	info(dim("  heads signed with the old key stay valid through their fallback signature (sigF); no restart needed"));
+	// Heads signed by the revoked key are no longer valid once servers reload the key asset: re-sign the live ones.
+	const resigned = await resignHeads(ctx);
+	if (isJson()) {
+		return emitJson({ status: "rotated", keyFile: path, publicKey: fresh.publicKey, revokedKeys, keyAsset: asset, rekey: hint, resigned, config: proj.configPath });
+	}
+	info(dim("  no restart needed"));
+}
+
+// keys resign --------------------------------------------------------------------------------------------------------
+
+export interface ResignResult {
+	branch: string;
+	artifactId: string;
+	assetId: number;
+	/** The head's seq before the re-sign. */
+	fromSeq: number;
+	outcome: "published" | "proposed" | "declined" | "failed";
+	seq?: number;
+	proposalId?: string;
+	error?: string;
+}
+
+/**
+ * Republishes each prod-channel branch's current head as a fresh signed deploy message: same artifact and asset, a new
+ * seq, r = "resign". Each one follows the approval policy (a person's y/N, a proposal, or published at once) like any
+ * prod publish. Failures are reported, not thrown: `typetorch keys resign` retries.
+ */
+export async function resignHeads(ctx: KeysContext): Promise<ResignResult[]> {
+	const { proj } = ctx;
+	const oc = deployClient(ctx);
+	const api = registryApi(oc, proj, ctx.noRegistry);
+	const history = await readHistory(proj, api, ctx.noRegistry ? "--no-registry" : "no deploy key");
+	if (!history.snapshot && api) warnRegistryFallback(history.unavailable ?? "unknown");
+	const heads = [...history.heads.values()]
+		.filter((head) => strictest(branchChannel(proj.config, head.branch), history.snapshot?.value.channels[head.branch]) === "prod")
+		.sort((a, b) => a.branch.localeCompare(b.branch));
+	if (heads.length === 0) {
+		info("  resign       no prod-channel heads to re-sign");
+		return [];
+	}
+	const io = ctx.deps.io ?? interaction();
+	const by = gitInfo(proj.root).userName;
+	const results: ResignResult[] = [];
+	for (const head of heads) {
+		const base = { branch: head.branch, artifactId: head.artifactId, assetId: head.assetId, fromSeq: head.seq };
+		const request: ReleaseRequest = {
+			kind: "resign",
+			branch: head.branch,
+			branchChannel: "prod",
+			artifact: {
+				artifactId: head.artifactId,
+				assetId: head.assetId,
+				channel: head.channel,
+				commit: head.commit,
+				commitHash: head.commitHash,
+				dirty: head.dirty ?? false,
+				...(head.sources ? { sources: head.sources } : {}),
+			},
+			changes: [`re-signed with the current keys (was #${head.seq})`],
+			force: false,
+			by,
+			from: head,
+		};
+		try {
+			const { mode, proposer } = modeFor(proj, ctx.args, "prod", io);
+			const outcome = await finishRelease({ proj, mode, proposer, request, oc, api: history.snapshot ? api : undefined, history, watch: new Stopwatch(), noRegistry: ctx.noRegistry, keyPaths: ctx.paths, io });
+			if (outcome.kind === "published") {
+				results.push({ ...base, outcome: "published", seq: outcome.result.entry.seq });
+				info(`  resign       ${head.branch}: ${head.artifactId} (asset ${head.assetId}) #${head.seq} -> #${outcome.result.entry.seq}, signed with the current keys`);
+			} else {
+				results.push({ ...base, outcome: outcome.kind, proposalId: outcome.proposal.id });
+				info(`  resign       ${head.branch}: ${outcome.kind === "proposed" ? `proposed, approve with: typetorch approve ${outcome.proposal.id}` : `not published (proposal ${outcome.proposal.id} stays pending)`}`);
+			}
+		} catch (error) {
+			results.push({ ...base, outcome: "failed", error: (error as Error).message });
+			warn(`could not re-sign ${head.branch} (${(error as Error).message}); run \`typetorch keys resign\` again`);
+		}
+	}
+	return results;
+}
+
+export async function resignCommand(ctx: KeysContext) {
+	const results = await resignHeads(ctx);
+	if (isJson()) return emitJson({ resigned: results });
+	const failed = results.filter((r) => r.outcome === "failed").length;
+	if (failed) process.exitCode = 1;
 }
 
 export async function keysCommand(args: ParsedArgs, deps: KeysDeps = {}) {
 	const sub = args.positionals[0];
-	if (sub !== "init" && sub !== "rotate") throw new UsageError(`unknown keys subcommand "${sub ?? ""}" (init, init --fallback, rotate)`);
+	if (sub !== "init" && sub !== "rotate" && sub !== "resign") throw new UsageError(`unknown keys subcommand "${sub ?? ""}" (init, init --fallback, rotate, resign)`);
 	const proj = project(args);
 	const ctx: KeysContext = {
 		proj,
+		args,
 		paths: keyFilePaths(proj, { keyFile: flagString(args, "key-file"), fallbackKeyFile: flagString(args, "fallback-key-file") }),
 		force: flagBool(args, "force"),
 		yes: flagBool(args, "yes"),
+		noRegistry: flagBool(args, "no-registry"),
 		moderationTimeout: flagInt(args, "moderation-timeout", 600),
 		deps,
 	};
+	if (sub === "resign") return resignCommand(ctx);
 	if (sub === "rotate") {
 		if (flagBool(args, "fallback")) throw new UsageError("keys rotate replaces the main key; the fallback key is replaced with `keys init --fallback --force` + `kernel deploy`");
 		if (ctx.force) throw new UsageError("keys rotate takes no --force");

@@ -115,7 +115,8 @@ export function describeProposal(state: ProposalState, head: LiveHead | undefine
 	if (p.from && head && (p.from.assetId !== head.assetId || p.from.seq !== head.seq)) {
 		lines.push(yellow(`  note       the branch moved since the proposal (it ran ${p.from.artifactId}, #${p.from.seq})`));
 	}
-	if (head && head.assetId === a.assetId) lines.push(yellow("  note       this artifact is already live on the branch"));
+	if (p.kind === "resign") lines.push("  resign     re-signs the live head with the current keys (same artifact, new seq, no swap)");
+	else if (head && head.assetId === a.assetId) lines.push(yellow("  note       this artifact is already live on the branch"));
 	if (p.force) lines.push(yellow("  FORCED     proposed with --force (channel guard overridden)"));
 	if (p.branchChannel === "prod") {
 		lines.push(yellow("  PROD       this goes to a prod-channel branch: public servers"));
@@ -148,9 +149,16 @@ export async function approveProposal(
 	for (const line of describeProposal(state, head)) info(line);
 
 	const targetChannel = strictest(branchChannel(proj.config, p.branch), history.snapshot?.value.channels[p.branch], p.branchChannel);
-	if (p.kind === "promote") checkPromoteChannel({ branch: p.branch, branchChannel: targetChannel, artifactId: p.artifact.artifactId, artifactChannel: p.artifact.channel });
-	checkChannelGuard({ branch: p.branch, branchChannel: targetChannel, artifactChannel: p.artifact.channel, dirty: p.artifact.dirty, force: p.force });
-	if (head && head.assetId === p.artifact.assetId) throw new Error(`${p.artifact.artifactId} is already live on ${p.branch}; reject the proposal (typetorch reject ${p.id})`);
+	if (p.kind === "resign") {
+		// Re-signing republishes exactly what is live (keys rotate); it never moves a branch.
+		if (!head || head.assetId !== p.artifact.assetId) {
+			throw new Error(`${p.branch} moved since this re-sign was proposed (it runs ${head ? `${head.artifactId}, asset ${head.assetId}` : "nothing"}); reject it (typetorch reject ${p.id}) and run \`typetorch keys resign\` to re-sign the current heads`);
+		}
+	} else {
+		if (p.kind === "promote") checkPromoteChannel({ branch: p.branch, branchChannel: targetChannel, artifactId: p.artifact.artifactId, artifactChannel: p.artifact.channel });
+		checkChannelGuard({ branch: p.branch, branchChannel: targetChannel, artifactChannel: p.artifact.channel, dirty: p.artifact.dirty, force: p.force });
+		if (head && head.assetId === p.artifact.assetId) throw new Error(`${p.artifact.artifactId} is already live on ${p.branch}; reject the proposal (typetorch reject ${p.id})`);
+	}
 	// Prod-channel: both keys, loaded before the y/N so a missing or mismatched key fails before anyone says yes.
 	const signer = targetChannel === "prod" ? (options.signer ?? signerFor(proj, targetChannel, options.keyPaths ?? signingKeyPaths(proj))) : undefined;
 

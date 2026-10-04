@@ -111,12 +111,13 @@ export function messageFor(entry: RegistryDeployment, signer?: DualSigner, optio
 			c: entry.commit,
 			ch: entry.channel,
 			rollback: entry.action === "rollback",
+			resign: entry.action === "resign",
 		},
 		signer,
 	);
 	if (!signer && options.placeholders) Object.assign(message, { sig: SIGNATURE_PLACEHOLDER, sigF: SIGNATURE_PLACEHOLDER });
 	entry.t = message.t;
-	if (message.r === 1) entry.r = 1;
+	if (message.r !== undefined) entry.r = message.r;
 	if (signer && message.sig && message.sigF) {
 		entry.sig = message.sig;
 		entry.sigF = message.sigF;
