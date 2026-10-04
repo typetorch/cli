@@ -7,6 +7,7 @@
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { newKeyFile, writeKeyFile } from "../src/keyfiles";
 import { readRbxm } from "../src/rbxm";
 
 const cli = resolve(import.meta.dir, "..", "src", "index.ts");
@@ -23,11 +24,17 @@ symlinkSync(join(fixture, "node_modules"), join(dir, "node_modules"), "junction"
 writeFileSync(join(dir, "typetorch.json"), readFileSync(join(fixture, "typetorch.example.json")));
 writeFileSync(join(dir, ".gitignore"), "node_modules/\nout/\ninclude/\n.typetorch/\nsrc/shared/build.ts\nsrc/local-secret.ts\n.env\n");
 
-// The CLI runs without any key from this process's environment.
+// The CLI runs without any key from this process's environment, and with a throwaway home: the default key paths
+// (~/.config/typetorch/keys) point into a temp dir, never at the real ones. Rokit keeps finding its tools.
 const cleanEnv: Record<string, string> = {};
 for (const [key, value] of Object.entries(process.env)) {
 	if (value !== undefined && !/(_KEY|TOKEN|SECRET|^TYPETORCH_)/i.test(key)) cleanEnv[key] = value;
 }
+const realHome = process.env.USERPROFILE ?? process.env.HOME ?? "";
+cleanEnv.ROKIT_ROOT ??= join(realHome, ".rokit");
+const fakeHome = mkdtempSync(join(tmpdir(), "tt-e2e-home-"));
+cleanEnv.HOME = fakeHome;
+cleanEnv.USERPROFILE = fakeHome;
 
 function sh(cmd: string[], cwd = dir) {
 	const result = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
@@ -194,12 +201,51 @@ r = tt(["reject", proposalId, "--reason", "e2e"]);
 r = tt(["proposals", "--all", "--json"]);
 check("reject", r.json?.proposals?.find((p: any) => p.proposal.id === proposalId)?.status === "rejected", r.json);
 r = tt(["keys", "status"]);
-check("the keys command is gone", r.code === 2 && /unknown command "keys"/.test(r.stderr), r.stderr);
+check("keys status is gone (keys init / init --fallback / rotate)", r.code === 2 && /unknown keys subcommand "status"/.test(r.stderr), r.stderr);
 r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json", "--propose"]);
 check("--propose: the dry run says it would only propose", r.code === 0 && r.json?.approval?.ending === "propose", r.stderr || r.json);
 writeFileSync(join(dir, "typetorch.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(dir, "typetorch.json"), "utf8")), approval: "none", signingPublicKey: "old" }, null, "\t"));
 r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json"]);
 check("approval none: publishes at once; an old signingPublicKey is ignored silently", r.code === 0 && r.json?.approval?.ending === "publish" && !/signingPublicKey|unknown key/.test(r.stderr), r.stderr || r.json);
+sh(["git", "checkout", "--", "typetorch.json"]);
+
+// 8b. Prod signing (plans/03): throwaway keys in a temp dir only; nothing is uploaded or published.
+const keyDir = mkdtempSync(join(tmpdir(), "tt-e2e-keys-"));
+const mainKey = join(keyDir, "main.key");
+const fallbackKey = join(keyDir, "fallback.key");
+r = tt(["keys", "init", "--key-file", mainKey]);
+check("keys init without an assets key writes nothing", r.code === 1 && /no Open Cloud API key for assets/.test(r.stderr) && !existsSync(mainKey), r.stderr);
+r = tt(["keys", "init", "--key-file", join(dir, "keys", "main.key")]);
+check("a key file inside the repo is refused", r.code === 1 && /outside the repo/.test(r.stderr), r.stderr);
+r = tt(["keys", "rotate", "--yes", "--key-file", mainKey]);
+check("keys rotate needs keys init first", r.code === 2 && /keys init/.test(r.stderr), r.stderr);
+r = tt(["keys", "init", "--fallback", "--fallback-key-file", fallbackKey, "--json"]);
+const fallbackPublic = r.json?.publicKey;
+check(
+	"keys init --fallback: key file + fallbackPublicKey, no network, no seed printed",
+	r.code === 0 && r.json?.status === "created" && JSON.parse(readFileSync(join(dir, "typetorch.json"), "utf8")).fallbackPublicKey === fallbackPublic &&
+		!(r.stdout + r.stderr).includes(JSON.parse(readFileSync(fallbackKey, "utf8")).seed),
+	r.stderr || r.json,
+);
+// A main key as `keys init` would leave it (its key asset needs Open Cloud, so it is written here directly).
+const main = newKeyFile("main", JSON.parse(readFileSync(join(dir, "typetorch.json"), "utf8")).universeId);
+writeKeyFile(mainKey, main);
+writeFileSync(join(dir, "typetorch.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(dir, "typetorch.json"), "utf8")), signingPublicKeys: [main.publicKey], keyAssetId: 987654321 }, null, "\t"));
+const keyFlags = ["--key-file", mainKey, "--fallback-key-file", fallbackKey];
+r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--branch", "prod", "--force", "--json", ...keyFlags]);
+check(
+	"prod dry run: signing ready (both keys), placeholders instead of real signatures",
+	r.code === 0 && r.json?.signing?.ready === true && r.json?.signing?.mainKey === main.publicKey && r.json?.signing?.fallbackKey === fallbackPublic && /^<signature/.test(r.json?.message?.data?.sig) && /^<signature/.test(r.json?.message?.data?.sigF),
+	r.stderr || r.json,
+);
+r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--branch", "prod", "--force", "--json", "--key-file", join(keyDir, "missing.key")]);
+check("prod dry run with a missing key file: reported as not ready", r.code === 0 && r.json?.signing?.ready === false && /no main key file/.test(r.json?.signing?.problem), r.stderr || r.json);
+r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json", ...keyFlags]);
+check("dev dry run: unsigned", r.code === 0 && r.json?.signing?.required === false && r.json?.message?.data?.sig === undefined, r.stderr || r.json);
+r = tt(["promote", "prod", `${c2}-000003`, "--dry-run", "--no-registry", "--force"]);
+check("promote of a dev-channel artifact to prod: rebuild for prod, even with --force", r.code === 1 && /rebuild for prod/.test(r.stderr), r.stderr);
+r = tt(["promote", "dev-0000001", "feature-thing", "--dry-run", "--no-registry", "--json"]);
+check("promote <artifact> <branch> order (the second is a known branch)", r.code === 0 && r.json?.branch === "feature-thing" && r.json?.to?.artifactId === "dev-0000001", r.stderr || r.json);
 sh(["git", "checkout", "--", "typetorch.json"]);
 
 // 9. Clean builds: ignored source files and non-ModuleScripts are refused

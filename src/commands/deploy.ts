@@ -3,7 +3,8 @@
  * "uploaded" record -> then, by the approval policy (approve.ts): a proposal for `typetorch approve` (agents, the
  * dev-server), the y/N right here (a person at a terminal), or registry -> deploy message -> "published"
  * record. The registry is read in parallel with the build so a conflict (or a missing scope) is known before anything
- * is uploaded.
+ * is uploaded. A prod-channel deploy that will be published here loads both signing keys before the upload, so a
+ * missing key fails before anything leaves the machine.
  */
 import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args";
 import { assertNoIdCollision, buildPayload, payloadBytes, readBuiltPayload, type PayloadMeta } from "../build";
@@ -16,7 +17,20 @@ import { assertNoForeignDraft, tryReadRegistry, type RegistrySnapshot } from "..
 import { assetNaming, fixCensoredName, uploadPayload } from "../upload";
 import { finishRelease, modeFor, reportProposal } from "./approve";
 import { describeBuild } from "./build";
-import { channelFlag, openCloud, project, projectStateDir, registryApi, warnRegistryFallback, withLocal } from "./common";
+import {
+	channelFlag,
+	describeSigning,
+	KEY_FILE_FLAGS,
+	openCloud,
+	project,
+	projectStateDir,
+	registryApi,
+	signerFor,
+	signingKeyPaths,
+	signingStatus,
+	warnRegistryFallback,
+	withLocal,
+} from "./common";
 import { makeEntry, messageFor, registryMessage } from "./release";
 
 export const deployFlags = {
@@ -30,10 +44,22 @@ export const deployFlags = {
 	"moderation-timeout": "string",
 	propose: "boolean",
 	"proposed-by": "string",
+	...KEY_FILE_FLAGS,
 } as const;
 
 export class ChannelGuardError extends Error {
 	override name = "ChannelGuardError";
+}
+
+/**
+ * `typetorch promote` to a prod-channel branch takes only prod-channel artifacts, even with --force: a dev build has
+ * debug macros and Channel "dev", which prod servers refuse. Rebuild for prod instead.
+ */
+export function checkPromoteChannel(input: { branch: string; branchChannel: Channel; artifactId: string; artifactChannel: Channel }) {
+	if (input.branchChannel !== "prod" || input.artifactChannel === "prod") return;
+	throw new ChannelGuardError(
+		`refusing to promote ${input.artifactId} to prod-channel branch "${input.branch}": it is a ${input.artifactChannel}-channel artifact, and prod branches only take prod-channel builds (--force doesn't change that); rebuild for prod: typetorch deploy --branch ${input.branch} (or typetorch upload --branch ${input.branch}, then promote that upload)`,
+	);
 }
 
 /** Refuses dev-channel or dirty artifacts on a prod-channel branch unless forced (plans/10 "Promotion"). */
@@ -140,10 +166,12 @@ export async function deployCommand(args: ParsedArgs) {
 		assetName: displayName,
 	};
 
+	const keyPaths = signingKeyPaths(proj, args);
 	if (dryRun) {
 		const ending = modeFor(proj, args, targetChannel).mode.kind;
 		const entry = makeEntry({ action: "deploy", branch, artifact: { ...artifact, assetId: 0 }, by }, snapshot?.value, history.local);
-		const data = messageFor(entry);
+		const data = messageFor(entry, undefined, { placeholders: targetChannel === "prod" });
+		const signing = signingStatus(proj, targetChannel, keyPaths);
 		const plan = {
 			dryRun: true,
 			artifactId: meta.artifactId,
@@ -155,6 +183,7 @@ export async function deployCommand(args: ParsedArgs) {
 			asset: { displayName, description, creator: proj.config.creator },
 			notes: { message: message ?? "", changes },
 			approval: { policy: proj.config.approval, ending },
+			signing,
 			registry: snapshot
 				? { readable: true, configVersion: snapshot.configVersion, exists: snapshot.exists, message: registryMessage("deploy", branch, meta.artifactId, note) }
 				: { readable: false, reason: read.unavailable },
@@ -167,6 +196,7 @@ export async function deployCommand(args: ParsedArgs) {
 		if (isJson()) return emitJson(plan);
 		info(bold(`dry run: would deploy ${meta.artifactId} to ${branch} (branch channel ${targetChannel}) as #${entry.seq}`));
 		info(`  approval     policy "${proj.config.approval}": ${ending}`);
+		info(`  signing      ${describeSigning(signing)}`);
 		info(`  asset name   ${displayName}`);
 		info(`  description  ${description.split("\n").join(dim(" | "))}`);
 		if (message) info(`  message      ${message}`);
@@ -183,6 +213,8 @@ export async function deployCommand(args: ParsedArgs) {
 
 	// The final mode, with the registry's channel for the branch.
 	const decided = modeFor(proj, args, targetChannel);
+	// Published here (a person's y/N, or approval "none") to a prod-channel branch: both keys now, before the upload.
+	const signer = decided.mode.kind !== "propose" ? signerFor(proj, targetChannel, keyPaths) : undefined;
 
 	const stateDir = projectStateDir(proj);
 	const upload = await uploadPayload(assets!, proj.config, meta, bytes, branch, {
@@ -239,6 +271,8 @@ export async function deployCommand(args: ParsedArgs) {
 		noRegistry,
 		assetName: displayName,
 		extra: { sha256: meta.sha256 },
+		keyPaths,
+		signer,
 	});
 	if (outcome.kind === "proposed") return reportProposal(outcome.proposal, { assetId: upload.assetId, assetName: name.name });
 	if (outcome.kind === "declined") {

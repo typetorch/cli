@@ -165,9 +165,9 @@ describe("release: one seq source, signed messages, registry aborts", () => {
 		const shared = mkdtempSync(join(tmpdir(), "tt-state-"));
 		appendLocalLog(shared, { ...artifact, seq: 14, at: "2026-10-04T12:00:00.000Z", action: "deploy", branch: "dev", by: "me", universeId: 42 });
 		const main = setup(shared);
-		const first = await release({ proj: main.proj, oc: main.oc, history: withLocal(main.proj, undefined), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch() });
+		const first = await release({ proj: main.proj, oc: main.oc, history: withLocal(main.proj, undefined), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" });
 		const worktree = setup(shared); // a different checkout, same TYPETORCH_STATE_DIR
-		const second = await release({ proj: worktree.proj, oc: worktree.oc, history: withLocal(worktree.proj, undefined), action: "deploy", branch: "dev", artifact: { ...artifact, assetId: 6, artifactId: "12b63b9-000001" }, by: "claude", force: false, watch: new Stopwatch() });
+		const second = await release({ proj: worktree.proj, oc: worktree.oc, history: withLocal(worktree.proj, undefined), action: "deploy", branch: "dev", artifact: { ...artifact, assetId: 6, artifactId: "12b63b9-000001" }, by: "claude", force: false, watch: new Stopwatch(), branchChannel: "dev" });
 		expect([first.entry.seq, second.entry.seq]).toEqual([15, 16]);
 		expect(readLocalLog(shared, 42).map((e) => e.seq)).toEqual([14, 15, 16]);
 		expect(readFileSync(join(shared, "deployments.jsonl"), "utf8")).toContain('"event":"published"');
@@ -177,7 +177,7 @@ describe("release: one seq source, signed messages, registry aborts", () => {
 		const shared = mkdtempSync(join(tmpdir(), "tt-state-"));
 		const a = setup(shared);
 		const runs = [0, 1, 2].map((i) =>
-			release({ proj: a.proj, oc: a.oc, history: withLocal(a.proj, undefined), action: "deploy", branch: "dev", artifact: { ...artifact, assetId: 10 + i }, by: "me", force: false, watch: new Stopwatch() }),
+			release({ proj: a.proj, oc: a.oc, history: withLocal(a.proj, undefined), action: "deploy", branch: "dev", artifact: { ...artifact, assetId: 10 + i }, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" }),
 		);
 		const seqs = (await Promise.all(runs)).map((r) => r.entry.seq).sort();
 		expect(seqs).toEqual([1, 2, 3]);
@@ -185,7 +185,7 @@ describe("release: one seq source, signed messages, registry aborts", () => {
 
 	test("messages are unsigned {b,a,i,s,c,ch,t,r}; the entry keeps t and r", async () => {
 		const { proj, oc, published } = setup();
-		const result = await release({ proj, oc, history: withLocal(proj, undefined), action: "rollback", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch() });
+		const result = await release({ proj, oc, history: withLocal(proj, undefined), action: "rollback", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" });
 		const message = JSON.parse(published[0]);
 		expect(Object.keys(message)).toEqual(["b", "a", "i", "s", "c", "ch", "t", "r"]);
 		expect(message.r).toBe(1);
@@ -208,7 +208,7 @@ describe("release: one seq source, signed messages, registry aborts", () => {
 			throw new Error("PATCH draft -> 500");
 		});
 		const snapshot = await readRegistry(api);
-		const run = release({ proj, oc, api, history: withLocal(proj, snapshot), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch() });
+		const run = release({ proj, oc, api, history: withLocal(proj, snapshot), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" });
 		await expect(run).rejects.toThrow(ReleaseAbortedError);
 		await expect(run).rejects.toThrow(/typetorch promote dev 5/);
 		expect(published).toEqual([]);
@@ -224,7 +224,7 @@ describe("release: one seq source, signed messages, registry aborts", () => {
 			return "hash";
 		};
 		const snapshot = await readRegistry(api);
-		const result = await release({ proj, oc, api, history: withLocal(proj, snapshot), action: "deploy", branch: "dev", artifact: { ...artifact, sources: { template: "12b63b9" } }, by: "me", force: false, watch: new Stopwatch() });
+		const result = await release({ proj, oc, api, history: withLocal(proj, snapshot), action: "deploy", branch: "dev", artifact: { ...artifact, sources: { template: "12b63b9" } }, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" });
 		const message = JSON.parse(published[0]);
 		expect(result.registry).toBe("published");
 		expect(written.branches.dev).toMatchObject({ seq: 1, t: message.t, sources: { template: "12b63b9" } });
@@ -237,7 +237,7 @@ describe("release: one seq source, signed messages, registry aborts", () => {
 		const oc = { publishMessage: async () => { throw new Error("messaging down"); } } as unknown as OpenCloud;
 		const snapshot = await readRegistry(fakeRegistry(async () => "hash"));
 		await expect(
-			release({ proj, oc, api: fakeRegistry(async () => "hash"), history: withLocal(proj, snapshot), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch() }),
+			release({ proj, oc, api: fakeRegistry(async () => "hash"), history: withLocal(proj, snapshot), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" }),
 		).rejects.toThrow(/messaging down/);
 		const log = readLocalLog(join(proj.root, ".typetorch"));
 		expect(log.map((e) => [e.seq, e.event])).toEqual([[1, "registry-only"]]);

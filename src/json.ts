@@ -85,3 +85,88 @@ export function jsonEqual(a: unknown, b: unknown): boolean {
 export function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+
+/** The [start, end) span of a top-level key's value in a JSON object's text (string and nesting aware). */
+export function topLevelValueSpan(text: string, key: string): [number, number] | undefined {
+	const skipString = (from: number): number => {
+		let j = from + 1;
+		while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
+		return j + 1;
+	};
+	const skipSpace = (from: number): number => {
+		let j = from;
+		while (j < text.length && /\s/.test(text[j])) j++;
+		return j;
+	};
+	const skipValue = (from: number): number => {
+		let j = from;
+		if (text[j] === '"') return skipString(j);
+		if (text[j] === "{" || text[j] === "[") {
+			let depth = 0;
+			while (j < text.length) {
+				const ch = text[j];
+				if (ch === '"') {
+					j = skipString(j);
+					continue;
+				}
+				if (ch === "{" || ch === "[") depth++;
+				else if (ch === "}" || ch === "]") {
+					depth--;
+					if (depth === 0) return j + 1;
+				}
+				j++;
+			}
+			return j;
+		}
+		while (j < text.length && !/[,}\]\s]/.test(text[j])) j++;
+		return j;
+	};
+	let i = skipSpace(0);
+	if (text[i] !== "{") return undefined;
+	i++;
+	while (i < text.length) {
+		i = skipSpace(i);
+		if (text[i] === "}") return undefined;
+		if (text[i] === ",") {
+			i++;
+			continue;
+		}
+		if (text[i] !== '"') return undefined;
+		const keyEnd = skipString(i);
+		const name = JSON.parse(text.slice(i, keyEnd));
+		i = skipSpace(keyEnd);
+		if (text[i] !== ":") return undefined;
+		const valueStart = skipSpace(i + 1);
+		const valueEnd = skipValue(valueStart);
+		if (name === key) return [valueStart, valueEnd];
+		i = valueEnd;
+	}
+	return undefined;
+}
+
+/**
+ * Sets top-level fields in a JSON object's text, keeping everything else as written (formatting, key order). An
+ * existing value is replaced in place; a new key goes at the end with the file's indentation. Values are compact JSON.
+ */
+export function setJsonFields(text: string, updates: Record<string, unknown>): string {
+	let next = text;
+	for (const [key, value] of Object.entries(updates)) {
+		if (value === undefined) continue;
+		const span = topLevelValueSpan(next, key);
+		if (span) {
+			next = next.slice(0, span[0]) + JSON.stringify(value) + next.slice(span[1]);
+			continue;
+		}
+		const close = next.lastIndexOf("}");
+		if (close === -1) throw new Error("not a JSON object");
+		const before = next.slice(0, close).replace(/\s*$/, "");
+		const indent = /\n([ \t]+)"/.exec(next)?.[1] ?? "\t";
+		const comma = before.endsWith("{") ? "" : ",";
+		next = `${before}${comma}\n${indent}${JSON.stringify(key)}: ${JSON.stringify(value)}\n${next.slice(close)}`;
+	}
+	const parsed = JSON.parse(next);
+	for (const [key, value] of Object.entries(updates)) {
+		if (value !== undefined && !jsonEqual(parsed[key], value)) throw new Error(`could not set "${key}"`);
+	}
+	return next;
+}

@@ -25,7 +25,8 @@ export const MAX_VALUE_CHARS = 9_500;
 
 /**
  * A branch's live head. Heads are ordered by (seq, time): the higher seq wins, and on equal seq the later deployedAt
- * (`t` when present). `t` and `r` are the deploy message's fields.
+ * (`t` when present). `t`, `r`, `sig` and `sigF` are the deploy message's fields, so a kernel verifies a prod head
+ * exactly like the message it came from (plans/03 "Heads and stored records").
  */
 export interface BranchHead {
 	artifactId: string;
@@ -40,6 +41,9 @@ export interface BranchHead {
 	t?: number;
 	/** 1 when the message was a rollback. */
 	r?: 1;
+	/** Prod-channel branches: the message's signatures (main and fallback key). */
+	sig?: string;
+	sigF?: string;
 	/** Commits of the game and the @typetorch packages in the payload. */
 	sources?: BuildSources;
 }
@@ -60,9 +64,11 @@ export interface RegistryDeployment {
 	fromAssetId?: number;
 	fromArtifactId?: string;
 	sources?: BuildSources;
-	/** The deploy message's `t` and `r` (kept on the branch head; not in the registry's deployments list). */
+	/** The deploy message's `t`, `r`, `sig` and `sigF` (kept on the branch head; not in the registry's deployments list). */
 	t?: number;
 	r?: 1;
+	sig?: string;
+	sigF?: string;
 }
 
 export interface RegistryValue {
@@ -127,6 +133,8 @@ export function headFromDeployment(entry: RegistryDeployment): BranchHead {
 	};
 	if (entry.t !== undefined) head.t = entry.t;
 	if (entry.r === 1) head.r = 1;
+	if (entry.sig) head.sig = entry.sig;
+	if (entry.sigF) head.sigF = entry.sigF;
 	if (entry.sources) head.sources = entry.sources;
 	return head;
 }
@@ -135,7 +143,7 @@ export function headFromDeployment(entry: RegistryDeployment): BranchHead {
 export function recordDeployment(value: RegistryValue, entry: RegistryDeployment): RegistryValue {
 	const next: RegistryValue = structuredClone(value);
 	next.branches[entry.branch] = headFromDeployment(entry);
-	const { t: _t, r: _r, ...listed } = entry; // the head carries the message fields; keep the list small
+	const { t: _t, r: _r, sig: _sig, sigF: _sigF, ...listed } = entry; // the head carries the message fields; keep the list small
 	next.deployments.push(listed);
 	return trimRegistry(next).value;
 }

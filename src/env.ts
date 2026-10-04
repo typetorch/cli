@@ -43,8 +43,25 @@ export const ENV_FILE_VAR = "TYPETORCH_ENV_FILE";
 /** Extra variable names (comma-separated) that child processes may inherit; keys are never passed. */
 export const CHILD_ENV_VAR = "TYPETORCH_CHILD_ENV";
 
+/** CLI 0.2's plaintext signing seed variable: no longer read, but still a secret wherever it is left. */
+export const LEGACY_SIGNING_KEY_VAR = "TYPETORCH_SIGNING_KEY";
 /** Variables holding secrets: never passed to a child, always redacted. */
-export const SECRET_VARS: readonly string[] = [...API_KEY_VARS, ...Object.values(JOB_KEY_VARS)];
+export const SECRET_VARS: readonly string[] = [...API_KEY_VARS, ...Object.values(JOB_KEY_VARS), LEGACY_SIGNING_KEY_VAR];
+
+/** The signing key files (keyfiles.ts). Read from the real environment only; never passed to a child process. */
+export const KEY_FILE_VAR = "TYPETORCH_KEY_FILE";
+export const FALLBACK_KEY_FILE_VAR = "TYPETORCH_FALLBACK_KEY_FILE";
+export const KEY_PATH_VARS = [KEY_FILE_VAR, FALLBACK_KEY_FILE_VAR] as const;
+/** Never inherited by a child process, even when listed in TYPETORCH_CHILD_ENV. */
+export const NEVER_CHILD_VARS: readonly string[] = [...SECRET_VARS, ...KEY_PATH_VARS];
+
+/** Secret values read at run time (signing seeds): redacted like the keys. Never printed. */
+const runtimeSecrets = new Set<string>();
+
+/** Registers a secret value (a seed read from a key file) so `redact` and `childEnv` treat it like a key. */
+export function registerSecret(value: string | undefined) {
+	if (value && value.length >= 8) runtimeSecrets.add(value);
+}
 
 export function parseDotEnv(text: string): Record<string, string> {
 	const values: Record<string, string> = {};
@@ -195,9 +212,9 @@ export class Settings {
 		throw new Error(`no Open Cloud API key for ${job}: set ${JOB_KEY_VARS[job]} (scopes ${JOB_SCOPES[job]}) or ${API_KEY_VARS.join(", ")} in ${where}`);
 	}
 
-	/** Every secret value known (for redaction). */
+	/** Every secret value known (for redaction): the keys, and seeds read from key files. */
 	secrets(): string[] {
-		const out: string[] = [];
+		const out: string[] = [...runtimeSecrets];
 		for (const name of SECRET_VARS) {
 			const setting = this.get(name);
 			if (setting) out.push(setting.value);
@@ -314,7 +331,7 @@ export const CHILD_ENV_ALLOW: ReadonlySet<string> = new Set([
 export function childEnv(extra: Record<string, string> = {}, options: { env?: Record<string, string | undefined>; settings?: Settings } = {}): Record<string, string> {
 	const real = options.env ?? process.env;
 	const config = options.settings ?? settings();
-	const secretNames = new Set(SECRET_VARS.map((name) => name.toUpperCase()));
+	const secretNames = new Set(NEVER_CHILD_VARS.map((name) => name.toUpperCase()));
 	const allow = new Set(CHILD_ENV_ALLOW);
 	for (const name of (config.get(CHILD_ENV_VAR)?.value ?? "").split(",")) {
 		const upper = name.trim().toUpperCase();

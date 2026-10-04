@@ -1,6 +1,11 @@
 /**
  * Pointing a branch at an (already approved) payload asset: shared by `deploy`, `rollback` and `promote`.
- *   lock the state dir -> seq -> message -> registry (when readable) -> deploy message -> local log -> unlock
+ *   lock the state dir -> seq -> message (signed for prod-channel branches) -> registry (when readable) -> deploy
+ *   message -> local log -> unlock
+ *
+ * Signing (plans/03 "Signed prod messages and heads"): a release to a prod-channel branch must come with a signer (both
+ * keys, keyfiles.ts `loadSigner`); the message and the registry head get `sig` and `sigF`. Dev-channel releases are
+ * never signed. Signatures are made only here, right before publishing: dry runs and proposals never hold one.
  *
  * One seq source (P-C1/S-L8): the seq is one above the highest in the registry (re-read inside the write) and the
  * state dir's log (re-read under the lock). When the registry is readable but the write fails, the release ABORTS
@@ -11,6 +16,7 @@ import { appendLocalLog, liveHeads, mergeDeployments, nextSeqFrom, readLocalLog,
 import { formatSeconds, info, type Stopwatch } from "../log";
 import type { BuildSources, Channel } from "../naming";
 import { DEPLOY_TOPIC, deployMessage, encodeDeployMessage, type DeployMessage, type OpenCloud } from "../opencloud";
+import type { DualSigner } from "../signing";
 import { recordDeployment, RegistryConflictError, writeRegistry, type RegistryApi, type RegistryDeployment } from "../registry";
 import { withStateLock } from "../state";
 import type { History } from "./common";
@@ -39,6 +45,10 @@ export interface ReleaseInput {
 	note?: string;
 	assetName?: string;
 	watch: Stopwatch;
+	/** The target branch's channel: prod-channel releases are signed and need `signer`. */
+	branchChannel: Channel;
+	/** Both signing keys; required for a prod-channel branch, never used for a dev-channel one. */
+	signer?: DualSigner;
 	/** Extra fields for the local log line. */
 	extra?: Partial<LocalDeployment>;
 }
@@ -84,21 +94,39 @@ export function makeEntry(
 	return entry;
 }
 
-/** The deploy message for an entry; its t/r are copied onto the entry so the registry head carries them. */
-export function messageFor(entry: RegistryDeployment): DeployMessage {
-	const message = deployMessage({
-		b: entry.branch,
-		a: entry.assetId,
-		i: entry.artifactId,
-		s: entry.seq,
-		c: entry.commit,
-		ch: entry.channel,
-		rollback: entry.action === "rollback",
-	});
+/** A signature-sized stand-in for dry runs (they never sign: a printed real signature could be published by anyone). */
+export const SIGNATURE_PLACEHOLDER = "<signature: 88 base64 characters, made when published>".padEnd(88, ".");
+
+/**
+ * The deploy message for an entry, signed with both keys when `signer` is given; its t/r/sig/sigF are copied onto the
+ * entry so the registry head carries them. `placeholders` (dry runs) puts signature-sized stand-ins in instead.
+ */
+export function messageFor(entry: RegistryDeployment, signer?: DualSigner, options: { placeholders?: boolean } = {}): DeployMessage {
+	const message = deployMessage(
+		{
+			b: entry.branch,
+			a: entry.assetId,
+			i: entry.artifactId,
+			s: entry.seq,
+			c: entry.commit,
+			ch: entry.channel,
+			rollback: entry.action === "rollback",
+		},
+		signer,
+	);
+	if (!signer && options.placeholders) Object.assign(message, { sig: SIGNATURE_PLACEHOLDER, sigF: SIGNATURE_PLACEHOLDER });
 	entry.t = message.t;
 	if (message.r === 1) entry.r = 1;
+	if (signer && message.sig && message.sigF) {
+		entry.sig = message.sig;
+		entry.sigF = message.sigF;
+	}
 	encodeDeployMessage(message); // fail before anything is written when it is over 1 KiB
 	return message;
+}
+
+export class SigningRequiredError extends Error {
+	override name = "SigningRequiredError";
 }
 
 export function registryMessage(action: string, branch: string, artifactId: string, note?: string): string {
@@ -107,6 +135,11 @@ export function registryMessage(action: string, branch: string, artifactId: stri
 
 export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 	const { proj, oc, api, history, watch } = input;
+	// Prod-channel branches are signed (both keys); dev-channel ones never are.
+	if (input.branchChannel === "prod" && !input.signer) {
+		throw new SigningRequiredError(`${input.branch} is a prod-channel branch: its deploy message must be signed, and no signing keys were loaded`);
+	}
+	const signer = input.branchChannel === "prod" ? input.signer : undefined;
 	return withStateLock(history.stateDir, `${input.action} ${input.branch} ${input.artifact.artifactId}`, async () => {
 		// Re-read the log under the lock: another deploy from this machine may have appended since history was read.
 		const local = readLocalLog(history.stateDir, proj.config.universeId);
@@ -123,7 +156,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 					{ message: registryMessage(input.action, input.branch, input.artifact.artifactId, input.note), force: input.force, dryRun: false },
 					(current) => {
 						entry = makeEntry(input, current, local);
-						message = messageFor(entry);
+						message = messageFor(entry, signer);
 						return recordDeployment(current, entry);
 					},
 				);
@@ -146,7 +179,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 		}
 		if (!entry || !message) {
 			entry = makeEntry(input, history.snapshot?.value, local);
-			message = messageFor(entry);
+			message = messageFor(entry, signer);
 		}
 
 		const localEntry: LocalDeployment = {
@@ -167,9 +200,16 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 			if (registry === "published") appendLocalLog(history.stateDir, { ...localEntry, registry, timings: watch.total() }, "registry-only");
 			throw error;
 		}
-		info(`  publish     ${formatSeconds(watch.timings.publish)}  ${DEPLOY_TOPIC} ${JSON.stringify(message)}`);
+		info(`  publish     ${formatSeconds(watch.timings.publish)}  ${DEPLOY_TOPIC} ${describeMessage(message)}`);
 		const logged: LocalDeployment = { ...localEntry, timings: watch.total() };
 		appendLocalLog(history.stateDir, logged);
 		return { entry: logged, message, registry, configVersion };
 	});
+}
+
+/** The message for a log line: signatures shortened (they are public, but long). */
+export function describeMessage(message: DeployMessage): string {
+	const { sig, sigF, ...rest } = message;
+	if (!sig && !sigF) return JSON.stringify(rest);
+	return `${JSON.stringify(rest)} signed (sig ${sig?.slice(0, 8)}..., sigF ${sigF?.slice(0, 8)}...)`;
 }

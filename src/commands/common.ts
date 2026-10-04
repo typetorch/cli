@@ -17,6 +17,8 @@ import { isChannel, type Channel } from "../naming";
 import { OpenCloud } from "../opencloud";
 import { REGISTRY_FALLBACK_NOTE, RegistryApi, tryReadRegistry, type RegistrySnapshot } from "../registry";
 import { stateDir } from "../state";
+import { keyFilePaths, loadSigner, type KeyRole } from "../keyfiles";
+import type { DualSigner } from "../signing";
 
 export function project(args: ParsedArgs): Project {
 	const loaded = loadProject(flagString(args, "config"));
@@ -104,4 +106,41 @@ export function withLocal(proj: Project, snapshot: RegistrySnapshot | undefined,
 
 export function registryApi(oc: OpenCloud | undefined, proj: Project, disabled: boolean): RegistryApi | undefined {
 	return oc && !disabled ? new RegistryApi(oc, proj.config.universeId) : undefined;
+}
+
+// Signing (prod-channel branches only) -------------------------------------------------------------------------------
+
+/** The flags every releasing command takes for the key files. */
+export const KEY_FILE_FLAGS = { "key-file": "string", "fallback-key-file": "string" } as const;
+
+/** The key files for this command: --key-file / --fallback-key-file, else the real environment, else the defaults. */
+export function signingKeyPaths(proj: Project, args?: ParsedArgs): Record<KeyRole, string> {
+	return keyFilePaths(proj, { keyFile: args ? flagString(args, "key-file") : undefined, fallbackKeyFile: args ? flagString(args, "fallback-key-file") : undefined });
+}
+
+/** Both keys for a prod-channel branch (throws SigningSetupError with what to do); undefined for a dev-channel one. */
+export function signerFor(proj: Project, branchChannel: Channel, paths: Record<KeyRole, string>): DualSigner | undefined {
+	return branchChannel === "prod" ? loadSigner(proj, paths) : undefined;
+}
+
+export type SigningStatus =
+	| { required: false }
+	| { required: true; ready: true; mainKey: string; fallbackKey: string }
+	| { required: true; ready: false; problem: string };
+
+/** Whether a release to this channel will be signed, and whether the keys are there (dry runs; no signature is made). */
+export function signingStatus(proj: Project, branchChannel: Channel, paths: Record<KeyRole, string>): SigningStatus {
+	if (branchChannel !== "prod") return { required: false };
+	try {
+		const signer = loadSigner(proj, paths);
+		return { required: true, ready: true, mainKey: signer.files.main.publicKey, fallbackKey: signer.files.fallback.publicKey };
+	} catch (error) {
+		return { required: true, ready: false, problem: (error as Error).message };
+	}
+}
+
+export function describeSigning(status: SigningStatus): string {
+	if (!status.required) return "unsigned (dev-channel branch)";
+	if (status.ready) return `sig (main ${status.mainKey.slice(0, 8)}...) + sigF (fallback ${status.fallbackKey.slice(0, 8)}...), made when published`;
+	return `NOT READY: ${status.problem}`;
 }

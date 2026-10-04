@@ -13,13 +13,19 @@
  *   "revoked": { "123": true },               // optional
  *   "devBadgeId": null,
  *   "kernel": "node_modules/@typetorch/kernel", // optional, folder with place.project.json
- *   "approval": "all"                           // "all" (default) | "prod" | "none": which deploys need `typetorch approve`
+ *   "approval": "all",                          // "all" (default) | "prod" | "none": which deploys need `typetorch approve`
+ *   // Prod signing (CLI 0.5, plans/03 "Signed prod messages and heads"), written by `typetorch keys ...`:
+ *   "signingPublicKeys": ["<base64>"],          // trusted main public keys = the key asset's PublicKeys
+ *   "revokedKeys": ["<base64>"],                // = the key asset's RevokedKeys (optional)
+ *   "fallbackPublicKey": "<base64>",            // the fallback key; kernel deploy stamps it as FallbackPublicKey
+ *   "keyAssetId": 123                            // the key asset; kernel deploy stamps it as KeyAssetId
  * }
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { isRecord } from "./json";
+import { isRecord, setJsonFields } from "./json";
 import { branchNameError, isChannel, type Channel } from "./naming";
+import { isTestVectorKey, publicKeyError, publicKeyListProblems } from "./signing";
 
 export const CONFIG_FILE = "typetorch.json";
 export const ROLES = ["owner", "admin", "dev"] as const;
@@ -37,8 +43,16 @@ export interface ProjectConfig {
 	revoked?: Record<string, true>;
 	devBadgeId: number | null;
 	kernel?: string;
-	/** Which deploys a person must approve and sign (`typetorch approve`): every one, prod-channel branches, or none. */
+	/** Which deploys a person must approve (`typetorch approve`): every one, prod-channel branches, or none. */
 	approval: ApprovalPolicy;
+	/** Trusted main public keys (base64): the key asset's PublicKeys. Written by `keys init` / `keys rotate`. */
+	signingPublicKeys?: string[];
+	/** Revoked public keys (main or fallback): the key asset's RevokedKeys. */
+	revokedKeys?: string[];
+	/** The fallback public key (`keys init --fallback`); stamped on the kernel as FallbackPublicKey. */
+	fallbackPublicKey?: string;
+	/** The key asset (`keys init`); stamped on the kernel as KeyAssetId. */
+	keyAssetId?: number;
 }
 
 export const APPROVAL_POLICIES = ["all", "prod", "none"] as const;
@@ -69,8 +83,12 @@ const KNOWN_KEYS = new Set([
 	"revoked",
 	"devBadgeId",
 	"kernel",
-	"signingPublicKey", // CLI 0.2-0.3 (deploy signing, removed): ignored
+	"signingPublicKey", // CLI 0.2-0.3 (one key; removed in 0.4): ignored
 	"approval",
+	"signingPublicKeys",
+	"revokedKeys",
+	"fallbackPublicKey",
+	"keyAssetId",
 ]);
 
 function positiveInt(value: unknown): number | undefined {
@@ -181,6 +199,22 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 		errors.push(`"approval" must be one of ${APPROVAL_POLICIES.join(", ")}`);
 	}
 
+	if (raw.signingPublicKeys !== undefined) errors.push(...publicKeyListProblems("signingPublicKeys", raw.signingPublicKeys));
+	if (raw.revokedKeys !== undefined) errors.push(...publicKeyListProblems("revokedKeys", raw.revokedKeys));
+	if (raw.fallbackPublicKey !== undefined) {
+		const problem = publicKeyError(raw.fallbackPublicKey);
+		if (problem) errors.push(`"fallbackPublicKey" ${problem}`);
+		else if (isTestVectorKey(raw.fallbackPublicKey as string)) errors.push(`"fallbackPublicKey" is a public test-vector key from plans/03`);
+		else if (Array.isArray(raw.signingPublicKeys) && raw.signingPublicKeys.includes(raw.fallbackPublicKey)) {
+			errors.push(`"fallbackPublicKey" is also in "signingPublicKeys"; the fallback must be a separate key pair`);
+		}
+	}
+	let keyAssetId: number | undefined;
+	if (raw.keyAssetId !== undefined) {
+		keyAssetId = positiveInt(raw.keyAssetId);
+		if (keyAssetId === undefined) errors.push(`"keyAssetId" must be a positive integer (the key asset's id)`);
+	}
+
 	if (errors.length > 0) return { errors, warnings };
 	return {
 		errors,
@@ -198,6 +232,10 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			devBadgeId,
 			kernel: typeof raw.kernel === "string" ? raw.kernel : undefined,
 			approval: (raw.approval as ApprovalPolicy | undefined) ?? "all",
+			...(Array.isArray(raw.signingPublicKeys) ? { signingPublicKeys: raw.signingPublicKeys as string[] } : {}),
+			...(Array.isArray(raw.revokedKeys) ? { revokedKeys: raw.revokedKeys as string[] } : {}),
+			...(typeof raw.fallbackPublicKey === "string" ? { fallbackPublicKey: raw.fallbackPublicKey } : {}),
+			...(keyAssetId !== undefined ? { keyAssetId } : {}),
 		},
 	};
 }
@@ -237,4 +275,19 @@ export function loadProject(configPath?: string, cwd: string = process.cwd()): P
 	const { config, errors, warnings } = validateConfig(raw);
 	if (!config) throw new ConfigError(`${path} is invalid:\n  - ${errors.join("\n  - ")}`);
 	return { root: dirname(path), configPath: path, config, warnings };
+}
+
+export type KeyConfigField = "signingPublicKeys" | "revokedKeys" | "fallbackPublicKey" | "keyAssetId";
+
+/**
+ * Writes key fields into the project's typetorch.json (only those fields change; formatting stays) and refreshes
+ * `proj.config`. Refuses to write a file that would not validate.
+ */
+export function updateProjectConfig(proj: Project, updates: Partial<Record<KeyConfigField, unknown>>) {
+	const text = readFileSync(proj.configPath, "utf8");
+	const next = setJsonFields(text, updates);
+	const { config, errors } = validateConfig(JSON.parse(next));
+	if (!config) throw new ConfigError(`refusing to write an invalid ${proj.configPath}:\n  - ${errors.join("\n  - ")}`);
+	writeFileSync(proj.configPath, next);
+	proj.config = config;
 }

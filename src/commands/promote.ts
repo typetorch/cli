@@ -3,7 +3,10 @@
  * new seq. No build, upload or moderation wait. The artifact comes from the deployment history (anything that went out
  * before, on any branch) or from uploads.jsonl (an upload whose deploy stopped after moderation, or `typetorch
  * upload`). An upload not yet known to be Approved is checked with Roblox first. Like every release it follows the
- * approval policy (approve.ts).
+ * approval policy (approve.ts), and a prod-channel branch's message is signed with both keys when it is published.
+ *
+ * A prod-channel branch only takes prod-channel artifacts, even with --force ("rebuild for prod"). The arguments may
+ * also be given as `promote <artifact> <branch>` when the second one is a known branch and the first one isn't.
  */
 import { flagBool, UsageError, type ParsedArgs } from "../args";
 import { matchDeployment, type UploadRecord } from "../deployments";
@@ -13,8 +16,9 @@ import { branchChannel, branchNameError, strictest } from "../naming";
 import { assertNoForeignDraft } from "../registry";
 import type { ProposalArtifact } from "../proposals";
 import { releaseExisting } from "./approve";
-import { openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common";
-import { checkChannelGuard } from "./deploy";
+import type { Project } from "../config";
+import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback, type History } from "./common";
+import { checkChannelGuard, checkPromoteChannel } from "./deploy";
 
 export const promoteFlags = {
 	force: "boolean",
@@ -23,7 +27,22 @@ export const promoteFlags = {
 	message: "string",
 	propose: "boolean",
 	"proposed-by": "string",
+	...KEY_FILE_FLAGS,
 } as const;
+
+/** Branch names this project knows: the default branch, channels, git-branch mappings and the deployed heads. */
+export function knownBranches(proj: Project, history: Pick<History, "heads" | "snapshot">): Set<string> {
+	const known = new Set<string>([proj.config.defaultBranch, ...Object.keys(proj.config.channels), ...Object.values(proj.config.branches)]);
+	for (const branch of history.heads.keys()) known.add(branch);
+	for (const branch of Object.keys(history.snapshot?.value.channels ?? {})) known.add(branch);
+	return known;
+}
+
+/** `promote <branch> <artifact>`, or `promote <artifact> <branch>` when only the second is a known branch. */
+export function promoteArguments(first: string, second: string, known: Set<string>): { branch: string; wanted: string; swapped: boolean } {
+	if (!known.has(first) && known.has(second)) return { branch: second, wanted: first, swapped: true };
+	return { branch: first, wanted: second, swapped: false };
+}
 
 interface Candidate extends ProposalArtifact {
 	seq: number;
@@ -58,9 +77,8 @@ function fromUpload(upload: UploadRecord): Candidate {
 }
 
 export async function promoteCommand(args: ParsedArgs) {
-	const [branch, wanted] = args.positionals;
-	if (!branch || !wanted) throw new UsageError("usage: typetorch promote <branch> <artifactId|assetId|#seq|commit>");
-	if (branchNameError(branch)) throw new UsageError(branchNameError(branch)!);
+	const [first, second] = args.positionals;
+	if (!first || !second) throw new UsageError("usage: typetorch promote <branch> <artifactId|assetId|#seq|commit>");
 	const proj = project(args);
 	const dryRun = flagBool(args, "dry-run");
 	const force = flagBool(args, "force");
@@ -74,6 +92,8 @@ export async function promoteCommand(args: ParsedArgs) {
 	const history = await watch.stage("read", () => readHistory(proj, api, noRegistry ? "--no-registry" : "no API key (dry run)"));
 	if (!history.snapshot && api) warnRegistryFallback(history.unavailable ?? "unknown");
 	if (history.snapshot) assertNoForeignDraft(history.snapshot, force);
+	const { branch, wanted } = promoteArguments(first, second, knownBranches(proj, history));
+	if (branchNameError(branch)) throw new UsageError(branchNameError(branch)!);
 
 	// Anything deployed before (newest first, this branch first), then uploads that never went out.
 	const deployed = matchDeployment(history.rows, wanted, branch);
@@ -89,6 +109,7 @@ export async function promoteCommand(args: ParsedArgs) {
 	if (head && head.assetId === target.assetId) throw new Error(`${target.artifactId} (asset ${target.assetId}) is already live on ${branch}`);
 
 	const targetChannel = strictest(branchChannel(proj.config, branch), history.snapshot?.value.channels[branch]);
+	checkPromoteChannel({ branch, branchChannel: targetChannel, artifactId: target.artifactId, artifactChannel: target.channel });
 	checkChannelGuard({ branch, branchChannel: targetChannel, artifactChannel: target.channel, dirty: target.dirty, force });
 
 	// An upload whose moderation wasn't Approved yet: ask Roblox now (needs the assets key), never publish otherwise.

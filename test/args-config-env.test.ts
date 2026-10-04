@@ -5,8 +5,9 @@ import { join } from "node:path";
 import { parseArgs, UsageError } from "../src/args";
 import { validateConfig } from "../src/config";
 import { childEnv, parseDotEnv, Settings } from "../src/env";
+import { generateSigningKey, TEST_VECTOR_PUBLIC_KEYS } from "../src/signing";
 import { isGeneratedPath, porcelainPaths } from "../src/git";
-import { jsonEqual, parseJsonc } from "../src/json";
+import { jsonEqual, parseJsonc, setJsonFields, topLevelValueSpan } from "../src/json";
 
 describe("parseArgs", () => {
 	const spec = { branch: "string", "dry-run": "boolean" } as const;
@@ -63,6 +64,19 @@ describe("validateConfig", () => {
 		expect(validateConfig({ ...good, revoked: { "5": true, "6": false } }).config?.revoked).toEqual({ "5": true });
 	});
 	test("warns about unknown keys", () => expect(validateConfig({ ...good, extra: 1 }).warnings).toHaveLength(1));
+	test("signing fields: base64 32-byte keys, no duplicates, a separate fallback, no test-vector keys, a numeric key asset", () => {
+		const a = generateSigningKey().publicKey;
+		const b = generateSigningKey().publicKey;
+		const ok = validateConfig({ ...good, signingPublicKeys: [a], revokedKeys: [b], fallbackPublicKey: b, keyAssetId: "123" });
+		expect(ok.errors).toEqual([]);
+		expect(ok.config).toMatchObject({ signingPublicKeys: [a], revokedKeys: [b], fallbackPublicKey: b, keyAssetId: 123 });
+		expect(validateConfig({ ...good, signingPublicKeys: a }).errors[0]).toMatch(/must be a list/);
+		expect(validateConfig({ ...good, signingPublicKeys: [a, a] }).errors[0]).toMatch(/twice/);
+		expect(validateConfig({ ...good, signingPublicKeys: ["AAAA"] }).errors[0]).toMatch(/32-byte/);
+		expect(validateConfig({ ...good, signingPublicKeys: [a], fallbackPublicKey: a }).errors[0]).toMatch(/separate key pair/);
+		expect(validateConfig({ ...good, fallbackPublicKey: TEST_VECTOR_PUBLIC_KEYS[1] }).errors[0]).toMatch(/test-vector/);
+		expect(validateConfig({ ...good, keyAssetId: -4 }).errors[0]).toMatch(/keyAssetId/);
+	});
 });
 
 describe("env", () => {
@@ -133,6 +147,11 @@ describe("env", () => {
 		expect(withExtra.NODE_ENV).toBe("development");
 		expect(withExtra.OPENCLOUD_API_KEY).toBeUndefined();
 	});
+	test("the key file paths never reach a child, even when listed in TYPETORCH_CHILD_ENV", () => {
+		const env = { PATH: "/bin", TYPETORCH_KEY_FILE: "/k/main.key", TYPETORCH_FALLBACK_KEY_FILE: "/k/fallback.key", TYPETORCH_CHILD_ENV: "TYPETORCH_KEY_FILE,TYPETORCH_FALLBACK_KEY_FILE,TYPETORCH_SIGNING_KEY" };
+		const child = childEnv({}, { env, settings: new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-child4-")), env }) });
+		expect(child).toEqual({ PATH: "/bin", GIT_TERMINAL_PROMPT: "0" });
+	});
 	test("a value equal to a secret never reaches a child, whatever its name", () => {
 		const env = { PATH: "/bin", TERM: "shared-key-0000", OPENCLOUD_API_KEY: "shared-key-0000" };
 		const child = childEnv({}, { env, settings: new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-child3-")), env }) });
@@ -158,6 +177,14 @@ describe("git helpers", () => {
 });
 
 describe("json", () => {
+	test("setJsonFields: replaces values in place, appends new keys, keeps the rest of the text", () => {
+		const text = '{\n\t"project": "p",\n\t"creator": { "groupId": 3 },\n\t"signingPublicKeys": ["x"],\n\t"s": "a,}\\"b"\n}\n';
+		const next = setJsonFields(text, { signingPublicKeys: ["y", "z"], keyAssetId: 55 });
+		expect(next).toBe('{\n\t"project": "p",\n\t"creator": { "groupId": 3 },\n\t"signingPublicKeys": ["y","z"],\n\t"s": "a,}\\"b",\n\t"keyAssetId": 55\n}\n');
+		expect(JSON.parse(next)).toEqual({ project: "p", creator: { groupId: 3 }, signingPublicKeys: ["y", "z"], s: 'a,}"b', keyAssetId: 55 });
+		expect(setJsonFields("{}", { a: 1 })).toBe('{\n\t"a": 1\n}');
+		expect(topLevelValueSpan('{"a":{"b":1},"b":2}', "b")).toEqual([17, 18]);
+	});
 	test("parseJsonc", () => {
 		expect(parseJsonc(`{ // c\n "a": "x//y", /* b */ "b": [1, 2,], }`)).toEqual({ a: "x//y", b: [1, 2] });
 	});

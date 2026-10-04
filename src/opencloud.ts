@@ -6,6 +6,7 @@
 import { debug } from "./log";
 import { redact } from "./env";
 import type { Channel } from "./naming";
+import { signDual, type DualSigner } from "./signing";
 
 export const API = "https://apis.roblox.com";
 
@@ -126,6 +127,20 @@ export class OpenCloud {
 		return operationId;
 	}
 
+	/**
+	 * Starts adding a NEW VERSION to an existing Model asset from an .rbxm (`PATCH /assets/v1/assets/{id}`; spike S1b:
+	 * works for Models, about 1.3 s, Approved). Used for the key asset. Returns the operation id.
+	 */
+	async updateModelAsset(input: { assetId: number; bytes: Uint8Array; fileName: string }): Promise<string> {
+		const form = new FormData();
+		form.append("request", JSON.stringify({ assetId: input.assetId }));
+		form.append("fileContent", new Blob([input.bytes], { type: "model/x-rbxm" }), input.fileName);
+		const patched = await this.call("PATCH", `/assets/v1/assets/${input.assetId}`, { body: form, timeoutMs: 300_000 });
+		const operationId = patched?.operationId ?? String(patched?.path ?? "").split("/").pop();
+		if (!operationId) throw new Error(`asset update returned no operation: ${JSON.stringify(patched)}`);
+		return operationId;
+	}
+
 	/** Polls an assets operation until done. */
 	async waitForOperation(operationId: string, timeoutSeconds = 600): Promise<any> {
 		const started = performance.now();
@@ -165,6 +180,26 @@ export class OpenCloud {
 		});
 	}
 
+	// Luau Execution -------------------------------------------------------------------------------------------------
+
+	/**
+	 * Runs a Luau script in a headless server of the place's latest version (Open Cloud Luau Execution; scopes
+	 * universe.place.luau-execution-session:read + :write) and returns its return values. Spike S9.
+	 */
+	async runLuau(universeId: number, placeId: number, script: string, timeoutSeconds = 60): Promise<{ state: string; results: unknown[]; error?: unknown }> {
+		const task = await this.call("POST", `/cloud/v2/universes/${universeId}/places/${placeId}/luau-execution-session-tasks`, {
+			json: { script, timeout: `${timeoutSeconds}s` },
+		});
+		let current = task;
+		const started = performance.now();
+		while (current?.state === "QUEUED" || current?.state === "PROCESSING") {
+			if ((performance.now() - started) / 1000 > timeoutSeconds + 60) throw new Error(`Luau Execution task ${task?.path} still ${current.state}`);
+			await Bun.sleep(1500);
+			current = await this.call("GET", `/cloud/v2/${task.path}`);
+		}
+		return { state: String(current?.state), results: Array.isArray(current?.output?.results) ? current.output.results : [], error: current?.error };
+	}
+
 	// Places ---------------------------------------------------------------------------------------------------------
 
 	/** Publishes a place file (.rbxl) as the new live version. Returns the response ({ versionNumber }). */
@@ -190,13 +225,16 @@ export class OpenCloud {
 }
 
 export const DEPLOY_TOPIC = "TypeTorch/deploy";
+/** Tells servers to re-read the key asset now (plans/03 "Rekey hint"): `{"t": unixMs}`, unsigned, a hint only. */
+export const REKEY_TOPIC = "TypeTorch/rekey";
 export const MESSAGE_LIMIT = 1024;
 
 /**
  * The deploy message the kernel reads (Kernel.server.luau onDeployMessage). At most 1 KiB. Servers on branch `b` swap
- * to it and persist it as their branch head (in-game DataStore `head/<branch>`, higher seq wins), so it carries
- * everything a head needs even when the configs registry isn't writable. Unsigned: signing was removed (user decision,
- * 2026-10-04); a person approves each deploy in the CLI instead (`typetorch approve`).
+ * to it and persist it as their branch head (higher seq wins), so it carries everything a head needs even when the
+ * configs registry isn't writable. Messages to prod-channel branches carry `sig` (main key) and `sigF` (fallback key)
+ * over the canonical string of the other fields (signing.ts; plans/03 "Signed prod messages and heads"); messages to
+ * dev-channel branches are unsigned.
  */
 export interface DeployMessage {
 	/** Branch: only servers on this branch swap. */
@@ -215,10 +253,14 @@ export interface DeployMessage {
 	t: number;
 	/** 1 for rollbacks. */
 	r?: 1;
+	/** Prod only: base64 Ed25519 signature by the main key. */
+	sig?: string;
+	/** Prod only: base64 Ed25519 signature by the fallback key. */
+	sigF?: string;
 }
 
-/** Builds a deploy message. */
-export function deployMessage(input: Omit<DeployMessage, "t" | "r"> & { rollback?: boolean; t?: number }): DeployMessage {
+/** Builds a deploy message; signed with both keys when a signer is given (prod-channel branches only). */
+export function deployMessage(input: Omit<DeployMessage, "t" | "r" | "sig" | "sigF"> & { rollback?: boolean; t?: number }, signer?: DualSigner): DeployMessage {
 	const message: DeployMessage = {
 		b: input.b,
 		a: input.a,
@@ -229,7 +271,13 @@ export function deployMessage(input: Omit<DeployMessage, "t" | "r"> & { rollback
 		t: input.t ?? Date.now(),
 	};
 	if (input.rollback) message.r = 1;
+	if (signer) Object.assign(message, signDual(signer, message));
 	return message;
+}
+
+/** The rekey hint's text. */
+export function encodeRekeyMessage(t = Date.now()): string {
+	return JSON.stringify({ t });
 }
 
 /** The JSON text sent to MessagingService; throws when it is over the 1 KiB limit. */

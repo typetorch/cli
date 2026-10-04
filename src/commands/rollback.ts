@@ -1,8 +1,8 @@
 /**
  * `typetorch rollback`: re-point a branch at an already approved payload asset (no build, upload or moderation wait)
  * and tell its servers. Without --to it picks the newest earlier deployment on the branch whose artifact differs from
- * the live head. Like every release it follows the approval policy (approve.ts): a person approves and signs it, or it
- * becomes a proposal for `typetorch approve`.
+ * the live head. Like every release it follows the approval policy (approve.ts): a person approves it, or it becomes a
+ * proposal for `typetorch approve`. A prod-channel branch's message is signed with both keys when it is published.
  */
 import { flagBool, flagString, UsageError, type ParsedArgs } from "../args";
 import { matchDeployment, previousDifferent } from "../deployments";
@@ -11,7 +11,7 @@ import { Stopwatch } from "../log";
 import { branchChannel, branchFromGit, branchNameError, strictest } from "../naming";
 import { assertNoForeignDraft } from "../registry";
 import { releaseExisting } from "./approve";
-import { openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common";
+import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common";
 import { checkChannelGuard } from "./deploy";
 
 export const rollbackFlags = {
@@ -23,6 +23,7 @@ export const rollbackFlags = {
 	message: "string",
 	propose: "boolean",
 	"proposed-by": "string",
+	...KEY_FILE_FLAGS,
 } as const;
 
 export async function rollbackCommand(args: ParsedArgs) {

@@ -14,8 +14,11 @@
  *     - anyone else (an agent, the dev-server, --propose): the proposal is written and nothing is published;
  *   - approval not required ("none", or "prod" for a dev-channel branch): published at once.
  *
- * Limitation: the approval is enforced by the CLI only. Deploy messages are not signed, so anything that holds the Open
- * Cloud deploy key (or runs code on any server of the universe) can still publish a deploy message (audit S-C2).
+ * Signing is separate from approval (plans/03 "Signed prod messages and heads"): whatever ends up publishing a release
+ * to a prod-channel branch (the y/N here, or "approval": "none") signs it with both key files (`sig` + `sigF`); the
+ * keys are loaded before the y/N so a missing key fails early. Dev-channel releases are never signed. The approval
+ * itself is enforced by the CLI only; for dev-channel branches (unsigned) anything holding the Open Cloud deploy key can
+ * still publish a message (S-C2 stays open for dev servers by design).
  */
 import { flagBool, flagString, UsageError, type ParsedArgs } from "../args";
 import { approvalRequired, type ApprovalPolicy, type Project } from "../config";
@@ -40,8 +43,22 @@ import {
 	type ProposalState,
 } from "../proposals";
 import type { RegistryApi } from "../registry";
-import { openCloud, project, projectStateDir, readHistory, registryApi, warnRegistryFallback, type History } from "./common";
-import { checkChannelGuard } from "./deploy";
+import type { KeyRole } from "../keyfiles";
+import type { DualSigner } from "../signing";
+import {
+	describeSigning,
+	openCloud,
+	project,
+	projectStateDir,
+	readHistory,
+	registryApi,
+	signerFor,
+	signingKeyPaths,
+	signingStatus,
+	warnRegistryFallback,
+	type History,
+} from "./common";
+import { checkChannelGuard, checkPromoteChannel } from "./deploy";
 import { makeEntry, messageFor, registryMessage, release, type ReleaseResult } from "./release";
 
 export const PROPOSED_BY_VAR = "TYPETORCH_PROPOSED_BY";
@@ -100,7 +117,10 @@ export function describeProposal(state: ProposalState, head: LiveHead | undefine
 	}
 	if (head && head.assetId === a.assetId) lines.push(yellow("  note       this artifact is already live on the branch"));
 	if (p.force) lines.push(yellow("  FORCED     proposed with --force (channel guard overridden)"));
-	if (p.branchChannel === "prod") lines.push(yellow("  PROD       this goes to a prod-channel branch: public servers"));
+	if (p.branchChannel === "prod") {
+		lines.push(yellow("  PROD       this goes to a prod-channel branch: public servers"));
+		lines.push("  signing    sig (main key) + sigF (fallback key), made when published");
+	}
 	if (state.lastError) lines.push(red(`  last try   failed: ${state.lastError}`));
 	return lines;
 }
@@ -112,7 +132,7 @@ export function describeProposal(state: ProposalState, head: LiveHead | undefine
 export async function approveProposal(
 	proj: Project,
 	state: ProposalState,
-	options: { io?: Interaction; noRegistry?: boolean; approver?: string; oc?: OpenCloud } = {},
+	options: { io?: Interaction; noRegistry?: boolean; approver?: string; oc?: OpenCloud; keyPaths?: Record<KeyRole, string>; signer?: DualSigner } = {},
 ): Promise<ReleaseResult | undefined> {
 	const io = options.io ?? interaction();
 	if (!io.interactive) throw new NotInteractiveError("approving needs a person at an interactive terminal (stdin is not a TTY)");
@@ -128,8 +148,11 @@ export async function approveProposal(
 	for (const line of describeProposal(state, head)) info(line);
 
 	const targetChannel = strictest(branchChannel(proj.config, p.branch), history.snapshot?.value.channels[p.branch], p.branchChannel);
+	if (p.kind === "promote") checkPromoteChannel({ branch: p.branch, branchChannel: targetChannel, artifactId: p.artifact.artifactId, artifactChannel: p.artifact.channel });
 	checkChannelGuard({ branch: p.branch, branchChannel: targetChannel, artifactChannel: p.artifact.channel, dirty: p.artifact.dirty, force: p.force });
 	if (head && head.assetId === p.artifact.assetId) throw new Error(`${p.artifact.artifactId} is already live on ${p.branch}; reject the proposal (typetorch reject ${p.id})`);
+	// Prod-channel: both keys, loaded before the y/N so a missing or mismatched key fails before anyone says yes.
+	const signer = targetChannel === "prod" ? (options.signer ?? signerFor(proj, targetChannel, options.keyPaths ?? signingKeyPaths(proj))) : undefined;
 
 	if (!(await io.confirm(`Publish this ${p.kind} to ${p.branch}?`))) {
 		info(`not published; proposal ${p.id} stays pending (typetorch approve ${p.id} / typetorch reject ${p.id})`);
@@ -151,6 +174,8 @@ export async function approveProposal(
 			note: p.message,
 			assetName: p.artifact.assetName,
 			watch,
+			branchChannel: targetChannel,
+			signer,
 			extra: {
 				...(p.artifact.sha256 ? { sha256: p.artifact.sha256 } : {}),
 				...(p.changes ? { changes: p.changes } : {}),
@@ -225,6 +250,10 @@ export async function finishRelease(input: {
 	assetName?: string;
 	extra?: Record<string, unknown>;
 	io?: Interaction;
+	/** Key files for a prod-channel branch (default: signingKeyPaths). */
+	keyPaths?: Record<KeyRole, string>;
+	/** Both keys, already loaded (tests); else loaded from keyPaths for a prod-channel branch. */
+	signer?: DualSigner;
 }): Promise<ReleaseOutcome> {
 	const { proj, mode, request } = input;
 	const io = input.io ?? interaction();
@@ -232,10 +261,16 @@ export async function finishRelease(input: {
 		const proposal = propose(proj, request, input.proposer);
 		if (mode.kind === "propose") return { kind: "proposed", proposal };
 		info(`proposal ${proposal.id} written; approve it now (or later: typetorch approve ${proposal.id})`);
-		const result = await approveProposal(proj, { proposal, status: "pending" }, { io, noRegistry: input.noRegistry, oc: input.oc });
+		const result = await approveProposal(proj, { proposal, status: "pending" }, { io, noRegistry: input.noRegistry, oc: input.oc, keyPaths: input.keyPaths, signer: input.signer });
 		return result ? { kind: "published", result } : { kind: "declined", proposal };
 	}
 	if (!input.oc) settings().requireApiKey("deploy"); // throws the "no key" message
+	let signer: DualSigner | undefined;
+	if (request.branchChannel === "prod") {
+		// remote-claude only deploys dev-channel branches; it never gets near a signing key.
+		if (input.proposer.name.startsWith("dev-server")) throw new Error(`the dev-server never publishes to prod-channel branch ${request.branch}`);
+		signer = input.signer ?? signerFor(proj, "prod", input.keyPaths ?? signingKeyPaths(proj));
+	}
 	const result = await release({
 		proj,
 		oc: input.oc!,
@@ -249,6 +284,8 @@ export async function finishRelease(input: {
 		note: request.message,
 		assetName: input.assetName,
 		watch: input.watch,
+		branchChannel: request.branchChannel,
+		signer,
 		extra: { ...(request.changes ? { changes: request.changes } : {}), proposedBy: input.proposer.name, ...input.extra },
 	});
 	return { kind: "published", result };
@@ -278,10 +315,12 @@ export async function releaseExisting(input: {
 	const { proj, args, kind, branch, history } = input;
 	const note = flagString(args, "message");
 	const head = history.heads.get(branch);
+	const keyPaths = signingKeyPaths(proj, args);
 	if (input.dryRun) {
 		const ending = modeFor(proj, args, input.branchChannel).mode.kind;
 		const entry = makeEntry({ action: kind, branch, artifact: input.artifact, by: input.by }, history.snapshot?.value, history.local);
-		const data = messageFor(entry);
+		const data = messageFor(entry, undefined, { placeholders: input.branchChannel === "prod" });
+		const signing = signingStatus(proj, input.branchChannel, keyPaths);
 		const plan = {
 			dryRun: true,
 			branch,
@@ -289,6 +328,7 @@ export async function releaseExisting(input: {
 			to: input.artifact,
 			seq: entry.seq,
 			approval: { policy: proj.config.approval, ending },
+			signing,
 			registry: history.snapshot
 				? { readable: true, message: registryMessage(kind, branch, input.artifact.artifactId, note) }
 				: { readable: false, reason: history.unavailable },
@@ -297,6 +337,7 @@ export async function releaseExisting(input: {
 		if (isJson()) return emitJson(plan);
 		info(bold(`dry run: would ${kind === "rollback" ? "roll back" : "promote"} ${input.summary} as #${entry.seq}`));
 		info(`  approval  policy "${proj.config.approval}": ${ending}`);
+		info(`  signing   ${describeSigning(signing)}`);
 		info(`  registry  ${history.snapshot ? `would publish "${plan.registry.message}"` : `not used (${history.unavailable})`}`);
 		info(`  message   ${DEPLOY_TOPIC} ${JSON.stringify(data)}`);
 		return;
@@ -315,6 +356,7 @@ export async function releaseExisting(input: {
 		noRegistry: flagBool(args, "no-registry"),
 		assetName: input.artifact.assetName,
 		extra: input.artifact.sha256 ? { sha256: input.artifact.sha256 } : undefined,
+		keyPaths,
 	});
 	if (outcome.kind === "proposed") return reportProposal(outcome.proposal);
 	if (outcome.kind === "declined") {
@@ -330,7 +372,7 @@ export async function releaseExisting(input: {
 
 // Commands ---------------------------------------------------------------------------------------------------------
 
-export const approveFlags = { "no-registry": "boolean" } as const;
+export const approveFlags = { "no-registry": "boolean", "key-file": "string", "fallback-key-file": "string" } as const;
 
 export async function approveCommand(args: ParsedArgs) {
 	const io = interaction();
@@ -362,7 +404,7 @@ export async function approveCommand(args: ParsedArgs) {
 			if (!state) throw new UsageError(`no pending proposal "${answer}"`);
 		}
 	}
-	const result = await approveProposal(proj, state, { io, noRegistry: flagBool(args, "no-registry") });
+	const result = await approveProposal(proj, state, { io, noRegistry: flagBool(args, "no-registry"), keyPaths: signingKeyPaths(proj, args) });
 	if (!result) return;
 	if (isJson()) return emitJson({ proposal: state.proposal.id, deployment: result.entry, message: result.message, registry: result.registry });
 	info(bold(`approved ${state.proposal.id}: #${result.entry.seq} ${state.proposal.branch} -> ${result.entry.artifactId} (asset ${result.entry.assetId})`));

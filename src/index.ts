@@ -12,6 +12,7 @@ import { doctorCommand, doctorFlags } from "./commands/doctor";
 import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history";
 import { approveCommand, approveFlags, proposalsCommand, proposalsFlags, rejectCommand, rejectFlags } from "./commands/approve";
 import { kernelCommand, kernelFlags } from "./commands/kernel";
+import { keysCommand, keysFlags } from "./commands/keys";
 import { promoteCommand, promoteFlags } from "./commands/promote";
 import { rollbackCommand, rollbackFlags } from "./commands/rollback";
 import { redact, Settings, useSettings } from "./env";
@@ -54,6 +55,7 @@ const COMMANDS: Record<string, Command> = {
 		summary: "build, upload, wait for Approved, then approve (or propose) and tell live servers",
 		usage: `typetorch deploy [--branch <b>] [--channel prod|dev] [--no-build] [--dry-run] [--message <text>] [--force]
                  [--no-registry] [--moderation-timeout <s>] [--propose] [--proposed-by <who>]
+                 [--key-file <path>] [--fallback-key-file <path>]
 
   clean build -> upload (new Model asset) -> moderation = Approved -> "uploaded" record -> approval -> registry ->
   deploy message -> deployments.jsonl (in the state dir: TYPETORCH_STATE_DIR, default .typetorch/)
@@ -66,17 +68,21 @@ const COMMANDS: Record<string, Command> = {
   --no-build     deploy the last build (.typetorch/payload.rbxm)
   --force        allow a dev-channel or dirty artifact on a prod-channel branch, or publish a config draft that has
                  other unpublished changes
-  --no-registry  skip the ConfigService registry (servers persist the head from the deploy message anyway)`,
+  --no-registry  skip the ConfigService registry (servers persist the head from the deploy message anyway)
+  Prod-channel branches: the message is signed with both keys (sig + sigF) when it is published; the key files are
+  checked before the upload. Dev-channel messages are unsigned. See \`typetorch keys\`.`,
 	},
 	promote: {
 		flags: promoteFlags,
 		run: promoteCommand,
 		summary: "point a branch at an already uploaded artifact (new seq, no rebuild)",
 		usage: `typetorch promote <branch> <artifactId|assetId|#seq|commit> [--force] [--dry-run] [--no-registry] [--message <text>]
+                  [--key-file <path>] [--fallback-key-file <path>]
 
-  Re-publishes an approved payload asset to <branch> with a new seq and a signed deploy message. Finds it in the
-  deployments (any branch) or in uploads.jsonl (an upload whose deploy stopped, or \`typetorch upload\`). A
-  dev-channel or dirty artifact needs --force on a prod-channel branch.
+  Re-publishes an approved payload asset to <branch> with a new seq (signed with both keys on a prod-channel branch).
+  Finds it in the deployments (any branch) or in uploads.jsonl (an upload whose deploy stopped, or \`typetorch
+  upload\`). A prod-channel branch takes only prod-channel artifacts, even with --force ("rebuild for prod"); a dirty
+  one needs --force. \`promote <artifact> <branch>\` works too when only the second is a known branch.
   Approval (typetorch.json "approval": "all" by default, "prod", or "none"): a person at a terminal approves right
   after the upload (y/N). Anyone else (an agent, the dev-server, --propose) only writes a proposal:
   approve it with \`typetorch approve <id>\`.
@@ -88,6 +94,7 @@ const COMMANDS: Record<string, Command> = {
 		run: rollbackCommand,
 		summary: "re-point a branch at an earlier, already approved build",
 		usage: `typetorch rollback [--branch <b>] [--to <commit|artifactId|assetId|#seq>] [--force] [--dry-run] [--no-registry]
+                   [--key-file <path>] [--fallback-key-file <path>]
 
   No build, upload or moderation wait. Without --to: the newest earlier deployment on the branch whose artifact
   differs from the live one. Searches the registry (when readable) and the local log.
@@ -123,10 +130,12 @@ const COMMANDS: Record<string, Command> = {
 		run: kernelCommand,
 		summary: "kernel deploy: check, identify, build and (with --replace-place --yes) publish the kernel place",
 		usage: `typetorch kernel deploy [--kernel <dir>] [--dry-run] [--replace-place --yes] [--allow-dirty] [--allow-untagged]
+                        [--fallback-key-file <path>]
 
   1. lune run scripts/check.luau in the kernel dir  2. version (package.json = Constants.luau) + content hash, printed;
   a git checkout must be clean and tagged v<version>  3. rojo build <kernel>/place.project.json -> .typetorch/place.rbxl
-  with KernelVersion/KernelHash/KernelCommit on ServerScriptService.TypeTorchKernel.
+  with KernelVersion/KernelHash/KernelCommit and the signing trust roots KeyAssetId + FallbackPublicKey (from
+  typetorch.json; publishing refuses without them) on ServerScriptService.TypeTorchKernel.
   Publishing only patches the kernel slots once plans/13 lands (needs spike S12). Until then --replace-place --yes
   publishes the whole kernel place, which WIPES Studio/Team Create content; the place version before and after go to
   kernel-deploys.jsonl in the state dir. Kernel dir: --kernel, else typetorch.json "kernel", else
@@ -136,10 +145,37 @@ const COMMANDS: Record<string, Command> = {
 		flags: approveFlags,
 		run: approveCommand,
 		summary: "approve a deploy proposal: details, y/N, publish (interactive only)",
-		usage: `typetorch approve [id] [--no-registry]
+		usage: `typetorch approve [id] [--no-registry] [--key-file <path>] [--fallback-key-file <path>]
 
   Lists pending proposals (newest first), shows the one you pick (branch, artifact, notes, sources, size, proposer,
-  age), asks y/N, then publishes it like a deploy. Refuses when stdin isn't an interactive terminal.`,
+  age), asks y/N, then publishes it like a deploy (signed with both keys on a prod-channel branch). Refuses when
+  stdin isn't an interactive terminal.`,
+	},
+	keys: {
+		flags: keysFlags,
+		run: (args) => keysCommand(args),
+		summary: "keys init [--fallback] / keys rotate: the keys that sign prod-channel deploys",
+		usage: `typetorch keys init [--key-file <path>]
+typetorch keys init --fallback [--force] [--yes] [--fallback-key-file <path>]
+typetorch keys rotate [--yes] [--key-file <path>]
+
+  Prod-channel deploys are signed with two Ed25519 keys (plans/03): sig (MAIN key) and sigF (FALLBACK key). Seeds
+  live in plaintext key files outside every repo and are never printed:
+    main      ~/.config/typetorch/keys/<universeId>.key           (--key-file, or TYPETORCH_KEY_FILE)
+    fallback  ~/.config/typetorch/keys/<universeId>.fallback.key  (--fallback-key-file, or TYPETORCH_FALLBACK_KEY_FILE)
+  (the variables are read from the real environment only, never from an env file).
+  init             the main pair; its public key goes into typetorch.json "signingPublicKeys" and into the KEY ASSET
+                   (a group-owned Model, created through Open Cloud; its id goes into "keyAssetId"). Resumes a
+                   half-finished run. Needs the assets key.
+  init --fallback  the fallback pair; its public key goes into "fallbackPublicKey". Then \`typetorch kernel deploy\`
+                   bakes KeyAssetId and FallbackPublicKey into the place.
+    --force        replace the fallback pair (a leaked one): the old public key is added to the key asset's
+                   RevokedKeys first, then a new pair is made; then \`typetorch kernel deploy\`
+  rotate           a new main pair (a lost or leaked main key): the key asset gets a new version trusting only the new
+                   key and revoking the old one, the key file is replaced, and TypeTorch/rekey tells servers to re-read
+                   the key asset. No restart.
+  --yes            skip the y/N (rotate, init --fallback --force)
+  \`typetorch doctor\` checks both key files against typetorch.json, the key asset and the place.`,
 	},
 	reject: {
 		flags: rejectFlags,
@@ -175,7 +211,7 @@ function help(): string {
 		"global options: --json (machine output), --verbose, --config <typetorch.json>, --env-file <path>, --help",
 		"keys (environment, the TYPETORCH_ENV_FILE file, or .env here or above; never copied to child processes):",
 		"  OPENCLOUD_ASSETS_KEY, OPENCLOUD_DEPLOY_KEY, OPENCLOUD_PLACE_KEY per job, else TYPETORCH_API_KEY / OPENCLOUD_API_KEY",
-		"deploys are approved by a person at a terminal: typetorch approve",
+			"deploys are approved by a person at a terminal: typetorch approve; prod-channel ones are signed (typetorch keys)",
 	].join("\n");
 }
 

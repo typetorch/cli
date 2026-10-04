@@ -7,7 +7,9 @@
  *      (--allow-dirty / --allow-untagged override); a packaged kernel is identified by its version, hash, and the
  *      commit the template's packages manifest recorded. Version and hash are printed and recorded.
  *   3. Build the place with the identity stamped on ServerScriptService.TypeTorchKernel (attributes KernelVersion,
- *      KernelHash, KernelCommit).
+ *      KernelHash, KernelCommit) and the signing trust roots (plans/03 "Key asset"): KeyAssetId (number) and
+ *      FallbackPublicKey (string), from typetorch.json "keyAssetId" / "fallbackPublicKey". Publishing refuses without
+ *      both (prod servers could not verify any deploy); a fallback key file that doesn't match is refused too.
  *   4. Publish: only with --replace-place --yes, which REPLACES THE WHOLE PLACE (it wipes Studio/Team Create content).
  *      The place version before and after go to `<state dir>/kernel-deploys.jsonl`.
  *
@@ -24,9 +26,10 @@ import { luneBinary, OUT_DIR, rojoBinary } from "../build";
 import type { Project } from "../config";
 import { gitInfo } from "../git";
 import { isRecord, parseJsonc } from "../json";
+import { inspectKeyFile } from "../keyfiles";
 import { bold, dim, emitJson, formatBytes, formatSeconds, info, isJson, red, Stopwatch, warn } from "../log";
 import { capture, query, run } from "../proc";
-import { openCloud, project, projectStateDir } from "./common";
+import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, signingKeyPaths } from "./common";
 
 export const kernelFlags = {
 	kernel: "string",
@@ -35,6 +38,7 @@ export const kernelFlags = {
 	yes: "boolean",
 	"allow-dirty": "boolean",
 	"allow-untagged": "boolean",
+	"fallback-key-file": KEY_FILE_FLAGS["fallback-key-file"],
 } as const;
 export const PLACE_FILE = `${OUT_DIR}/place.rbxl`;
 export const PLACE_GEN_PROJECT = `${OUT_DIR}/place.gen.project.json`;
@@ -180,8 +184,33 @@ export function absolutePaths(node: unknown, base: string): unknown {
 	return out;
 }
 
+/**
+ * The signing attributes `kernel deploy` stamps (plans/03): KeyAssetId and FallbackPublicKey, plus the problems that
+ * block a publish (missing values, a fallback key file that doesn't match typetorch.json).
+ */
+export function signingAttributes(proj: Pick<Project, "config">, fallbackKeyFile: string): { attributes: Record<string, string | number>; problems: string[]; warnings: string[] } {
+	const c = proj.config;
+	const attributes: Record<string, string | number> = {};
+	const problems: string[] = [];
+	const warnings: string[] = [];
+	if (c.keyAssetId) attributes.KeyAssetId = c.keyAssetId;
+	else problems.push('typetorch.json has no "keyAssetId" (run `typetorch keys init`): prod servers would have no main keys');
+	if (c.fallbackPublicKey) attributes.FallbackPublicKey = c.fallbackPublicKey;
+	else problems.push('typetorch.json has no "fallbackPublicKey" (run `typetorch keys init --fallback`): prod servers would have no fallback key');
+	if (c.fallbackPublicKey) {
+		if ((c.revokedKeys ?? []).includes(c.fallbackPublicKey)) problems.push(`the fallback key ${c.fallbackPublicKey} is in "revokedKeys"; run \`typetorch keys init --fallback --force\``);
+		const file = inspectKeyFile(fallbackKeyFile, { role: "fallback", universeId: c.universeId });
+		if (file.missing) warnings.push(`no fallback key file at ${fallbackKeyFile}: this machine can't sign prod deploys with the key being baked in`);
+		else if (file.error) problems.push(file.error);
+		else if (file.info?.publicKey !== c.fallbackPublicKey) {
+			problems.push(`the fallback key file ${fallbackKeyFile} (public ${file.info?.publicKey}) doesn't match typetorch.json "fallbackPublicKey" ${c.fallbackPublicKey}`);
+		}
+	}
+	return { attributes, problems, warnings };
+}
+
 /** The place project with the identity attributes on ServerScriptService.TypeTorchKernel. */
-export function stampKernelProject(projectJson: any, kernelDir: string, attributes: Record<string, string>): { project: any; stamped: boolean } {
+export function stampKernelProject(projectJson: any, kernelDir: string, attributes: Record<string, string | number>): { project: any; stamped: boolean } {
 	const copy = absolutePaths(projectJson, kernelDir) as any;
 	let node = copy?.tree;
 	for (const name of KERNEL_SLOT) node = isRecord(node) ? node[name] : undefined;
@@ -230,9 +259,14 @@ export async function kernelCommand(args: ParsedArgs) {
 			: `package${identity.commit ? ` packed from ${identity.commit}${identity.dirty ? "*" : ""}` : ""}`;
 	info(`  kernel   ${identity.version} (api ${identity.api ?? "?"})  hash ${identity.hash.slice(0, 16)}  ${identity.files} files  ${provenance}`);
 
-	// 3. Build, with the identity stamped on the kernel slot.
-	const attributes: Record<string, string> = { KernelVersion: identity.version, KernelHash: identity.hash };
+	// 3. Build, with the identity and the signing trust roots stamped on the kernel slot.
+	const attributes: Record<string, string | number> = { KernelVersion: identity.version, KernelHash: identity.hash };
 	if (identity.commit) attributes.KernelCommit = `${identity.commit}${identity.dirty ? "*" : ""}`;
+	const signing = signingAttributes(proj, signingKeyPaths(proj, args).fallback);
+	Object.assign(attributes, signing.attributes);
+	for (const warning of signing.warnings) warn(warning);
+	for (const problem of signing.problems) warn(problem);
+	info(`  keys     KeyAssetId ${signing.attributes.KeyAssetId ?? "(none)"}  FallbackPublicKey ${signing.attributes.FallbackPublicKey ?? "(none)"}`);
 	mkdirSync(join(proj.root, OUT_DIR), { recursive: true });
 	const placeProject = parseJsonc(readFileSync(join(kernelDir, "place.project.json"), "utf8"));
 	const { project: stamped, stamped: didStamp } = stampKernelProject(placeProject, kernelDir, attributes);
@@ -254,6 +288,8 @@ export async function kernelCommand(args: ParsedArgs) {
 		bytes: bytes.length,
 		universeId: proj.config.universeId,
 		placeId: proj.config.placeId,
+		keyAssetId: proj.config.keyAssetId ?? null,
+		fallbackPublicKey: proj.config.fallbackPublicKey ?? null,
 	};
 
 	// 4. Publish mode. Patching (plans/13) is not built yet: see the TODO at the top.
@@ -275,6 +311,9 @@ export async function kernelCommand(args: ParsedArgs) {
 	}
 	if (!yes) {
 		throw new UsageError(`refusing to publish without --yes (this replaces the whole place at ${where}); check the output above, then run again with --yes`);
+	}
+	if (signing.problems.length > 0) {
+		throw new KernelCheckError(`refusing to publish a kernel that can't verify prod deploys:\n  - ${signing.problems.join("\n  - ")}`);
 	}
 
 	const oc = openCloud("place")!;
@@ -299,6 +338,8 @@ export async function kernelCommand(args: ParsedArgs) {
 		kernelDirty: identity.dirty,
 		kernelTag: identity.tag,
 		kernelSource: identity.source,
+		keyAssetId: proj.config.keyAssetId ?? null,
+		fallbackPublicKey: proj.config.fallbackPublicKey ?? null,
 		placeVersionBefore: before ?? null,
 		...(beforeError ? { placeVersionBeforeError: beforeError.slice(0, 300) } : {}),
 		by,

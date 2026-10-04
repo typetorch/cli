@@ -217,6 +217,125 @@ export function readRbxm(bytes: Uint8Array): RbxmInstance[] {
 	return order;
 }
 
+// Writing ------------------------------------------------------------------------------------------------------------
+
+/** One LZ4 block holding only literals: valid for every LZ4 decoder, no compression needed for tiny chunks. */
+export function lz4LiteralBlock(data: Uint8Array): Uint8Array {
+	const out: number[] = [];
+	const length = data.length;
+	if (length < 15) out.push(length << 4);
+	else {
+		out.push(0xf0);
+		let rest = length - 15;
+		while (rest >= 255) {
+			out.push(255);
+			rest -= 255;
+		}
+		out.push(rest);
+	}
+	const block = new Uint8Array(out.length + length);
+	block.set(out, 0);
+	block.set(data, out.length);
+	return block;
+}
+
+class Writer {
+	private parts: number[] = [];
+	u8(value: number) {
+		this.parts.push(value & 0xff);
+	}
+	u32(value: number) {
+		for (let i = 0; i < 4; i++) this.parts.push((value >>> (8 * i)) & 0xff);
+	}
+	bytes(data: Uint8Array | number[]) {
+		for (const b of data) this.parts.push(b);
+	}
+	string(text: string) {
+		const data = new TextEncoder().encode(text);
+		this.u32(data.length);
+		this.bytes(data);
+	}
+	/** Referents: delta-encoded, zigzag, big-endian, byte-plane interleaved i32s. */
+	referents(values: number[]) {
+		const deltas = values.map((v, i) => (i === 0 ? v : v - values[i - 1]));
+		const encoded = deltas.map((v) => ((v << 1) ^ (v >> 31)) >>> 0);
+		for (let plane = 0; plane < 4; plane++) for (const v of encoded) this.parts.push((v >>> (8 * (3 - plane))) & 0xff);
+	}
+	done(): Uint8Array {
+		return new Uint8Array(this.parts);
+	}
+}
+
+/** An AttributesSerialize blob of string attributes (type 0x02), sorted by name. */
+export function writeStringAttributes(attributes: Record<string, string>): Uint8Array {
+	const w = new Writer();
+	const names = Object.keys(attributes).sort();
+	w.u32(names.length);
+	for (const name of names) {
+		w.string(name);
+		w.u8(0x02);
+		w.string(attributes[name]);
+	}
+	return w.done();
+}
+
+/**
+ * A binary model (.rbxm) holding ONE instance with a Name and string attributes, nothing else (other properties keep
+ * their defaults). Chunks: INST, PROP Name, PROP AttributesSerialize, PRNT (LZ4 literal blocks), END (stored).
+ * Used for the key asset (keyasset.ts); readRbxm reads it back.
+ */
+export function writeSingleInstanceRbxm(input: { className: string; name: string; attributes: Record<string, string> }): Uint8Array {
+	const chunks: { name: string; data: Uint8Array; compress: boolean }[] = [];
+	const inst = new Writer();
+	inst.u32(0); // class id
+	inst.string(input.className);
+	inst.u8(0); // object format: regular instances
+	inst.u32(1);
+	inst.referents([0]);
+	chunks.push({ name: "INST", data: inst.done(), compress: true });
+	const name = new Writer();
+	name.u32(0);
+	name.string("Name");
+	name.u8(0x01); // String
+	name.string(input.name);
+	chunks.push({ name: "PROP", data: name.done(), compress: true });
+	const attrs = new Writer();
+	attrs.u32(0);
+	attrs.string("AttributesSerialize");
+	attrs.u8(0x01); // String (binary)
+	const blob = writeStringAttributes(input.attributes);
+	attrs.u32(blob.length);
+	attrs.bytes(blob);
+	chunks.push({ name: "PROP", data: attrs.done(), compress: true });
+	const prnt = new Writer();
+	prnt.u8(0); // version
+	prnt.u32(1);
+	prnt.referents([0]);
+	prnt.referents([-1]);
+	chunks.push({ name: "PRNT", data: prnt.done(), compress: true });
+	chunks.push({ name: "END", data: new TextEncoder().encode("</roblox>"), compress: false });
+
+	const file = new Writer();
+	file.bytes(new TextEncoder().encode(MAGIC));
+	file.bytes(SIGNATURE);
+	file.u8(0); // version (u16)
+	file.u8(0);
+	file.u32(1); // class count
+	file.u32(1); // instance count
+	file.bytes(new Uint8Array(8)); // reserved
+	for (const chunk of chunks) {
+		const nameBytes = new Uint8Array(4);
+		nameBytes.set(new TextEncoder().encode(chunk.name));
+		file.bytes(nameBytes);
+		const stored = chunk.compress ? lz4LiteralBlock(chunk.data) : chunk.data;
+		file.u32(chunk.compress ? stored.length : 0);
+		file.u32(chunk.data.length);
+		file.u32(0); // reserved
+		file.bytes(stored);
+	}
+	return file.done();
+}
+
 /** `Root/Child/Grandchild` for an instance. */
 export function instancePath(instance: RbxmInstance, byReferent: Map<number, RbxmInstance>): string {
 	const parts: string[] = [];
