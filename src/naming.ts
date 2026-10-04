@@ -153,6 +153,9 @@ export interface BuildSources {
 
 export const SOURCE_NAMES = ["template", "framework", "kernel"] as const;
 
+/** Written by template/scripts/packages.ts when it packs the local @typetorch packages. */
+export const PACKAGES_MANIFEST = ".typetorch/packages/manifest.json";
+
 /** `template 12b63b9, framework 9a6547f*, kernel 7706b13` */
 export function formatSources(sources: Partial<BuildSources> | undefined): string {
 	if (!sources) return "";
@@ -161,76 +164,32 @@ export function formatSources(sources: Partial<BuildSources> | undefined): strin
 		.join(", ");
 }
 
-export interface DescriptionInput {
-	artifactId: string;
-	commitHash: string;
-	branch: string;
-	channel: Channel;
-	dirty: boolean;
-	builtAt: string;
-	sha256: string;
-	sources?: BuildSources;
-	ciUrl?: string;
-	/** "What changed" lines (changes.ts), shown by the dev menu; written after a `---` line. */
-	changes?: string[];
-}
-
-export const DESCRIPTION_MAX = 1000;
-export const CHANGES_SEPARATOR = "---";
-
-const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
-
 /**
- * Asset description (Roblox does not censor descriptions; the dev menu reads it with GetProductInfo):
- *   key=value identity lines (artifact, commit, branch, channel, dirty, built, sha256, framework?, kernel?, ci?)
- *   ---
- *   up to 8 "what changed" lines
- * At most 1000 characters: change lines are cut first (whole lines, then the last one shortened), never identity lines.
- * Control characters are removed, so every line is one line.
+ * Asset description: `artifact=<id>` and `commit=<sha7>`, nothing else. Roblox's text filter DOES censor
+ * descriptions: #21's longer description (identity + change lines) came back as all '#' (2026-10-04), while short ones
+ * passed. The full identity and the change notes live in the payload's attributes (Notes, Source*, Channel...), the
+ * logs and the registry; the upload reads the description back and warns when it was censored.
  */
-export function assetDescription(input: DescriptionInput): string {
-	const identity = [
-		`artifact=${input.artifactId}`,
-		`commit=${input.commitHash || "uncommitted"}`,
-		`branch=${input.branch}`,
-		`channel=${input.channel}`,
-		`dirty=${input.dirty}`,
-		`built=${input.builtAt}`,
-		`sha256=${input.sha256}`,
-		input.sources?.framework ? `framework=${input.sources.framework}` : undefined,
-		input.sources?.kernel ? `kernel=${input.sources.kernel}` : undefined,
-		input.ciUrl ? `ci=${input.ciUrl}` : undefined,
-	]
-		.filter((line): line is string => line !== undefined)
-		.map((line) => line.replace(CONTROL, " "))
-		.join("\n")
-		.slice(0, DESCRIPTION_MAX);
-	const changes = (input.changes ?? []).map((line) => line.replace(CONTROL, " ").trim()).filter(Boolean);
-	if (changes.length === 0) return identity;
-	let text = `${identity}\n${CHANGES_SEPARATOR}`;
-	let added = 0;
-	for (const line of changes) {
-		const room = DESCRIPTION_MAX - text.length - 1;
-		if (room <= 0) break;
-		if (line.length <= room) text += `\n${line}`;
-		else if (room >= 12) text += `\n${line.slice(0, room - 1)}…`;
-		else break;
-		added++;
-		if (line.length > room) break;
-	}
-	return added > 0 ? text : identity;
+export function assetDescription(input: { artifactId: string; commit: string }): string {
+	return [`artifact=${input.artifactId}`, `commit=${input.commit ? input.commit.slice(0, 7) : "uncommitted"}`].join("\n");
 }
 
-/** Splits a description into its identity (key=value) and its change lines. */
-export function parseAssetDescription(text: string): { identity: Record<string, string>; changes: string[] } {
-	const lines = text.split(/\r?\n/);
-	const separator = lines.indexOf(CHANGES_SEPARATOR);
+/** `key=value` lines of a description (anything after a `---` line, as older descriptions had, is ignored). */
+export function parseAssetDescription(text: string): Record<string, string> {
 	const identity: Record<string, string> = {};
-	for (const line of separator === -1 ? lines : lines.slice(0, separator)) {
+	for (const line of text.split(/\r?\n/)) {
+		if (line === "---") break;
 		const eq = line.indexOf("=");
 		if (eq > 0) identity[line.slice(0, eq)] = line.slice(eq + 1);
 	}
-	return { identity, changes: separator === -1 ? [] : lines.slice(separator + 1).filter(Boolean) };
+	return identity;
+}
+
+/** True when Roblox's text filter replaced (most of) a text with '#'. */
+export function looksCensored(text: string | undefined): boolean {
+	const visible = (text ?? "").replace(/\s+/g, "");
+	if (visible.length === 0) return false;
+	return (visible.match(/#/g)?.length ?? 0) * 2 >= visible.length;
 }
 
 /** The GitHub Actions run URL, when running in Actions. */

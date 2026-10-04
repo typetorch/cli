@@ -13,7 +13,8 @@
  *   "revoked": { "123": true },               // optional
  *   "devBadgeId": null,
  *   "kernel": "node_modules/@typetorch/kernel", // optional, folder with place.project.json
- *   "signingPublicKey": "<base64>"             // optional: Ed25519 public key deploy messages are signed for
+ *   "signingPublicKey": "<base64>",            // optional: Ed25519 public key deploy messages are signed for
+ *   "approval": "all"                           // "all" (default) | "prod" | "none": which deploys need `typetorch approve`
  * }
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -40,6 +41,16 @@ export interface ProjectConfig {
 	kernel?: string;
 	/** base64 raw 32-byte Ed25519 public key (`typetorch keys init`); baked into the place by `kernel deploy`. */
 	signingPublicKey?: string;
+	/** Which deploys a person must approve and sign (`typetorch approve`): every one, prod-channel branches, or none. */
+	approval: ApprovalPolicy;
+}
+
+export const APPROVAL_POLICIES = ["all", "prod", "none"] as const;
+export type ApprovalPolicy = (typeof APPROVAL_POLICIES)[number];
+
+/** Whether a release to a branch of this channel needs a person's approval under the policy. */
+export function approvalRequired(policy: ApprovalPolicy, branchChannel: Channel): boolean {
+	return policy === "all" || (policy === "prod" && branchChannel === "prod");
 }
 
 export interface Project {
@@ -63,6 +74,7 @@ const KNOWN_KEYS = new Set([
 	"devBadgeId",
 	"kernel",
 	"signingPublicKey",
+	"approval",
 ]);
 
 function positiveInt(value: unknown): number | undefined {
@@ -169,6 +181,10 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 		errors.push(`"kernel" must be a folder path`);
 	}
 
+	if (raw.approval !== undefined && !APPROVAL_POLICIES.includes(raw.approval as ApprovalPolicy)) {
+		errors.push(`"approval" must be one of ${APPROVAL_POLICIES.join(", ")}`);
+	}
+
 	if (raw.signingPublicKey !== undefined && publicKeyError(raw.signingPublicKey)) {
 		errors.push(`"signingPublicKey" ${publicKeyError(raw.signingPublicKey)}`);
 	}
@@ -190,6 +206,7 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			devBadgeId,
 			kernel: typeof raw.kernel === "string" ? raw.kernel : undefined,
 			signingPublicKey: typeof raw.signingPublicKey === "string" ? raw.signingPublicKey.trim() : undefined,
+			approval: (raw.approval as ApprovalPolicy | undefined) ?? "all",
 		},
 	};
 }

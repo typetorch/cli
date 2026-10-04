@@ -12,7 +12,7 @@ import {
 	stampKernelProject,
 	versionProblems,
 } from "../src/commands/kernel";
-import { keysCommand, keysFlags, setEnvLine, setJsonStringField } from "../src/commands/keys";
+import { removeEnvLine, setJsonStringField } from "../src/commands/keys";
 import type { Project } from "../src/config";
 import { parseDotEnv, Settings, useSettings } from "../src/env";
 import { setOutputMode } from "../src/log";
@@ -92,49 +92,14 @@ describe("kernel identity (S-L5)", () => {
 	});
 });
 
-describe("keys init", () => {
+describe("keys helpers", () => {
+	test("removeEnvLine drops only that variable", () => {
+		expect(removeEnvLine("A=1\r\nTYPETORCH_SIGNING_KEY=x\nB=2\n", "TYPETORCH_SIGNING_KEY")).toBe("A=1\nB=2\n");
+		expect(removeEnvLine("TYPETORCH_SIGNING_KEY=x\n", "TYPETORCH_SIGNING_KEY")).toBe("");
+	});
 	test("setJsonStringField keeps the formatting", () => {
 		const text = '{\n\t"project": "game",\n\t"creator": { "groupId": 1 }\n}\n';
 		expect(setJsonStringField(text, "signingPublicKey", "KEY")).toBe('{\n\t"project": "game",\n\t"creator": { "groupId": 1 },\n\t"signingPublicKey": "KEY"\n}\n');
 		expect(setJsonStringField('{ "signingPublicKey": "OLD" }', "signingPublicKey", "NEW")).toBe('{ "signingPublicKey": "NEW" }');
-	});
-	test("setEnvLine adds or replaces one line", () => {
-		expect(setEnvLine("", "A", "1")).toBe("A=1\n");
-		expect(setEnvLine("X=2\r\nA=old\n", "A", "1")).toBe("X=2\nA=1\n");
-	});
-	test("writes the private key to the env file and the public key to typetorch.json; refuses to replace without --force", async () => {
-		const root = mkdtempSync(join(tmpdir(), "tt-keys-"));
-		const secrets = mkdtempSync(join(tmpdir(), "tt-secrets-"));
-		const config = join(root, "typetorch.json");
-		writeFileSync(config, JSON.stringify({ project: "game", universeId: 1, placeId: 2, creator: { groupId: 3 } }, null, "\t") + "\n");
-		const envFile = join(secrets, "game.env");
-		writeFileSync(envFile, "OPENCLOUD_API_KEY=keep-this-0000\n");
-		useSettings(new Settings({ startDir: root, env: {} }));
-		setOutputMode({ json: true, verbose: false });
-		const logs: string[] = [];
-		const original = console.log;
-		console.log = (line: string) => void logs.push(line);
-		try {
-			await keysCommand(parseArgs(["init", "--config", config, "--env-file", envFile], keysFlags));
-		} finally {
-			console.log = original;
-			setOutputMode({ json: false, verbose: false });
-		}
-		const values = parseDotEnv(readFileSync(envFile, "utf8"));
-		expect(values.OPENCLOUD_API_KEY).toBe("keep-this-0000");
-		const key = parseSigningKey(values.TYPETORCH_SIGNING_KEY);
-		const saved = JSON.parse(readFileSync(config, "utf8"));
-		expect(saved.signingPublicKey).toBe(key.publicKey);
-		const output = logs.join("\n");
-		expect(output).toContain(key.publicKey);
-		expect(output).not.toContain(values.TYPETORCH_SIGNING_KEY); // the private key is never printed
-		await expect(keysCommand(parseArgs(["init", "--config", config, "--env-file", envFile], keysFlags))).rejects.toThrow(/--force/);
-	});
-	test("refuses an env file inside the repo that git does not ignore", async () => {
-		const root = mkdtempSync(join(tmpdir(), "tt-keysrepo-"));
-		sh(root, "git", "init", "-q");
-		writeFileSync(join(root, "typetorch.json"), JSON.stringify({ project: "game", universeId: 1, placeId: 2, creator: { groupId: 3 } }));
-		useSettings(new Settings({ startDir: root, env: {} }));
-		await expect(keysCommand(parseArgs(["init", "--config", join(root, "typetorch.json"), "--env-file", join(root, "keys.env")], keysFlags))).rejects.toThrow(/not git-ignored/);
 	});
 });

@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
 	artifactId,
-	assetDescription,
 	assetDisplayName,
 	branchChannel,
 	branchFromGit,
@@ -110,37 +109,6 @@ describe("sources", () => {
 		expect(formatSources({ template: "12b63b9", framework: "9a6547f*", kernel: "v0.2.0" })).toBe("template 12b63b9, framework 9a6547f*, kernel v0.2.0");
 		expect(formatSources({ template: "12b63b9" })).toBe("template 12b63b9");
 		expect(formatSources(undefined)).toBe("");
-	});
-});
-
-describe("assetDescription", () => {
-	test("one key=value per line", () => {
-		const text = assetDescription({
-			artifactId: "a1b2c3d-3fa91c",
-			commitHash: "a1b2c3d4",
-			branch: "dev",
-			channel: "dev",
-			dirty: false,
-			builtAt: "2026-10-04T00:00:00.000Z",
-			sha256: "ff",
-			sources: { template: "a1b2c3d", framework: "9a6547f*", kernel: "7706b13" },
-		});
-		expect(text.split("\n")).toEqual([
-			"artifact=a1b2c3d-3fa91c",
-			"commit=a1b2c3d4",
-			"branch=dev",
-			"channel=dev",
-			"dirty=false",
-			"built=2026-10-04T00:00:00.000Z",
-			"sha256=ff",
-			"framework=9a6547f*",
-			"kernel=7706b13",
-		]);
-	});
-	test("ci line when present", () => {
-		const text = assetDescription({ artifactId: "a", commitHash: "", branch: "b", channel: "dev", dirty: true, builtAt: "t", sha256: "s", ciUrl: "https://ci" });
-		expect(text).toContain("commit=uncommitted");
-		expect(text.endsWith("ci=https://ci")).toBe(true);
 	});
 });
 

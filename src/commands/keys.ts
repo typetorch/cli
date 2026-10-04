@@ -1,22 +1,26 @@
 /**
- * `typetorch keys init`: makes the Ed25519 keypair deploy messages are signed with (decision D1).
- *   - the private key (base64 of the 32-byte seed) goes into the env file as TYPETORCH_SIGNING_KEY: --env-file, else
- *     TYPETORCH_ENV_FILE, else the project's .env (only when git ignores it). It is never printed.
- *   - the public key (base64, 32 bytes) is printed and written to typetorch.json "signingPublicKey", so `kernel deploy`
- *     bakes it into the place for kernel 0.3 to verify against.
- * Refuses to replace an existing key without --force: servers verify with the old public key until the kernel is
- * redeployed.
+ * `typetorch keys init`: makes the Ed25519 key that signs deploy messages (decision D1) and stores it ENCRYPTED with a
+ * passphrase in a key file outside the repo (keystore.ts; default ~/.config/typetorch/keys/<universeId>.key). Needs an
+ * interactive terminal: the passphrase is typed twice and never echoed, stored or printed. The public key goes into
+ * typetorch.json "signingPublicKey" so `kernel deploy` bakes it into the place.
+ *
+ * A plaintext TYPETORCH_SIGNING_KEY from CLI 0.2.0 (in an env file or the environment) is offered for encryption
+ * (keeping its public key), and its line can be removed from the env file.
+ *
+ * `typetorch keys status`: where the key file is, its public key, and whether it matches typetorch.json (no secrets).
  */
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, relative } from "node:path";
 import { flagBool, flagString, UsageError, type ParsedArgs } from "../args";
-import { expandPath, parseDotEnv, settings } from "../env";
+import { ALLOW_ENV_SIGNING_VAR, settings } from "../env";
+import { interaction, NotInteractiveError, type Interaction } from "../interact";
+import { encryptSeed, passphraseProblems, readKeyFile, writeKeyFile, type KeyFile } from "../keystore";
 import { bold, emitJson, info, isJson, warn } from "../log";
 import { query } from "../proc";
 import { generateSigningKey, SIGNING_KEY_VAR } from "../signing";
-import { project } from "./common";
+import { keyFilePath, project } from "./common";
 
-export const keysFlags = { force: "boolean" } as const;
+export const keysFlags = { force: "boolean", "key-file": "string" } as const;
 
 /** Sets a top-level string field in a JSON file's text, keeping its formatting. */
 export function setJsonStringField(text: string, key: string, value: string): string {
@@ -34,63 +38,129 @@ export function setJsonStringField(text: string, key: string, value: string): st
 	return next;
 }
 
-/** Sets `name=value` in env-file text (replacing an existing line), keeping everything else. */
-export function setEnvLine(text: string, name: string, value: string): string {
-	const lines = text === "" ? [] : text.replace(/\r?\n$/, "").split(/\r?\n/);
-	const index = lines.findIndex((line) => new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=`).test(line));
-	if (index === -1) lines.push(`${name}=${value}`);
-	else lines[index] = `${name}=${value}`;
-	return lines.join("\n") + "\n";
+/** Env-file text without the `name=` line(s). */
+export function removeEnvLine(text: string, name: string): string {
+	const lines = text.replace(/\r?\n$/, "").split(/\r?\n/);
+	const kept = lines.filter((line) => !new RegExp(`^\\s*(?:export\\s+)?${name}\\s*=`).test(line));
+	return kept.length === 0 ? "" : kept.join("\n") + "\n";
 }
 
-/** The env file `keys init` writes: --env-file / TYPETORCH_ENV_FILE, else the project's .env. */
-function targetEnvFile(root: string, flag?: string): { file: string; configured: boolean } {
-	if (flag) return { file: expandPath(flag, process.cwd()), configured: true };
-	const configured = settings().envFile;
-	if (configured) return { file: configured, configured: true };
-	return { file: join(root, ".env"), configured: false };
+/** True when `path` is inside `root` (or is it). */
+function isInside(root: string, path: string): boolean {
+	const rel = relative(root, path).replace(/\\/g, "/");
+	return rel === "" || (!rel.startsWith("../") && rel !== ".." && !/^[a-z]:/i.test(rel));
+}
+
+/** Asks for a new passphrase twice until it is acceptable and both match. */
+export async function newPassphrase(io: Interaction): Promise<string> {
+	for (let attempt = 1; attempt <= 3; attempt++) {
+		const first = await io.secret("new passphrase (12+ characters, not echoed): ");
+		const problems = passphraseProblems(first);
+		if (problems.length > 0) {
+			info(`the passphrase needs ${problems.join(", ")}`);
+			continue;
+		}
+		if ((await io.secret("repeat it: ")) === first) return first;
+		info("the two passphrases differ");
+	}
+	throw new UsageError("no passphrase set");
+}
+
+export async function keysInit(args: ParsedArgs, io: Interaction = interaction()) {
+	const proj = project(args);
+	if (!io.interactive) {
+		throw new NotInteractiveError("typetorch keys init asks for a passphrase: run it yourself in an interactive terminal");
+	}
+	const force = flagBool(args, "force");
+	const keyFile = keyFilePath(proj, flagString(args, "key-file"));
+	if (isInside(proj.root, keyFile)) throw new UsageError(`the key file must live outside the repo (${keyFile} is inside ${proj.root}); pass --key-file <path outside it>`);
+	if (existsSync(dirname(keyFile)) && query(["git", "rev-parse", "--is-inside-work-tree"], dirname(keyFile)) === "true") {
+		warn(`${keyFile} is inside a git work tree; make sure it is never committed (it is encrypted, but keep it private)`);
+	}
+	if (existsSync(keyFile) && !force) {
+		const current = readKeyFile(keyFile);
+		throw new UsageError(
+			`a signing key already exists at ${keyFile} (public key ${current.publicKey}); --force replaces it, and servers then refuse new deploys until the kernel is redeployed with the new public key`,
+		);
+	}
+
+	// A plaintext key from CLI 0.2.0: offer to encrypt it (same public key, so nothing else changes).
+	let seed: string | undefined;
+	let plaintext: ReturnType<ReturnType<typeof settings>["plaintextSigningKey"]>;
+	try {
+		plaintext = settings().plaintextSigningKey();
+	} catch (error) {
+		warn(`${SIGNING_KEY_VAR} is set but unreadable (${(error as Error).message}); ignoring it`);
+	}
+	if (plaintext) {
+		info(`a plaintext ${SIGNING_KEY_VAR} exists in ${plaintext.source} (public key ${plaintext.publicKey})`);
+		if (await io.confirm("encrypt that key into the key file (keeps the same public key)?")) seed = plaintext.seed;
+	}
+	const created = seed === undefined;
+	seed ??= generateSigningKey().seed;
+	const passphrase = await newPassphrase(io);
+	const file: KeyFile = encryptSeed(seed, passphrase, { universeId: proj.config.universeId });
+	writeKeyFile(keyFile, file);
+	writeFileSync(proj.configPath, setJsonStringField(readFileSync(proj.configPath, "utf8"), "signingPublicKey", file.publicKey));
+
+	if (plaintext && !created) {
+		if (plaintext.source !== "environment" && existsSync(plaintext.source)) {
+			if (await io.confirm(`remove the plaintext ${SIGNING_KEY_VAR} line from ${plaintext.source}?`)) {
+				writeFileSync(plaintext.source, removeEnvLine(readFileSync(plaintext.source, "utf8"), SIGNING_KEY_VAR));
+				info(`removed ${SIGNING_KEY_VAR} from ${plaintext.source}`);
+			}
+		} else {
+			warn(`remove ${SIGNING_KEY_VAR} from your environment: the key file replaces it`);
+		}
+	}
+	if (isJson()) return emitJson({ keyFile, publicKey: file.publicKey, config: proj.configPath, migrated: !created });
+	info(bold(`signing key ${created ? "created" : "encrypted"}: ${keyFile}`));
+	info(`  public key   ${file.publicKey}`);
+	info(`  typetorch.json "signingPublicKey" updated (${proj.configPath})`);
+	info("  the passphrase is not stored anywhere: keep it (and a backup of the key file) somewhere safe");
+	info("  next: commit typetorch.json; `typetorch kernel deploy` bakes the public key into the place for kernel 0.3");
+}
+
+export async function keysStatus(args: ParsedArgs) {
+	const proj = project(args);
+	const keyFile = keyFilePath(proj, flagString(args, "key-file"));
+	let file: KeyFile | undefined;
+	let problem: string | undefined;
+	try {
+		file = existsSync(keyFile) ? readKeyFile(keyFile) : undefined;
+	} catch (error) {
+		problem = (error as Error).message;
+	}
+	let plaintextSource: string | undefined;
+	try {
+		plaintextSource = settings().plaintextSigningKey()?.source;
+	} catch {
+		plaintextSource = "unreadable";
+	}
+	const status = {
+		keyFile,
+		exists: file !== undefined,
+		problem,
+		publicKey: file?.publicKey ?? null,
+		configured: proj.config.signingPublicKey ?? null,
+		matches: file !== undefined && file.publicKey === proj.config.signingPublicKey,
+		kdf: file ? `scrypt N=${file.kdf.N} r=${file.kdf.r} p=${file.kdf.p}` : null,
+		plaintextKey: plaintextSource ?? null,
+		ciEscapeHatch: settings().get(ALLOW_ENV_SIGNING_VAR)?.value === "1",
+		approval: proj.config.approval,
+	};
+	if (isJson()) return emitJson(status);
+	info(`key file     ${keyFile}${file ? "" : problem ? `  (${problem})` : "  (none: typetorch keys init)"}`);
+	if (file) info(`public key   ${file.publicKey}  (${status.kdf}, AES-256-GCM)`);
+	info(`config       signingPublicKey ${status.configured ?? "(not set)"}${file ? (status.matches ? "  matches" : "  DOES NOT MATCH the key file") : ""}`);
+	info(`approval     "${status.approval}"`);
+	if (plaintextSource) warn(`a plaintext ${SIGNING_KEY_VAR} is in ${plaintextSource}: it is ignored; typetorch keys init encrypts it`);
+	if (status.ciEscapeHatch) warn(`${ALLOW_ENV_SIGNING_VAR}=1 is set: the CI escape hatch (signing without approval) is on`);
 }
 
 export async function keysCommand(args: ParsedArgs) {
 	const sub = args.positionals[0];
-	if (sub !== "init") throw new UsageError(`unknown keys subcommand "${sub ?? ""}" (only "init")`);
-	const proj = project(args);
-	const force = flagBool(args, "force");
-	const { file, configured } = targetEnvFile(proj.root, flagString(args, "env-file"));
-
-	// A key file inside the repo must be git-ignored, or it could be committed.
-	const rel = relative(proj.root, file).replace(/\\/g, "/");
-	const insideRepo = !rel.startsWith("../") && !/^[a-z]:/i.test(rel);
-	if (insideRepo && query(["git", "rev-parse", "--is-inside-work-tree"], proj.root) === "true") {
-		const ignored = query(["git", "check-ignore", "--", rel], proj.root) !== undefined;
-		if (!ignored) throw new Error(`${file} is inside the repo and not git-ignored; ignore it first, or use --env-file <path outside the repo>`);
-	}
-	if (!configured) warn(`writing the signing key to ${file}; a file outside the repo is safer (--env-file ~/.config/typetorch/${proj.config.project}.env, then set TYPETORCH_ENV_FILE)`);
-
-	const text = existsSync(file) ? readFileSync(file, "utf8") : "";
-	const already = parseDotEnv(text)[SIGNING_KEY_VAR] !== undefined;
-	const elsewhere = settings().get(SIGNING_KEY_VAR);
-	if ((already || (elsewhere && elsewhere.source !== file)) && !force) {
-		throw new Error(
-			`a signing key already exists (${already ? file : elsewhere!.source}); --force replaces it, and servers then refuse new deploys until the kernel is redeployed with the new public key`,
-		);
-	}
-	if (elsewhere && elsewhere.source !== file) {
-		warn(`${SIGNING_KEY_VAR} is also set in ${elsewhere.source}, which wins over ${file}; remove it there`);
-	}
-
-	const { seed, publicKey } = generateSigningKey();
-	mkdirSync(dirname(file), { recursive: true });
-	writeFileSync(file, setEnvLine(text, SIGNING_KEY_VAR, seed), { mode: 0o600 });
-	try {
-		chmodSync(file, 0o600);
-	} catch {}
-	writeFileSync(proj.configPath, setJsonStringField(readFileSync(proj.configPath, "utf8"), "signingPublicKey", publicKey));
-
-	if (isJson()) return emitJson({ envFile: file, variable: SIGNING_KEY_VAR, publicKey, config: proj.configPath, replaced: already });
-	info(bold(`signing key ${already ? "replaced" : "created"}`));
-	info(`  private key  ${SIGNING_KEY_VAR} in ${file} (never printed; back it up somewhere safe)`);
-	info(`  public key   ${publicKey}`);
-	info(`  typetorch.json "signingPublicKey" updated (${proj.configPath})`);
-	info("  next: commit typetorch.json; `typetorch kernel deploy` bakes the public key into the place for kernel 0.3");
+	if (sub === "init") return keysInit(args);
+	if (sub === "status") return keysStatus(args);
+	throw new UsageError(`unknown keys subcommand "${sub ?? ""}" (init or status)`);
 }

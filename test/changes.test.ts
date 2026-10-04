@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { changeLines, cleanLine, parseStamp } from "../src/changes";
-import { assetDescription, parseAssetDescription } from "../src/naming";
+import { changeLines, cleanLine, NOTES_MAX_BYTES, parseStamp, payloadNotes } from "../src/changes";
+import { assetDescription, looksCensored, parseAssetDescription } from "../src/naming";
 
 function sh(cwd: string, ...cmd: string[]) {
 	const result = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe" });
@@ -86,36 +86,43 @@ describe("what changed", () => {
 	});
 });
 
-describe("asset description with changes", () => {
-	const base = {
-		artifactId: "a1b2c3d-3fa91c",
-		commitHash: "a1b2c3d".padEnd(40, "0"),
-		branch: "dev",
-		channel: "dev" as const,
-		dirty: false,
-		builtAt: "2026-10-04T00:00:00.000Z",
-		sha256: "f".repeat(64),
-	};
-	test("identity, ---, change lines; parseable", () => {
-		const text = assetDescription({ ...base, changes: ["make coins spin", "template: four"] });
-		expect(text.split("\n").slice(-3)).toEqual(["---", "make coins spin", "template: four"]);
-		const parsed = parseAssetDescription(text);
-		expect(parsed.identity.artifact).toBe("a1b2c3d-3fa91c");
-		expect(parsed.changes).toEqual(["make coins spin", "template: four"]);
+describe("payload Notes attribute", () => {
+	test("exact JSON shape", () => {
+		const notes = JSON.parse(
+			payloadNotes({ message: "make coins spin", changes: ["template: four"], sources: { template: "12b63b9", framework: "9a6547f*" }, built: "2026-10-04T00:00:00.000Z", branch: "dev" }),
+		);
+		expect(notes).toEqual({ v: 1, message: "make coins spin", changes: ["template: four"], sources: { template: "12b63b9", framework: "9a6547f*" }, built: "2026-10-04T00:00:00.000Z", branch: "dev" });
+		expect(Object.keys(notes)).toEqual(["v", "message", "changes", "sources", "built", "branch"]);
 	});
-	test("at most 1000 characters: change lines are cut, identity lines never", () => {
-		const changes = Array.from({ length: 8 }, (_, i) => `template: ${String(i).repeat(150)}`);
-		const text = assetDescription({ ...base, ciUrl: `https://github.com/x/y/actions/runs/${"9".repeat(20)}`, changes });
-		expect(text.length).toBeLessThanOrEqual(1000);
-		const parsed = parseAssetDescription(text);
-		expect(parsed.identity.sha256).toBe(base.sha256);
-		expect(parsed.identity.ci).toContain("actions/runs");
-		expect(parsed.changes.length).toBeGreaterThan(0);
-		expect(parsed.changes.length).toBeLessThan(8);
+	test("at most 4000 bytes: change lines go first, then the message is cut", () => {
+		const changes = Array.from({ length: 200 }, (_, i) => `template: ${String(i).padStart(3, "0")} ${"x".repeat(100)}`);
+		const text = payloadNotes({ message: "m".repeat(400), changes, built: "t", branch: "dev" });
+		expect(new TextEncoder().encode(text).length).toBeLessThanOrEqual(NOTES_MAX_BYTES);
+		const notes = JSON.parse(text);
+		expect(notes.changes.length).toBeGreaterThan(0);
+		expect(notes.changes.length).toBeLessThan(200);
+		expect(notes.changes[0]).toStartWith("template: 000");
+		expect(notes.message).toHaveLength(400);
 	});
 	test("control characters are removed", () => {
-		const text = assetDescription({ ...base, changes: ["evil\u0000line\u001b[31m", "two\rparts"] });
-		expect(parseAssetDescription(text).changes).toEqual(["evil line [31m", "two parts"]);
-		expect(text).not.toMatch(/[\u0000\u001b\r]/);
+		const notes = JSON.parse(payloadNotes({ message: "a\u0000b", changes: ["evil\u0000line\u001b[31m", "two\rparts"], built: "t", branch: "dev" }));
+		expect(notes.message).toBe("a b");
+		expect(notes.changes).toEqual(["evil line [31m", "two parts"]);
+	});
+});
+
+describe("filter-safe asset description", () => {
+	test("artifact and commit only", () => {
+		expect(assetDescription({ artifactId: "a1b2c3d-3fa91c", commit: "a1b2c3d" })).toBe("artifact=a1b2c3d-3fa91c\ncommit=a1b2c3d");
+		expect(assetDescription({ artifactId: "x", commit: "" })).toBe("artifact=x\ncommit=uncommitted");
+	});
+	test("parse ignores an old --- section", () => {
+		expect(parseAssetDescription("artifact=a\ncommit=b\n---\nk=v")).toEqual({ artifact: "a", commit: "b" });
+	});
+	test("looksCensored", () => {
+		expect(looksCensored("#".repeat(40))).toBe(true);
+		expect(looksCensored("########=#######\n###")).toBe(true);
+		expect(looksCensored("artifact=a1b2c3d-3fa91c\ncommit=a1b2c3d")).toBe(false);
+		expect(looksCensored("")).toBe(false);
 	});
 });

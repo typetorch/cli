@@ -1,17 +1,16 @@
 /**
- * "What changed" lines for an artifact (the dev menu shows them; they go into the payload asset's description after a
- * `---` line, see naming.ts `assetDescription` and plans/03):
- *   1. the deploy `--message`, if given;
- *   2. the game repo's commits since the branch's previous deploy, newest first ("template: <subject>");
- *   3. framework and kernel commits since the previous deploy's recorded sources ("framework: ...", "kernel: ...");
- *   4. nothing new at all: "rebuild, no source changes".
+ * "What changed" for an artifact. The dev menu shows it from the payload's `Notes` attribute (payloadNotes below,
+ * stamped on the root Model at build time; plans/03 "Notes"):
+ *   - message: the deploy `--message` (remote-claude passes Claude's summary), or "";
+ *   - changes: the game repo's commits since the branch's previous deploy, newest first ("template: <subject>"), then
+ *     framework and kernel commits since the previous deploy's recorded sources ("framework: ...", "kernel: ..."), or
+ *     "first deploy of <branch>", or "rebuild, no source changes" when nothing is new.
  * At most 5 per source and 8 in all (the largest group gives way first).
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { PACKAGES_MANIFEST } from "./build";
 import { isRecord } from "./json";
-import type { BuildSources } from "./naming";
+import { PACKAGES_MANIFEST, SOURCE_NAMES, type BuildSources } from "./naming";
 import { query } from "./proc";
 
 export const MAX_PER_SOURCE = 5;
@@ -77,7 +76,15 @@ function limitGroups(groups: string[][], max: number): string[][] {
 	return out;
 }
 
+/** The message line plus the change lines (proposal and dry-run output). */
 export function changeLines(input: ChangeInput): string[] {
+	const message = input.message ? cleanLine(input.message) : "";
+	const changes = sourceChanges({ ...input, message: undefined });
+	return message ? [message, ...changes.slice(0, MAX_CHANGE_LINES - 1)] : changes;
+}
+
+/** The change lines without the message (the Notes attribute's `changes`). */
+export function sourceChanges(input: ChangeInput): string[] {
 	const message = input.message ? cleanLine(input.message) : "";
 	const template: string[] = [];
 	const packages: Record<"framework" | "kernel", string[]> = { framework: [], kernel: [] };
@@ -109,4 +116,35 @@ export function changeLines(input: ChangeInput): string[] {
 	const [t, f, k] = limitGroups(capped, MAX_CHANGE_LINES - (message ? 1 : 0));
 	const lines = [...(message ? [message] : []), ...t, ...f, ...k];
 	return lines.length > 0 ? lines : ["rebuild, no source changes"];
+}
+
+/** The payload root's `Notes` attribute (JSON). Keep this exact shape: the framework parses it. */
+export interface PayloadNotes {
+	v: 1;
+	message: string;
+	changes: string[];
+	sources: Partial<BuildSources>;
+	built: string;
+	branch: string;
+}
+
+/** The Notes JSON stays under this many UTF-8 bytes (change lines are dropped first, then the message is cut). */
+export const NOTES_MAX_BYTES = 4000;
+
+/** The Notes attribute value: JSON, at most NOTES_MAX_BYTES, control characters removed. */
+export function payloadNotes(input: { message?: string; changes: string[]; sources?: Partial<BuildSources>; built: string; branch: string }): string {
+	const sources: Partial<BuildSources> = {};
+	for (const name of SOURCE_NAMES) if (input.sources?.[name]) sources[name] = cleanLine(input.sources[name]!, 40);
+	const notes: PayloadNotes = {
+		v: 1,
+		message: input.message ? cleanLine(input.message, 500) : "",
+		changes: input.changes.map((line) => cleanLine(line)).filter(Boolean),
+		sources,
+		built: input.built,
+		branch: cleanLine(input.branch, 64),
+	};
+	const size = () => new TextEncoder().encode(JSON.stringify(notes)).length;
+	while (size() > NOTES_MAX_BYTES && notes.changes.length > 0) notes.changes.pop();
+	while (size() > NOTES_MAX_BYTES && notes.message.length > 0) notes.message = notes.message.slice(0, Math.max(0, notes.message.length - 50));
+	return JSON.stringify(notes);
 }

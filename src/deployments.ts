@@ -27,6 +27,12 @@ export interface LocalDeployment extends RegistryDeployment {
 	registry?: "published" | "unchanged" | "unavailable" | "failed" | "skipped";
 	configVersion?: number;
 	timings?: Record<string, number>;
+	/** The payload Notes change lines. */
+	changes?: string[];
+	/** The proposal this release came from (`typetorch approve`). */
+	proposalId?: string;
+	/** Who prepared it: "cli", "dev-server/claude", "agent", "ci"... */
+	proposedBy?: string;
 	/**
 	 * "published": the deploy message went out. "registry-only": the registry was written but the message failed (the
 	 * seq is used; servers still pick the head up from the registry).
@@ -85,6 +91,11 @@ export interface UploadRecord {
 	dirty: boolean;
 	sha256: string;
 	sources?: BuildSources;
+	/** The payload Notes (message + change lines), for proposals made from this upload. */
+	message?: string;
+	changes?: string[];
+	bytes?: number;
+	builtAt?: string;
 	assetName?: string;
 	universeId?: number;
 	project?: string;

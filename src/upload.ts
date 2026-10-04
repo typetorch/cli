@@ -2,28 +2,18 @@
 import type { PayloadMeta } from "./build";
 import type { ProjectConfig } from "./config";
 import { seconds, warn } from "./log";
-import { assetDescription, assetDisplayName, branchChannel, ciRunUrl } from "./naming";
+import { assetDescription, assetDisplayName, branchChannel, looksCensored } from "./naming";
 import type { OpenCloud } from "./opencloud";
 
-export function assetNaming(config: ProjectConfig, meta: PayloadMeta, branch: string, changes?: string[]) {
+/** The asset's display name and its minimal, filter-safe description (the notes live in the payload's Notes attribute). */
+export function assetNaming(config: ProjectConfig, meta: PayloadMeta, branch: string) {
 	const displayName = assetDisplayName({
 		branch,
 		artifactId: meta.artifactId,
 		channel: meta.channel,
 		impliedChannel: branchChannel(config, branch),
 	});
-	const description = assetDescription({
-		artifactId: meta.artifactId,
-		commitHash: meta.commitHash,
-		branch,
-		channel: meta.channel,
-		dirty: meta.dirty,
-		builtAt: meta.builtAt,
-		sha256: meta.sha256,
-		sources: meta.sources,
-		ciUrl: ciRunUrl(),
-		changes,
-	});
+	const description = assetDescription({ artifactId: meta.artifactId, commit: meta.commit });
 	return { displayName, description };
 }
 
@@ -69,15 +59,13 @@ export async function uploadPayload(
 	bytes: Uint8Array,
 	branch: string,
 	options: {
-		/** "What changed" lines for the description (changes.ts). */
-		changes?: string[];
 		moderationTimeout?: number;
 		onStage?: (stage: "upload" | "moderation", s: number, detail: string) => void;
 		/** Called once moderation is known (Approved or not), before anything is published: the "uploaded" record. */
 		onUploaded?: (result: { assetId: number; displayName: string; moderation: string }) => void;
 	} = {},
 ): Promise<UploadResult> {
-	const { displayName, description } = assetNaming(config, meta, branch, options.changes);
+	const { displayName, description } = assetNaming(config, meta, branch);
 	const uploadStarted = performance.now();
 	const operationId = await oc.createModelAsset({
 		bytes,
@@ -113,24 +101,26 @@ export async function uploadPayload(
 export const FALLBACK_ASSET_NAME = "TypeTorch payload";
 
 /**
- * Roblox's text filter turns some names into "####" (seen: tt-dev-59daad8, tt-dev-c3698d4, even "tt dev"; while
- * tt-main-a17a22c passed), unpredictably. The identity is in the description either way; a censored name is renamed
- * to FALLBACK_ASSET_NAME so the Creator Hub list stays readable. Run it after the deploy message (off the critical
- * path). Returns the final name, or undefined when it couldn't tell.
+ * Roblox's text filter censors names AND descriptions to "####", unpredictably (names: tt-dev-59daad8, tt-dev-c3698d4,
+ * even "tt dev", while tt-main-a17a22c passed; descriptions: #21's long one, 2026-10-04). Run after the deploy message
+ * (off the critical path): reads the stored name and description back, renames a censored asset to
+ * FALLBACK_ASSET_NAME so the Creator Hub list stays readable, and warns about a censored description (harmless: the
+ * identity and the notes are in the payload's attributes). Returns the final name, or undefined when it couldn't tell.
  */
-export async function fixCensoredName(oc: OpenCloud, upload: UploadResult): Promise<{ name?: string; renamed: boolean }> {
+export async function fixCensoredName(oc: OpenCloud, upload: UploadResult): Promise<{ name?: string; renamed: boolean; descriptionCensored?: boolean }> {
 	try {
-		const stored =
-			upload.storedName ??
-			(await oc.call("GET", `/assets/v1/assets/${upload.assetId}?readMask=displayName`))?.displayName;
+		const asset = await oc.call("GET", `/assets/v1/assets/${upload.assetId}?readMask=displayName,description`);
+		const stored: unknown = asset?.displayName ?? upload.storedName;
+		const descriptionCensored = typeof asset?.description === "string" ? looksCensored(asset.description) : undefined;
+		if (descriptionCensored) warn(`Roblox's text filter censored asset ${upload.assetId}'s description (harmless: the identity and notes are in the payload's attributes)`);
 		// Our names never contain "#", so any "#" is the filter's.
-		if (typeof stored !== "string" || !stored.includes("#")) return { name: stored, renamed: false };
+		if (typeof stored !== "string" || !stored.includes("#")) return { name: typeof stored === "string" ? stored : undefined, renamed: false, descriptionCensored };
 		const form = new FormData();
 		form.append("request", JSON.stringify({ assetId: upload.assetId, displayName: FALLBACK_ASSET_NAME }));
 		const op = await oc.call("PATCH", `/assets/v1/assets/${upload.assetId}?updateMask=displayName`, { body: form });
 		const operationId = op?.operationId ?? String(op?.path ?? "").split("/").pop();
 		if (operationId && !op?.done) await oc.waitForOperation(operationId, 60);
-		return { name: FALLBACK_ASSET_NAME, renamed: true };
+		return { name: FALLBACK_ASSET_NAME, renamed: true, descriptionCensored };
 	} catch (error) {
 		warn(`could not check or fix the asset name: ${(error as Error).message}`);
 		return { renamed: false };

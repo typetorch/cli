@@ -11,7 +11,8 @@ import {
 	type LocalDeployment,
 	type UploadRecord,
 } from "../deployments";
-import { settings, type KeyJob } from "../env";
+import { expandPath, settings, type KeyJob } from "../env";
+import { defaultKeyFile, KEY_FILE_VAR } from "../keystore";
 import { debug, warn } from "../log";
 import { isChannel, type Channel } from "../naming";
 import { OpenCloud } from "../opencloud";
@@ -49,34 +50,27 @@ export function projectStateDir(proj: Project): string {
 	return stateDir(proj.root);
 }
 
-let unsignedWarned = false;
+/** The signing key file: --key-file, else TYPETORCH_KEY_FILE, else ~/.config/typetorch/keys/<universeId>.key. */
+export function keyFilePath(proj: Project, flag?: string): string {
+	const configured = flag ?? settings().get(KEY_FILE_VAR)?.value;
+	return configured ? expandPath(configured, process.cwd()) : defaultKeyFile(proj.config.universeId);
+}
 
 /**
- * The deploy signing key (TYPETORCH_SIGNING_KEY), checked against typetorch.json "signingPublicKey". Without a key
- * messages go out unsigned, with a warning (kernel 0.3 servers refuse them).
+ * Checks a signing key against typetorch.json "signingPublicKey": a mismatch is an error (servers would refuse its
+ * signatures), a missing entry a warning. The public test-vector key from plans/03 is always refused.
  */
-export function signingKey(proj: Project): SigningKey | undefined {
-	const key = settings().signingKey();
+export function checkSigningKey(proj: Project, key: SigningKey, source: string) {
 	const configured = proj.config.signingPublicKey;
-	if (!key) {
-		if (!unsignedWarned) {
-			unsignedWarned = true;
-			warn(
-				`deploy messages are unsigned (no TYPETORCH_SIGNING_KEY): kernel 0.3 servers will refuse them. Run \`typetorch keys init\`${configured ? " or restore the key for typetorch.json signingPublicKey" : ""}.`,
-			);
-		}
-		return undefined;
-	}
 	if (key.publicKey === TEST_VECTOR_PUBLIC_KEY || configured === TEST_VECTOR_PUBLIC_KEY) {
 		throw new Error("the signing key is the public test-vector key from plans/03; run `typetorch keys init --force` for a real one");
 	}
 	if (configured && configured !== key.publicKey) {
 		throw new Error(
-			`TYPETORCH_SIGNING_KEY (from ${key.source}) does not match typetorch.json "signingPublicKey"; servers would refuse its signatures. Use the matching key, or run \`typetorch keys init --force\` and redeploy the kernel.`,
+			`the signing key (${source}) does not match typetorch.json "signingPublicKey"; servers would refuse its signatures. Use the matching key, or run \`typetorch keys init --force\` and redeploy the kernel.`,
 		);
 	}
-	if (!configured) warn(`typetorch.json has no "signingPublicKey" for the signing key from ${key.source}; add it (typetorch keys init prints it) so kernel deploys bake it in`);
-	return key;
+	if (!configured) warn(`typetorch.json has no "signingPublicKey" for the signing key (${source}); add it (typetorch keys status prints it) so kernel deploys bake it in`);
 }
 
 export interface History {

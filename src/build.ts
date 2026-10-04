@@ -25,9 +25,13 @@ import {
 	type BuildSources,
 	type Channel,
 	type EarlierArtifact,
+	PACKAGES_MANIFEST,
 } from "./naming";
 import { query, run } from "./proc";
 import { checkPayloadContents } from "./rbxm";
+import { payloadNotes, sourceChanges } from "./changes";
+import { liveHeads, readLocalLog } from "./deployments";
+import { stateDir } from "./state";
 
 export const KERNEL_API = 1;
 export const BUILD_FILE = "src/shared/build.ts";
@@ -37,8 +41,7 @@ export const GEN_PROJECT = ".payload.gen.project.json";
 export const OUT_DIR = ".typetorch";
 export const PAYLOAD_FILE = `${OUT_DIR}/payload.rbxm`;
 export const PAYLOAD_META = `${OUT_DIR}/payload.json`;
-/** Written by template/scripts/packages.ts when it packs the local @typetorch packages. */
-export const PACKAGES_MANIFEST = `${OUT_DIR}/packages/manifest.json`;
+export { PACKAGES_MANIFEST };
 /** Files TypeTorch writes inside the repo; they never make a build "dirty". */
 export const GENERATED_PATHS = [BUILD_FILE, GEN_PROJECT, PROD_TSCONFIG, `${OUT_DIR}/`];
 /** File types that can end up in a payload (compiled by rbxtsc, or synced by Rojo). */
@@ -67,6 +70,8 @@ export interface PayloadMeta {
 	debugMacros?: boolean;
 	/** ModuleScripts in the payload. */
 	modules?: number;
+	/** What was stamped as the payload's Notes attribute (message + change lines). */
+	notes?: { message?: string; changes: string[] };
 }
 
 export interface BuildTarget {
@@ -344,6 +349,16 @@ export interface BuildOptions {
 	channel?: Channel;
 	/** `git clean -fdX` out/ and include/ first (deploy and upload always do; `build --clean`). */
 	clean?: boolean;
+	/**
+	 * The deploy message and the branch's previous head, for the Notes attribute. Called after rbxtsc (so a registry
+	 * read started with the build has usually finished). Default: no message, the previous head from the local log.
+	 */
+	notes?: (branch: string) => Promise<NotesInput> | NotesInput;
+}
+
+export interface NotesInput {
+	message?: string;
+	previous?: { commit?: string; commitHash?: string; sources?: Partial<BuildSources> };
 }
 
 /**
@@ -429,7 +444,21 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		if (unexplained.length > 0) debug(`outputs without a tracked source (dirty build): ${unexplained.slice(0, 10).join(", ")}`);
 	}
 
-	// 4. rojo build, root stamped with the identity. The id's hash is the sha256 of the payload stamped with the id
+	// 4. Notes: the message and what changed since the branch's previous deploy (the dev menu reads this attribute;
+	// asset descriptions get censored by Roblox's text filter).
+	const notesInput: NotesInput = options.notes
+		? await options.notes(target.branch)
+		: { previous: liveHeads(undefined, readLocalLog(stateDir(root), project.config.universeId)).get(target.branch) };
+	const changes = sourceChanges({
+		root,
+		branch: target.branch,
+		git: { commitHash: git.commitHash, commit: git.commit, dirty: git.dirty },
+		sources,
+		previous: notesInput.previous,
+	});
+	const notes = payloadNotes({ message: notesInput.message, changes, sources, built: builtAt, branch: target.branch });
+
+	// 5. rojo build, root stamped with the identity. The id's hash is the sha256 of the payload stamped with the id
 	// without its hash (`<commit7>[-dirty]`); the final payload is stamped with the full id.
 	const outDir = join(root, OUT_DIR);
 	mkdirSync(outDir, { recursive: true });
@@ -446,6 +475,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		};
 		if (sources.framework) stamped.SourceFramework = sources.framework;
 		if (sources.kernel) stamped.SourceKernel = sources.kernel;
+		stamped.Notes = notes;
 		return stamped;
 	};
 	const rojoBuild = async (id: string): Promise<Uint8Array> => {
@@ -466,7 +496,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		bytes = await rojoBuild(id);
 	});
 
-	// 5. Only Folders and ModuleScripts under one Model (S-L4): nothing in an upload can run by itself.
+	// 6. Only Folders and ModuleScripts under one Model (S-L4): nothing in an upload can run by itself.
 	const contents = await watch.stage("check", () => checkPayloadContents(bytes));
 	const problems = [...contents.rootProblems, ...contents.disallowed];
 	if (problems.length > 0) {
@@ -493,6 +523,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		sources,
 		debugMacros,
 		modules: contents.modules,
+		notes: { ...(notesInput.message ? { message: notesInput.message } : {}), changes: JSON.parse(notes).changes },
 	};
 	writeFileSync(join(root, PAYLOAD_META), JSON.stringify(meta, null, "\t") + "\n");
 	return { meta, timings: watch.total(), target };

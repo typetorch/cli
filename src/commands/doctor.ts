@@ -19,6 +19,8 @@ import { capture } from "../proc";
 import { rojoBinary } from "../build";
 import { REPOSITORY } from "../registry";
 import { stateDir } from "../state";
+import { readKeyFile } from "../keystore";
+import { keyFilePath } from "./common";
 
 export const doctorFlags = {} as const;
 
@@ -133,18 +135,27 @@ export async function doctorCommand(args: ParsedArgs) {
 				: { name: `key ${job}`, status: job === "place" ? "warn" : "fail", detail: `none: set ${JOB_KEY_VARS[job]} (${JOB_SCOPES[job]}) or the shared TYPETORCH_API_KEY` },
 		);
 	}
-	try {
-		const signing = config.signingKey();
-		const configured = proj?.config.signingPublicKey;
-		checks.push(
-			!signing
-				? { name: "signing key", status: "warn", detail: "none: deploy messages go out unsigned and kernel 0.3 refuses them (typetorch keys init)" }
-				: configured && configured !== signing.publicKey
-					? { name: "signing key", status: "fail", detail: `TYPETORCH_SIGNING_KEY from ${signing.source} does not match typetorch.json signingPublicKey` }
-					: { name: "signing key", status: configured ? "ok" : "warn", detail: `from ${signing.source}, public ${signing.publicKey}${configured ? "" : " (not in typetorch.json yet)"}` },
-		);
-	} catch (error) {
-		checks.push({ name: "signing key", status: "fail", detail: (error as Error).message });
+	if (proj) {
+		const keyFile = keyFilePath(proj);
+		const configured = proj.config.signingPublicKey;
+		try {
+			const file = existsSync(keyFile) ? readKeyFile(keyFile) : undefined;
+			checks.push(
+				!file
+					? { name: "signing key", status: "warn", detail: `no key file at ${keyFile}: nobody can approve deploys (typetorch keys init)` }
+					: configured && configured !== file.publicKey
+						? { name: "signing key", status: "fail", detail: `${keyFile} does not match typetorch.json signingPublicKey` }
+						: { name: "signing key", status: configured ? "ok" : "warn", detail: `${keyFile} (encrypted), public ${file.publicKey}${configured ? "" : " (not in typetorch.json yet)"}` },
+			);
+		} catch (error) {
+			checks.push({ name: "signing key", status: "fail", detail: (error as Error).message });
+		}
+		checks.push({ name: "approval", status: "ok", detail: `"${proj.config.approval}" (${proj.config.approval === "none" ? "deploys publish without approval" : "deploys wait for typetorch approve"})` });
+		try {
+			const plaintext = config.plaintextSigningKey();
+			if (plaintext) checks.push({ name: "plaintext key", status: "warn", detail: `TYPETORCH_SIGNING_KEY in ${plaintext.source} is ignored; typetorch keys init encrypts it` });
+		} catch {}
+		if (config.ciSigningKey()) checks.push({ name: "ci escape hatch", status: "warn", detail: "TYPETORCH_ALLOW_ENV_SIGNING_KEY=1: deploys sign without approval (CI only)" });
 	}
 	if (proj) checks.push({ name: "state dir", status: "ok", detail: stateDir(proj.root) });
 
