@@ -36,7 +36,8 @@ export async function rollbackCommand(args: ParsedArgs) {
 	if (!branch) throw new UsageError("which branch? pass --branch <name>");
 	if (branchNameError(branch)) throw new UsageError(branchNameError(branch)!);
 
-	const oc = openCloud("deploy", dryRun);
+	// Optional: proposing needs no key; publishing (finishRelease) does.
+	const oc = openCloud("deploy", true);
 	const api = registryApi(oc, proj, noRegistry);
 	const watch = new Stopwatch();
 	const history = await watch.stage("read", () => readHistory(proj, api, noRegistry ? "--no-registry" : "no API key (dry run)"));

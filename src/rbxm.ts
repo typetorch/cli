@@ -12,6 +12,8 @@ export interface RbxmInstance {
 	name: string;
 	/** Referent of the parent; -1 for a root. */
 	parent: number;
+	/** String, number and boolean attributes (other attribute types are skipped). */
+	attributes?: Record<string, string | number | boolean>;
 }
 
 export class RbxmError extends Error {
@@ -120,6 +122,35 @@ function chunkData(compressed: Uint8Array, compressedLength: number, length: num
 	return lz4Block(compressed, length);
 }
 
+/**
+ * An AttributesSerialize blob: u32 count, then per attribute a u32-length name, a type byte and the value. Decodes
+ * strings (0x02), booleans (0x03), float32 (0x05) and float64 (0x06); stops at any other type.
+ */
+export function readAttributes(blob: Uint8Array): Record<string, string | number | boolean> {
+	const reader = new Reader(blob);
+	const out: Record<string, string | number | boolean> = {};
+	const view = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+	try {
+		const count = reader.u32();
+		for (let i = 0; i < count; i++) {
+			const key = reader.string();
+			const type = reader.u8();
+			if (type === 0x02) out[key] = reader.string();
+			else if (type === 0x03) out[key] = reader.u8() !== 0;
+			else if (type === 0x05) {
+				reader.need(4);
+				out[key] = view.getFloat32(reader.offset, true);
+				reader.offset += 4;
+			} else if (type === 0x06) {
+				reader.need(8);
+				out[key] = view.getFloat64(reader.offset, true);
+				reader.offset += 8;
+			} else break;
+		}
+	} catch {}
+	return out;
+}
+
 /** Every instance in a binary model, in INST order. */
 export function readRbxm(bytes: Uint8Array): RbxmInstance[] {
 	const header = new Reader(bytes);
@@ -158,11 +189,16 @@ export function readRbxm(bytes: Uint8Array): RbxmInstance[] {
 			const propName = chunk.string();
 			const type = chunk.u8();
 			const owner = classes.get(classId);
-			if (propName === "Name" && type === 0x01 && owner) {
+			if ((propName === "Name" || propName === "AttributesSerialize") && type === 0x01 && owner) {
 				for (const referent of owner.referents) {
 					const instance = byReferent.get(referent);
-					const value = chunk.string();
-					if (instance) instance.name = value;
+					if (propName === "Name") {
+						const value = chunk.string();
+						if (instance) instance.name = value;
+					} else {
+						const blob = chunk.take(chunk.u32());
+						if (instance && blob.length > 0) instance.attributes = readAttributes(blob);
+					}
 				}
 			}
 		} else if (name === "PRNT") {

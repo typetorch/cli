@@ -7,7 +7,8 @@
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { verifyFields } from "../src/signing";
+import { readRbxm } from "../src/rbxm";
+import { generateSigningKey, parseSigningKey, verifyFields } from "../src/signing";
 
 const cli = resolve(import.meta.dir, "..", "src", "index.ts");
 const fixture = resolve(import.meta.dir, "..", "test-fixture");
@@ -107,16 +108,22 @@ check(
 		r.json?.message?.data?.i === dirtyId &&
 		r.json?.seq === 1 &&
 		r.json?.message?.signed === false &&
-		r.json?.asset?.description.includes(`commit=${sh(["git", "rev-parse", "HEAD"])}`),
+		r.json?.asset?.description === `artifact=${dirtyId}\ncommit=${c2}`,
 	r.stderr || r.json,
 );
-const description: string = r.json?.asset?.description ?? "";
 check(
-	"description: identity, ---, what changed",
-	description.includes("\n---\nmake coins spin\nfirst deploy of feature-thing\ntemplate: uncommitted changes") && description.length <= 1000,
-	description,
+	"notes: the message and what changed",
+	r.json?.notes?.message === "make coins spin" && r.json?.notes?.changes?.join("|") === "first deploy of feature-thing|template: uncommitted changes",
+	r.json?.notes,
 );
-check("unsigned deploys warn about kernel 0.3", /unsigned/.test(r.stderr), r.stderr);
+check("without a terminal, approval \"all\" only proposes", r.json?.approval?.policy === "all" && r.json?.approval?.ending === "propose", r.json?.approval);
+const root = readRbxm(new Uint8Array(readFileSync(join(dir, ".typetorch", "payload.rbxm")))).find((i) => i.className === "Model");
+const notes = JSON.parse(String(root?.attributes?.Notes ?? "{}"));
+check(
+	"Notes attribute on the payload root",
+	notes.v === 1 && notes.branch === "feature-thing" && notes.changes?.[0] === "first deploy of feature-thing" && notes.sources?.template === `${c2}*` && Object.keys(notes).join() === "v,message,changes,sources,built,branch",
+	root?.attributes,
+);
 r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--branch", "prod"]);
 check("dirty dev artifact refused on prod", r.code === 1 && /refusing to deploy a dev-channel artifact and a dirty build/.test(r.stderr), r.stderr);
 r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--branch", "prod", "--force", "--json"]);
@@ -148,7 +155,7 @@ check("branch ls", r.code === 0 && r.json?.branches?.find((b: any) => b.branch =
 r = tt(["rollback", "--dry-run", "--no-registry", "--json"]);
 check("rollback picks the previous artifact (a legacy id)", r.code === 0 && r.json?.to?.artifactId === "dev-0000002" && r.json?.seq === 4 && r.json?.message?.data?.r === 1, r.stderr || r.json);
 r = tt(["rollback", "--dry-run", "--no-registry", "--to", "dev-0000001", "--json"]);
-check("rollback --to a legacy id", r.code === 0 && r.json?.to?.seq === 1, r.stderr || r.json);
+check("rollback --to a legacy id", r.code === 0 && r.json?.to?.artifactId === "dev-0000001" && r.json?.message?.data?.a === 900000001, r.stderr || r.json);
 r = tt(["rollback", "--dry-run", "--no-registry", "--to", "#3"]);
 check("rollback to the live artifact is refused", r.code === 1 && /already live/.test(r.stderr), r.stderr);
 
@@ -170,24 +177,40 @@ appendFileSync(
 r = tt(["deployments"]);
 check("an unpublished upload is listed with its promote command", r.code === 0 && r.stdout.includes(`typetorch promote feature-thing 123456789012`), r.stdout);
 r = tt(["promote", "feature-thing", "123456789012", "--dry-run", "--no-registry", "--json"]);
-check("promote an upload by asset id", r.code === 0 && r.json?.to?.from === "uploads" && r.json?.message?.data?.a === 123456789012, r.stderr || r.json);
+check("promote an upload by asset id", r.code === 0 && r.json?.to?.artifactId === `${c2}-abcdef` && r.json?.message?.data?.a === 123456789012, r.stderr || r.json);
 
-// 8. Signing: keys init into an env file outside the repo, then signed dry runs
-const secrets = mkdtempSync(join(tmpdir(), "tt-e2e-secrets-"));
-const envFile = join(secrets, "fixture.env");
-r = tt(["keys", "init", "--env-file", envFile, "--json"]);
-const publicKey = JSON.parse(readFileSync(join(dir, "typetorch.json"), "utf8")).signingPublicKey;
-check("keys init writes the env file and typetorch.json", r.code === 0 && r.json?.publicKey === publicKey && readFileSync(envFile, "utf8").startsWith("TYPETORCH_SIGNING_KEY="), r.stderr || r.json);
-check("the private key is not printed", !r.stdout.includes(readFileSync(envFile, "utf8").split("=")[1].trim()) && !r.stderr.includes(readFileSync(envFile, "utf8").split("=")[1].trim()));
-r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json"], { TYPETORCH_ENV_FILE: envFile });
+// 8. Approval: proposals without a terminal, approve refuses, reject; keys init needs a terminal; CI escape hatch
+r = tt(["rollback", "--no-registry", "--proposed-by", "dev-server/claude", "--json"]);
+const proposalId: string = r.json?.proposal?.id ?? "";
+check(
+	"rollback without a terminal writes a proposal and publishes nothing (no key needed)",
+	r.code === 0 && /^[0-9a-f]{8}$/.test(proposalId) && r.json?.proposal?.kind === "rollback" && r.json?.proposal?.proposedBy === "dev-server/claude" && r.json?.approve === `typetorch approve ${proposalId}`,
+	r.stderr || r.json,
+);
+r = tt(["proposals", "--json"]);
+check("proposals lists it as pending", r.code === 0 && r.json?.proposals?.[0]?.proposal?.id === proposalId && r.json?.proposals?.[0]?.status === "pending", r.stderr || r.json);
+r = tt(["approve", proposalId]);
+check("approve refuses without an interactive terminal", r.code !== 0 && /interactive terminal/.test(r.stderr), r.stderr);
+r = tt(["reject", proposalId, "--reason", "e2e"]);
+r = tt(["proposals", "--all", "--json"]);
+check("reject", r.json?.proposals?.find((p: any) => p.proposal.id === proposalId)?.status === "rejected", r.json);
+r = tt(["keys", "init", "--key-file", join(mkdtempSync(join(tmpdir(), "tt-e2e-keys-")), "1.key")]);
+check("keys init refuses without a terminal", r.code !== 0 && /interactive terminal/.test(r.stderr), r.stderr);
+r = tt(["keys", "status", "--json"]);
+check("keys status", r.code === 0 && r.json?.exists === false && r.json?.approval === "all", r.stderr || r.json);
+const ci = generateSigningKey();
+writeFileSync(join(dir, ".env"), `TYPETORCH_SIGNING_KEY=${ci.seed}\nTYPETORCH_ALLOW_ENV_SIGNING_KEY=1\n`);
+r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json"]);
+check("a plaintext key in .env is ignored (it only proposes, with a warning)", r.json?.approval?.ending === "propose" && r.json?.message?.signed === false && /plaintext TYPETORCH_SIGNING_KEY/.test(r.stderr), r.stderr || r.json);
+rmSync(join(dir, ".env"));
+r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json"], { TYPETORCH_SIGNING_KEY: ci.seed, TYPETORCH_ALLOW_ENV_SIGNING_KEY: "1" });
 const { sig, ...fields } = r.json?.message?.data ?? {};
-check("deploy --dry-run is signed, and the signature verifies", r.code === 0 && r.json?.message?.signed === true && verifyFields(publicKey, fields, sig), r.stderr || r.json);
-r = tt(["keys", "init", "--env-file", envFile]);
-check("keys init refuses to replace a key without --force", r.code === 1 && /--force/.test(r.stderr), r.stderr);
+check("CI escape hatch (both in the environment): signed, verifies", r.code === 0 && r.json?.approval?.ending === "ci" && verifyFields(parseSigningKey(ci.seed).publicKey, fields, sig), r.stderr || r.json);
+r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json", "--proposed-by", "dev-server/claude"], { TYPETORCH_SIGNING_KEY: ci.seed, TYPETORCH_ALLOW_ENV_SIGNING_KEY: "1" });
+check("...but never for the dev-server", r.json?.approval?.ending === "propose" && r.json?.message?.signed === false, r.json?.approval);
 
 // 9. Clean builds: ignored source files and non-ModuleScripts are refused
-sh(["git", "add", "-A"]);
-sh(["git", "commit", "-m", "signing key"]);
+sh(["git", "checkout", "--", "."]);
 writeFileSync(join(dir, "src", "local-secret.ts"), "export const SECRET = 1;\n");
 r = tt(["build", "--json"]);
 check("an ignored file in src/ blocks a clean build", r.code === 1 && /git-ignored files/.test(r.stderr) && r.stderr.includes("src/local-secret.ts"), r.stderr);
@@ -216,7 +239,7 @@ writeFileSync(
 	JSON.stringify({ name: "P", tree: { $className: "DataModel", ServerScriptService: { $className: "ServerScriptService", TypeTorchKernel: { $className: "Folder", Kernel: { $path: "src/server/Kernel.server.luau" } } } } }),
 );
 r = tt(["kernel", "deploy", "--kernel", kernel, "--dry-run", "--json"]);
-check("kernel deploy --dry-run: check, version, hash, build; patch mode not built yet", r.code === 0 && r.json?.kernel?.version === "9.9.9" && /^[0-9a-f]{64}$/.test(r.json?.kernel?.hash) && r.json?.mode === "patch (not implemented)" && r.json?.signingPublicKey === publicKey, r.stderr || r.json);
+check("kernel deploy --dry-run: check, version, hash, build; patch mode not built yet", r.code === 0 && r.json?.kernel?.version === "9.9.9" && /^[0-9a-f]{64}$/.test(r.json?.kernel?.hash) && r.json?.mode === "patch (not implemented)", r.stderr || r.json);
 check("the check ran (lune)", /files, 0 failed/.test(r.stderr), r.stderr);
 r = tt(["kernel", "deploy", "--kernel", kernel, "--replace-place", "--dry-run", "--json"]);
 check("--replace-place --dry-run warns that it wipes Studio content", r.code === 0 && r.json?.mode === "replace-place" && /WIPES|wiped/i.test(r.stderr), r.stderr || r.json);

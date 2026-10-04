@@ -28,5 +28,11 @@ describe("rbxm reader (S-L4)", () => {
 		expect(result.disallowed.sort()).toEqual(["TypeTorchPayload/Server/note (StringValue)", "TypeTorchPayload/Server/run (Script)"]);
 		expect(result.modules).toBe(1);
 	});
+	test("reads the root's attributes (strings and numbers), e.g. the Notes JSON", () => {
+		const root = readRbxm(fixture("payload-attributes.rbxm")).find((i) => i.className === "Model")!;
+		expect(root.attributes?.ArtifactId).toBe("12b63b9-3fa91c");
+		expect(root.attributes?.KernelApi).toBe(1);
+		expect(JSON.parse(String(root.attributes?.Notes))).toEqual({ v: 1, message: "hi", changes: ["template: x"], sources: { template: "12b63b9" }, built: "t", branch: "dev" });
+	});
 	test("not an rbxm", () => expect(() => readRbxm(new TextEncoder().encode("<roblox xmlns"))).toThrow(RbxmError));
 });

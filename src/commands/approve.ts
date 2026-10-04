@@ -297,8 +297,8 @@ export async function finishRelease(input: {
 	mode: ReleaseMode;
 	proposer: Proposer;
 	request: ReleaseRequest;
-	/** A client with the deploy key. */
-	oc: OpenCloud;
+	/** A client with the deploy key (not needed to propose). */
+	oc?: OpenCloud;
 	api?: RegistryApi;
 	history: History;
 	watch: Stopwatch;
@@ -317,13 +317,14 @@ export async function finishRelease(input: {
 		const result = await approveProposal(proj, { proposal, status: "pending" }, { io, noRegistry: input.noRegistry, keyFile: input.keyFile, oc: input.oc });
 		return result ? { kind: "published", result, signed: true } : { kind: "declined", proposal };
 	}
+	if (!input.oc) settings().requireApiKey("deploy"); // throws the "no key" message
 	let key: SigningKey | undefined;
 	if (mode.kind === "ci") key = mode.key;
 	else if (mode.kind === "sign-now") key = await unlockSigningKey(proj, io, input.keyFile ?? keyFilePath(proj));
 	else warnUnsigned();
 	const result = await release({
 		proj,
-		oc: input.oc,
+		oc: input.oc!,
 		api: input.api,
 		history: input.history,
 		action: request.kind,
@@ -399,7 +400,7 @@ export async function releaseExisting(input: {
 		mode,
 		proposer,
 		request: { kind, branch, branchChannel: input.branchChannel, artifact: input.artifact, message: note, changes: input.changes, force: input.force, by: input.by, from: head },
-		oc: input.oc!,
+		oc: input.oc,
 		api: input.api,
 		history,
 		watch: input.watch,

@@ -68,7 +68,8 @@ export async function promoteCommand(args: ParsedArgs) {
 	const noRegistry = flagBool(args, "no-registry");
 	const git = gitInfo(proj.root);
 
-	const oc = openCloud("deploy", dryRun);
+	// Optional: proposing needs no key; publishing (finishRelease) does.
+	const oc = openCloud("deploy", true);
 	const api = registryApi(oc, proj, noRegistry);
 	const watch = new Stopwatch();
 	const history = await watch.stage("read", () => readHistory(proj, api, noRegistry ? "--no-registry" : "no API key (dry run)"));
