@@ -1,5 +1,6 @@
 /**
  * `typetorch doctor`: tools, config, env file, API keys per job (never printed), the approval policy, the state dir,
+ * the prod signing keys (keycheck.ts: both key files vs typetorch.json, the key asset and the place; mismatches warn),
  * and Open Cloud scopes, each probed with its job's key through harmless calls:
  *   assets       GET an operation that doesn't exist        404 = scope ok, 401/403 = missing
  *   messaging    publish to topic "TypeTorch/doctor"          200 = ok (no server listens to that topic)
@@ -19,15 +20,10 @@ import { capture } from "../proc";
 import { rojoBinary } from "../build";
 import { REPOSITORY } from "../registry";
 import { stateDir } from "../state";
+import { gatherKeyFacts, keyChecks, type Check, type Status } from "../keycheck";
+import { KEY_FILE_FLAGS, signingKeyPaths } from "./common";
 
-export const doctorFlags = {} as const;
-
-type Status = "ok" | "warn" | "fail";
-interface Check {
-	name: string;
-	status: Status;
-	detail: string;
-}
+export const doctorFlags = { ...KEY_FILE_FLAGS } as const;
 
 function mark(status: Status): string {
 	return status === "ok" ? green("ok  ") : status === "warn" ? yellow("warn") : red("FAIL");
@@ -137,6 +133,17 @@ export async function doctorCommand(args: ParsedArgs) {
 		checks.push({ name: "approval", status: "ok", detail: `"${proj.config.approval}" (${proj.config.approval === "none" ? "deploys publish without approval" : "deploys wait for typetorch approve"})` });
 	}
 	if (proj) checks.push({ name: "state dir", status: "ok", detail: stateDir(proj.root) });
+
+	// Prod signing: key files, the key asset, the place (seeds are never printed; public keys are)
+	if (proj) {
+		const facts = await gatherKeyFacts({
+			config: proj.config,
+			paths: signingKeyPaths(proj, args),
+			stateDir: stateDir(proj.root),
+			assets: keys.assets ? new OpenCloud(keys.assets.key) : undefined,
+		});
+		checks.push(...keyChecks(facts));
+	}
 
 	// Scopes, each with its job's key
 	const assetsKey = keys.assets;
