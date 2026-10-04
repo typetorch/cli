@@ -101,31 +101,42 @@ message. Keep the deploy key away from agents. An old `signingPublicKey` (CLI 0.
 
 ### Signing prod deploys
 
-Releases (deploy, rollback, promote) to a **prod-channel** branch are signed with two Ed25519 keys when they are
-published; dev-channel ones never are. Every prod message and registry head carries `sig` (main key) and `sigF`
-(fallback key); a prod server runs it when either verifies (format in TypeTorch `plans/03-artifact.md`).
+Releases (deploy, rollback, promote, re-sign) and pins to a **prod-channel** branch are signed with two Ed25519 keys
+when they are published; dev-channel ones never are. Every prod message and registry head carries `sig` (main key) and
+`sigF` (fallback key). The kernel's rule is strict: once the key asset has loaded on a server only `sig` counts; while
+it never loaded only `sigF` counts (format, rule and vectors in TypeTorch `plans/03-artifact.md`).
 
 | | Main key | Fallback key |
 |---|---|---|
 | Key file (plaintext JSON, no passphrase: keep it safe and backed up) | `~/.config/typetorch/keys/<universeId>.key` | `~/.config/typetorch/keys/<universeId>.fallback.key` |
 | Other path | `--key-file` or `TYPETORCH_KEY_FILE` | `--fallback-key-file` or `TYPETORCH_FALLBACK_KEY_FILE` |
 | Where servers get the public key | the **key asset** (a group-owned Model with `PublicKeys` / `RevokedKeys` attributes; its id is stamped on the kernel as `KeyAssetId`) | baked into the place as `FallbackPublicKey` |
-| Replace it | `typetorch keys rotate` (no restart) | `typetorch keys init --fallback --force`, then `typetorch kernel deploy` |
+| Replace it | `typetorch keys rotate` (no restart; re-signs the live prod heads) | `typetorch keys init --fallback --force`, then `typetorch kernel deploy` |
 
 **Set up once, in this order:**
 1. `typetorch keys init`: the main key file, `signingPublicKeys`, and the key asset (created through Open Cloud with
    the assets key; its id goes into `keyAssetId`). Running it again resumes or does nothing.
 2. `typetorch keys init --fallback`: the fallback key file and `fallbackPublicKey` (no network).
 3. Commit typetorch.json (public keys only).
-4. `typetorch kernel deploy --replace-place --yes`: bakes `KeyAssetId` and `FallbackPublicKey` into the place
-   (servers restart). It refuses to publish without them.
+4. `typetorch kernel deploy --replace-place --yes`: bakes `KeyAssetId`, `FallbackPublicKey` and `BootstrapHeads`
+   (the current prod heads, which the kernel trusts unsigned: heads stored before signing have no signature) into the
+   place (servers restart). It refuses to publish without the keys. Run it from the machine with the latest
+   deployment log (or a readable registry).
 5. `typetorch doctor`: both key files exist and match typetorch.json, the key asset (Approved, right owner, same
    lists) and the place's kernel attributes; any mismatch is a warning.
 
-**Recovery:** a lost or leaked main key: `typetorch keys rotate` (the key asset trusts only the new key and revokes the
-old one, `TypeTorch/rekey` tells servers to re-read it; heads signed before stay valid through `sigF`). A leaked or lost
-fallback key: `typetorch keys init --fallback --force` (adds the old key to the key asset's RevokedKeys first, then
-makes a new pair), then `typetorch kernel deploy`.
+**Recovery:** a lost or leaked main key: `typetorch keys rotate`. The key asset trusts only the new key and revokes
+the old one, `TypeTorch/rekey` tells servers to re-read it, and then each prod-channel branch's live head is
+**re-signed**: the same artifact and asset as a fresh signed message with a new seq and `r` = `"resign"` (servers
+update the head, no swap), through the approval policy like any prod publish. `typetorch keys resign` does only that
+step (to retry it). A leaked or lost fallback key: `typetorch keys init --fallback --force` (adds the old key to the
+key asset's RevokedKeys first, then makes a new pair), then `typetorch kernel deploy`.
+
+**Signed pins (A/B experiments on prod):** `typetorch pin <artifact> --branch <b> (--servers <jobId,...> | --pct
+<1-99>)` and `typetorch pin --unpin --branch <b> (--servers ... | --all)` publish `TypeTorch/pin` (kernel 0.2.3 fields)
+with `sig`/`sigF` on prod-channel branches, after a y/N (the approval policy; pins can't be proposals because servers
+drop them after 120 s). `--by <userId>` names the owner/admin (default: the only "owner" in `members`, else the creator
+userId). Unsigned pins from the in-game Admin tab only work on dev-channel servers.
 
 No command prints a seed; a key file inside the repo or any git work tree is refused. The remote-claude dev-server only
 deploys dev-channel branches, never gets the key variables, and is refused if it ever tries to publish to prod. Dry runs
@@ -146,7 +157,8 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch config push [--dry-run]` | copy `defaultBranch`, `channels`, `members`, `devBadgeId` (and `revoked`) into the registry |
 | `typetorch kernel deploy [--kernel <dir>] [--dry-run] [--replace-place --yes] [--allow-dirty] [--allow-untagged]` | see below |
 | `typetorch approve [id]` | approve a proposal: details, y/N, publish (interactive terminal only); prod-channel ones are signed |
-| `typetorch keys init [--key-file]` / `keys init --fallback [--force] [--yes]` / `keys rotate [--yes]` | the signing keys: see "Signing prod deploys" |
+| `typetorch keys init [--key-file]` / `keys init --fallback [--force] [--yes]` / `keys rotate [--yes]` / `keys resign` | the signing keys: see "Signing prod deploys" |
+| `typetorch pin <artifact> --branch <b> (--servers <ids> \| --pct <1-99>)` / `pin --unpin --branch <b> (--servers <ids> \| --all)` | A/B experiment pins, signed on prod-channel branches; `--by`, `--dry-run` |
 | `typetorch reject <id> [--reason]` / `typetorch proposals [--all]` | drop a proposal / list them |
 | `typetorch doctor` | checks bun, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key), and probes each key's scopes with harmless calls |
 
@@ -203,8 +215,9 @@ and `--env-file <path>`.
 ### Deploy message
 
 `POST /cloud/v2/universes/{universeId}:publishMessage`, topic `TypeTorch/deploy`, message
-`{"b":branch,"a":assetId,"i":artifactId,"s":seq,"c":commit,"ch":channel,"t":unixMs,"r":1?,"sig":"…","sigF":"…"}` (`r`
-only for rollbacks; `sig`/`sigF` only for prod-channel branches: base64 Ed25519 over
+`{"b":branch,"a":assetId,"i":artifactId,"s":seq,"c":commit,"ch":channel,"t":unixMs,"r":1?,"sig":"…","sigF":"…"}` (`r`:
+`1` for rollbacks, `"resign"` for heads re-signed by `keys rotate`; `sig`/`sigF` only for prod-channel branches: base64
+Ed25519 over
 `tt1\n<b>\n<a>\n<i>\n<s>\n<c>\n<ch>\n<t>\n<r>`, rules and test vectors in TypeTorch `plans/03-artifact.md`). Servers on
 branch `b` swap, and persist it as their branch head (the higher `s` wins; heads are ordered by `(seq, time)`).
 `TypeTorch/rekey` `{"t":unixMs}` tells servers to re-read the key asset (after `keys rotate`).
@@ -240,8 +253,10 @@ log. **When it can be read but not written, the deploy aborts** before the messa
    and prints it with a content hash (place.project.json and `src/`, LF line endings). A git checkout must be clean and
    tagged `v<version>` (`--allow-dirty`, `--allow-untagged`);
 3. builds `.typetorch/place.rbxl` with `KernelVersion`, `KernelHash` and `KernelCommit` attributes, plus the signing
-   trust roots `KeyAssetId` and `FallbackPublicKey` from typetorch.json, on `ServerScriptService.TypeTorchKernel`
-   (publishing refuses without them, or when the fallback key file doesn't match);
+   trust roots `KeyAssetId` and `FallbackPublicKey` from typetorch.json and `BootstrapHeads` (the JSON of the current
+   prod-channel heads, `{"<branch>":{"a","s","i"}}`, from the registry or the local log; `--no-registry`), on
+   `ServerScriptService.TypeTorchKernel` (publishing refuses without the keys, or when the fallback key file doesn't
+   match);
 4. publishes **only with `--replace-place --yes`**, which replaces the whole place and wipes Studio/Team Create
    content (patching just the kernel slots comes later; see TypeTorch `plans/13`). The place version before and after
    go to `kernel-deploys.jsonl`. `--dry-run` stops before publishing.
