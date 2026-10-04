@@ -279,6 +279,7 @@ writeFileSync(
 );
 r = tt(["kernel", "deploy", "--kernel", kernel, "--dry-run", "--json"]);
 check("kernel deploy --dry-run: check, version, hash, build; patch mode not built yet", r.code === 0 && r.json?.kernel?.version === "9.9.9" && /^[0-9a-f]{64}$/.test(r.json?.kernel?.hash) && r.json?.mode === "patch (not implemented)", r.stderr || r.json);
+check("kernel deploy stamps BootstrapHeads (the prod-channel heads known here) and reports the missing keys", typeof r.json?.bootstrapHeads === "object" && /BootstrapHeads/.test(r.stderr) && /no "keyAssetId"/.test(r.stderr), r.stderr || r.json);
 check("the check ran (lune)", /files, 0 failed/.test(r.stderr), r.stderr);
 r = tt(["kernel", "deploy", "--kernel", kernel, "--replace-place", "--dry-run", "--json"]);
 check("--replace-place --dry-run warns that it wipes Studio content", r.code === 0 && r.json?.mode === "replace-place" && /WIPES|wiped/i.test(r.stderr), r.stderr || r.json);

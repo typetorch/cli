@@ -10,6 +10,10 @@
  *      KernelHash, KernelCommit) and the signing trust roots (plans/03 "Key asset"): KeyAssetId (number) and
  *      FallbackPublicKey (string), from typetorch.json "keyAssetId" / "fallbackPublicKey". Publishing refuses without
  *      both (prod servers could not verify any deploy); a fallback key file that doesn't match is refused too.
+ *      Also BootstrapHeads (string): the JSON of the current prod-channel heads at deploy time,
+ *      {"<branch>":{"a":assetId,"s":seq,"i":"artifactId"}}, from the registry (when readable) and the local log. The
+ *      kernel trusts exactly those heads unsigned (heads stored before signing have no sig); anything newer must be
+ *      signed (plans/03 "Bootstrap heads").
  *   4. Publish: only with --replace-place --yes, which REPLACES THE WHOLE PLACE (it wipes Studio/Team Create content).
  *      The place version before and after go to `<state dir>/kernel-deploys.jsonl`.
  *
@@ -29,7 +33,8 @@ import { isRecord, parseJsonc } from "../json";
 import { inspectKeyFile } from "../keyfiles";
 import { bold, dim, emitJson, formatBytes, formatSeconds, info, isJson, red, Stopwatch, warn } from "../log";
 import { capture, query, run } from "../proc";
-import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, signingKeyPaths } from "./common";
+import { branchChannel, strictest } from "../naming";
+import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, readHistory, registryApi, signingKeyPaths, warnRegistryFallback, type History } from "./common";
 
 export const kernelFlags = {
 	kernel: "string",
@@ -39,7 +44,26 @@ export const kernelFlags = {
 	"allow-dirty": "boolean",
 	"allow-untagged": "boolean",
 	"fallback-key-file": KEY_FILE_FLAGS["fallback-key-file"],
+	"no-registry": "boolean",
 } as const;
+
+/** One bootstrap head: what the kernel trusts unsigned for that branch (plans/03 "Bootstrap heads"). */
+export interface BootstrapHead {
+	a: number;
+	s: number;
+	i: string;
+}
+
+/** The current head of every prod-channel branch, keyed by branch (sorted), for the BootstrapHeads attribute. */
+export function bootstrapHeads(proj: Pick<Project, "config">, history: Pick<History, "heads" | "snapshot">): Record<string, BootstrapHead> {
+	const out: Record<string, BootstrapHead> = {};
+	for (const branch of [...history.heads.keys()].sort()) {
+		const head = history.heads.get(branch)!;
+		if (strictest(branchChannel(proj.config, branch), history.snapshot?.value.channels[branch]) !== "prod") continue;
+		out[branch] = { a: head.assetId, s: head.seq, i: head.artifactId };
+	}
+	return out;
+}
 export const PLACE_FILE = `${OUT_DIR}/place.rbxl`;
 export const PLACE_GEN_PROJECT = `${OUT_DIR}/place.gen.project.json`;
 export const KERNEL_LOG = "kernel-deploys.jsonl";
@@ -267,6 +291,15 @@ export async function kernelCommand(args: ParsedArgs) {
 	for (const warning of signing.warnings) warn(warning);
 	for (const problem of signing.problems) warn(problem);
 	info(`  keys     KeyAssetId ${signing.attributes.KeyAssetId ?? "(none)"}  FallbackPublicKey ${signing.attributes.FallbackPublicKey ?? "(none)"}`);
+	// The prod heads stored before signing (no sig): the kernel trusts exactly these unsigned.
+	const noRegistry = flagBool(args, "no-registry");
+	const registry = registryApi(openCloud("deploy", true), proj, noRegistry);
+	const history = await readHistory(proj, registry, noRegistry ? "--no-registry" : "no deploy key");
+	if (!history.snapshot && registry) warnRegistryFallback(history.unavailable ?? "unknown");
+	const heads = bootstrapHeads(proj, history);
+	attributes.BootstrapHeads = JSON.stringify(heads);
+	const listed = Object.entries(heads).map(([branch, head]) => `${branch}=#${head.s} ${head.i} (asset ${head.a})`);
+	info(`  heads    BootstrapHeads ${listed.length ? listed.join(", ") : "{} (no prod-channel heads yet)"}  (${history.snapshot ? "registry + local log" : "local log only: deploys made from another machine are missing"})`);
 	mkdirSync(join(proj.root, OUT_DIR), { recursive: true });
 	const placeProject = parseJsonc(readFileSync(join(kernelDir, "place.project.json"), "utf8"));
 	const { project: stamped, stamped: didStamp } = stampKernelProject(placeProject, kernelDir, attributes);
@@ -290,6 +323,7 @@ export async function kernelCommand(args: ParsedArgs) {
 		placeId: proj.config.placeId,
 		keyAssetId: proj.config.keyAssetId ?? null,
 		fallbackPublicKey: proj.config.fallbackPublicKey ?? null,
+		bootstrapHeads: heads,
 	};
 
 	// 4. Publish mode. Patching (plans/13) is not built yet: see the TODO at the top.
@@ -340,6 +374,7 @@ export async function kernelCommand(args: ParsedArgs) {
 		kernelSource: identity.source,
 		keyAssetId: proj.config.keyAssetId ?? null,
 		fallbackPublicKey: proj.config.fallbackPublicKey ?? null,
+		bootstrapHeads: heads,
 		placeVersionBefore: before ?? null,
 		...(beforeError ? { placeVersionBeforeError: beforeError.slice(0, 300) } : {}),
 		by,

@@ -89,3 +89,27 @@ describe("kernel identity (S-L5)", () => {
 		expect(absolutePaths({ a: [{ $path: "x" }] }, "/k")).toEqual({ a: [{ $path: resolve("/k", "x").replace(/\\/g, "/") }] });
 	});
 });
+
+describe("kernel deploy: signing stamps and BootstrapHeads (plans/03)", () => {
+	test("BootstrapHeads: every prod-channel branch's current head {a, s, i}; dev branches left out", async () => {
+		const { bootstrapHeads, stampKernelProject } = await import("../src/commands/kernel");
+		const { appendLocalLog } = await import("../src/deployments");
+		const { withLocal } = await import("../src/commands/common");
+		const root = mkdtempSync(join(tmpdir(), "tt-boot-"));
+		useSettings(new Settings({ startDir: root, env: {} }));
+		const state = join(root, ".typetorch");
+		const row = (seq: number, branch: string, channel: "prod" | "dev") => ({ seq, at: `2026-10-04T12:00:0${seq}.000Z`, action: "deploy" as const, branch, channel, artifactId: `12b63b9-00000${seq}`, assetId: 900000000 + seq, commit: "12b63b9", commitHash: "", dirty: false, by: "me", universeId: 42 });
+		appendLocalLog(state, row(1, "prod", "prod"));
+		appendLocalLog(state, row(2, "dev", "dev"));
+		appendLocalLog(state, row(3, "prod", "prod"));
+		appendLocalLog(state, row(4, "staging", "prod"));
+		const proj = { root, config: { universeId: 42, defaultBranch: "prod", channels: { prod: "prod", staging: "prod" }, branches: {} } } as unknown as Project;
+		const heads = bootstrapHeads(proj, withLocal(proj, undefined));
+		expect(heads).toEqual({ prod: { a: 900000003, s: 3, i: "12b63b9-000003" }, staging: { a: 900000004, s: 4, i: "12b63b9-000004" } });
+		const json = JSON.stringify(heads);
+		expect(json).toBe('{"prod":{"a":900000003,"s":3,"i":"12b63b9-000003"},"staging":{"a":900000004,"s":4,"i":"12b63b9-000004"}}');
+		const place = { name: "P", tree: { $className: "DataModel", ServerScriptService: { $className: "ServerScriptService", TypeTorchKernel: { $className: "Folder" } } } };
+		const stamped = stampKernelProject(place, root, { KeyAssetId: 555, FallbackPublicKey: "x", BootstrapHeads: json });
+		expect(stamped.project.tree.ServerScriptService.TypeTorchKernel.$attributes).toEqual({ KeyAssetId: 555, FallbackPublicKey: "x", BootstrapHeads: json });
+	});
+});
