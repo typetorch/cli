@@ -141,12 +141,12 @@ export class OpenCloud {
 		return operationId;
 	}
 
-	/** Polls an assets operation until done. */
-	async waitForOperation(operationId: string, timeoutSeconds = 600): Promise<any> {
+	/** Polls an assets operation until done. `request` sets each poll's timeout and retries (default: 60 s, 4 tries). */
+	async waitForOperation(operationId: string, timeoutSeconds = 600, request: Pick<RequestOptions, "timeoutMs" | "retry"> = {}): Promise<any> {
 		const started = performance.now();
 		let delay = 500;
 		while (true) {
-			const operation = await this.call("GET", `/assets/v1/operations/${operationId}`);
+			const operation = await this.call("GET", `/assets/v1/operations/${operationId}`, request);
 			if (operation?.done) return operation;
 			if ((performance.now() - started) / 1000 > timeoutSeconds) {
 				throw new Error(`asset operation ${operationId} not done after ${timeoutSeconds} s`);

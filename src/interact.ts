@@ -1,12 +1,13 @@
 /**
  * Questions on the user's own terminal: y/N confirmations and choices. Approving a
- * deploy needs a person at an interactive terminal: when stdin or the terminal output isn't a TTY (agents, the
- * dev-server, CI, pipes), `interactive` is false and the commands that need a person refuse.
+ * deploy needs a person at an interactive terminal: unless stdin, stdout AND stderr are all TTYs (agents, the
+ * dev-server, CI, pipes, background shells, `< /dev/null`), `interactive` is false, nothing ever reads stdin, and the
+ * commands that need a person refuse or write a proposal instead.
  * Prompts go to stderr, so `--json` output on stdout stays one document. Tests swap in a scripted Interaction.
  */
 
 export interface Interaction {
-	/** A person can answer: stdin and stderr are terminals. */
+	/** A person can answer: stdin, stdout and stderr are terminals. */
 	interactive: boolean;
 	/** y/N question; anything but y/yes is no. */
 	confirm(question: string): Promise<boolean>;
@@ -36,9 +37,14 @@ async function readLine(question: string): Promise<string> {
 	}
 }
 
+/** True only when stdin, stdout and stderr are all TTYs. */
+export function isInteractiveTerminal(streams: { stdin?: { isTTY?: boolean }; stdout?: { isTTY?: boolean }; stderr?: { isTTY?: boolean } } = process): boolean {
+	return Boolean(streams.stdin?.isTTY && streams.stdout?.isTTY && streams.stderr?.isTTY);
+}
+
 export function terminalInteraction(): Interaction {
-	// A person: stdin and stderr are terminals.
-	const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY);
+	// A person: stdin, stdout and stderr are all terminals (prompts go to stderr; answers come from stdin).
+	const interactive = isInteractiveTerminal();
 	return {
 		interactive,
 		async confirm(question) {

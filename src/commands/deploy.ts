@@ -245,9 +245,6 @@ export async function deployCommand(args: ParsedArgs) {
 	});
 	watch.set("upload", upload.uploadSeconds);
 	watch.set("moderation", upload.moderationSeconds);
-	// Off the critical path of the decision: rename a censored name, warn about a censored description.
-	const name = await fixCensoredName(assets!, upload);
-	if (name.renamed) info(dim(`  asset name was censored by Roblox's text filter; renamed to "${name.name}"`));
 
 	const outcome = await finishRelease({
 		proj,
@@ -274,6 +271,10 @@ export async function deployCommand(args: ParsedArgs) {
 		keyPaths,
 		signer,
 	});
+	// Off the critical path, after the message (or the proposal): rename a censored name, warn about a censored
+	// description. Bounded (fixCensoredName), so a slow Assets API can't hold the command.
+	const name = await fixCensoredName(assets!, upload);
+	if (name.renamed) info(dim(`  asset name was censored by Roblox's text filter; renamed to "${name.name}"`));
 	if (outcome.kind === "proposed") return reportProposal(outcome.proposal, { assetId: upload.assetId, assetName: name.name });
 	if (outcome.kind === "declined") {
 		if (isJson()) emitJson({ proposal: outcome.proposal, approve: `typetorch approve ${outcome.proposal.id}`, declined: true });

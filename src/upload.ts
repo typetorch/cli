@@ -100,16 +100,42 @@ export async function uploadPayload(
 /** A name Roblox's text filter has always let through (2026-10-04). */
 export const FALLBACK_ASSET_NAME = "TypeTorch payload";
 
+/** How long the cosmetic name check may take in total; it never blocks or fails a deploy. */
+export const NAME_CHECK_BUDGET_MS = 20_000;
+/** Each of its requests: one try, short timeout (a stalled Assets API once held a deploy for 10+ minutes). */
+const NAME_CHECK_REQUEST = { timeoutMs: 8_000, retry: false } as const;
+
 /**
  * Roblox's text filter censors names AND descriptions to "####", unpredictably (names: tt-dev-59daad8, tt-dev-c3698d4,
- * even "tt dev", while tt-main-a17a22c passed; descriptions: #21's long one, 2026-10-04). Run after the deploy message
- * (off the critical path): reads the stored name and description back, renames a censored asset to
- * FALLBACK_ASSET_NAME so the Creator Hub list stays readable, and warns about a censored description (harmless: the
- * identity and the notes are in the payload's attributes). Returns the final name, or undefined when it couldn't tell.
+ * even "tt dev", while tt-main-a17a22c passed; descriptions: #21's long one, 2026-10-04). Run AFTER the deploy message
+ * (off the critical path; `deploy` publishes first): reads the stored name and description back, renames a censored
+ * asset to FALLBACK_ASSET_NAME so the Creator Hub list stays readable, and warns about a censored description
+ * (harmless: the identity and the notes are in the payload's attributes). Bounded: single-try requests and an overall
+ * budget (NAME_CHECK_BUDGET_MS); past it the check is skipped with a note. Returns the final name, or undefined when it
+ * couldn't tell.
  */
-export async function fixCensoredName(oc: OpenCloud, upload: UploadResult): Promise<{ name?: string; renamed: boolean; descriptionCensored?: boolean }> {
+export async function fixCensoredName(
+	oc: OpenCloud,
+	upload: UploadResult,
+	options: { budgetMs?: number } = {},
+): Promise<{ name?: string; renamed: boolean; descriptionCensored?: boolean; skipped?: boolean }> {
+	const budgetMs = options.budgetMs ?? NAME_CHECK_BUDGET_MS;
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const budget = new Promise<{ renamed: boolean; skipped: boolean }>((resolve) => {
+		timer = setTimeout(() => resolve({ renamed: false, skipped: true }), budgetMs);
+	});
 	try {
-		const asset = await oc.call("GET", `/assets/v1/assets/${upload.assetId}?readMask=displayName,description`);
+		const result = await Promise.race([checkName(oc, upload), budget]);
+		if ("skipped" in result && result.skipped) warn(`skipped the asset name check: Roblox didn't answer within ${Math.round(budgetMs / 1000)} s (harmless)`);
+		return result;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+async function checkName(oc: OpenCloud, upload: UploadResult): Promise<{ name?: string; renamed: boolean; descriptionCensored?: boolean }> {
+	try {
+		const asset = await oc.call("GET", `/assets/v1/assets/${upload.assetId}?readMask=displayName,description`, NAME_CHECK_REQUEST);
 		const stored: unknown = asset?.displayName ?? upload.storedName;
 		const descriptionCensored = typeof asset?.description === "string" ? looksCensored(asset.description) : undefined;
 		if (descriptionCensored) warn(`Roblox's text filter censored asset ${upload.assetId}'s description (harmless: the identity and notes are in the payload's attributes)`);
@@ -117,9 +143,9 @@ export async function fixCensoredName(oc: OpenCloud, upload: UploadResult): Prom
 		if (typeof stored !== "string" || !stored.includes("#")) return { name: typeof stored === "string" ? stored : undefined, renamed: false, descriptionCensored };
 		const form = new FormData();
 		form.append("request", JSON.stringify({ assetId: upload.assetId, displayName: FALLBACK_ASSET_NAME }));
-		const op = await oc.call("PATCH", `/assets/v1/assets/${upload.assetId}?updateMask=displayName`, { body: form });
+		const op = await oc.call("PATCH", `/assets/v1/assets/${upload.assetId}?updateMask=displayName`, { body: form, ...NAME_CHECK_REQUEST });
 		const operationId = op?.operationId ?? String(op?.path ?? "").split("/").pop();
-		if (operationId && !op?.done) await oc.waitForOperation(operationId, 60);
+		if (operationId && !op?.done) await oc.waitForOperation(operationId, 10, NAME_CHECK_REQUEST);
 		return { name: FALLBACK_ASSET_NAME, renamed: true, descriptionCensored };
 	} catch (error) {
 		warn(`could not check or fix the asset name: ${(error as Error).message}`);
