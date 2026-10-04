@@ -23,7 +23,6 @@ export const rollbackFlags = {
 	message: "string",
 	propose: "boolean",
 	"proposed-by": "string",
-	"key-file": "string",
 } as const;
 
 export async function rollbackCommand(args: ParsedArgs) {

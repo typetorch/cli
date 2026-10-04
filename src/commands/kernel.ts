@@ -7,7 +7,7 @@
  *      (--allow-dirty / --allow-untagged override); a packaged kernel is identified by its version, hash, and the
  *      commit the template's packages manifest recorded. Version and hash are printed and recorded.
  *   3. Build the place with the identity stamped on ServerScriptService.TypeTorchKernel (attributes KernelVersion,
- *      KernelHash, KernelCommit, and SigningPublicKey from typetorch.json for kernel 0.3).
+ *      KernelHash, KernelCommit).
  *   4. Publish: only with --replace-place --yes, which REPLACES THE WHOLE PLACE (it wipes Studio/Team Create content).
  *      The place version before and after go to `<state dir>/kernel-deploys.jsonl`.
  *
@@ -230,11 +230,9 @@ export async function kernelCommand(args: ParsedArgs) {
 			: `package${identity.commit ? ` packed from ${identity.commit}${identity.dirty ? "*" : ""}` : ""}`;
 	info(`  kernel   ${identity.version} (api ${identity.api ?? "?"})  hash ${identity.hash.slice(0, 16)}  ${identity.files} files  ${provenance}`);
 
-	// 3. Build, with the identity (and the signing public key) stamped on the kernel slot.
+	// 3. Build, with the identity stamped on the kernel slot.
 	const attributes: Record<string, string> = { KernelVersion: identity.version, KernelHash: identity.hash };
 	if (identity.commit) attributes.KernelCommit = `${identity.commit}${identity.dirty ? "*" : ""}`;
-	if (proj.config.signingPublicKey) attributes.SigningPublicKey = proj.config.signingPublicKey;
-	else warn("typetorch.json has no signingPublicKey (`typetorch keys init`): kernel 0.3 servers would have no key to verify deploys with");
 	mkdirSync(join(proj.root, OUT_DIR), { recursive: true });
 	const placeProject = parseJsonc(readFileSync(join(kernelDir, "place.project.json"), "utf8"));
 	const { project: stamped, stamped: didStamp } = stampKernelProject(placeProject, kernelDir, attributes);
@@ -256,7 +254,6 @@ export async function kernelCommand(args: ParsedArgs) {
 		bytes: bytes.length,
 		universeId: proj.config.universeId,
 		placeId: proj.config.placeId,
-		signingPublicKey: proj.config.signingPublicKey ?? null,
 	};
 
 	// 4. Publish mode. Patching (plans/13) is not built yet: see the TODO at the top.
@@ -302,7 +299,6 @@ export async function kernelCommand(args: ParsedArgs) {
 		kernelDirty: identity.dirty,
 		kernelTag: identity.tag,
 		kernelSource: identity.source,
-		signingPublicKey: proj.config.signingPublicKey,
 		placeVersionBefore: before ?? null,
 		...(beforeError ? { placeVersionBeforeError: beforeError.slice(0, 300) } : {}),
 		by,
@@ -322,5 +318,4 @@ export async function kernelCommand(args: ParsedArgs) {
 	info(`  publish  ${formatSeconds(timings.publish)}  place version ${before ?? "?"} -> ${after ?? "?"}`);
 	info(bold(`published kernel ${identity.version} (hash ${identity.hash.slice(0, 16)}) to ${where}; servers run it after they restart`));
 	info(dim(`  recorded in ${join(stateDir, KERNEL_LOG)}; revert from the place's version history in Creator Hub if needed`));
-	if (!proj.config.signingPublicKey) info(red("  no signing key was baked in"));
 }

@@ -2,7 +2,7 @@
  * Deploy proposals (decision: "approve each deploy myself"). When a deploy, rollback or promote needs approval and the
  * caller can't approve it (an agent, the dev-server, a script, or the user chose `--propose`), the CLI builds, uploads
  * and waits for moderation, then appends a proposal to `<state dir>/proposals.jsonl` and publishes nothing.
- * `typetorch approve <id>` (a person, an interactive terminal, the key's passphrase) signs and publishes it.
+ * `typetorch approve <id>` (a person at an interactive terminal: details, y/N) publishes it.
  *
  * proposals.jsonl is append-only, one JSON object per line:
  *   {"event":"proposed", "id", "at", "expiresAt", "kind", "branch", "branchChannel", "artifact": {...}, ...}

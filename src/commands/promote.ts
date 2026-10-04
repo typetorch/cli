@@ -23,7 +23,6 @@ export const promoteFlags = {
 	message: "string",
 	propose: "boolean",
 	"proposed-by": "string",
-	"key-file": "string",
 } as const;
 
 interface Candidate extends ProposalArtifact {

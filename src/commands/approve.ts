@@ -1,34 +1,31 @@
 /**
- * Approving deploys (decision: "approve each deploy myself"). Agents, the dev-server and scripts may PREPARE a deploy;
- * only a person at an interactive terminal, with the signing key's passphrase, publishes it.
+ * Approving deploys (user decision: "approve each deploy myself"; signing was removed later the same day, the simple
+ * approval step stays). Agents, the dev-server and scripts may PREPARE a deploy; only a person at an interactive
+ * terminal publishes it.
  *
- *   typetorch approve [id]          pending proposals (newest first) -> details -> y/N -> passphrase -> sign -> publish
+ *   typetorch approve [id]          pending proposals (newest first) -> details -> y/N -> publish -> log
  *   typetorch reject <id>           drops a proposal
  *   typetorch proposals [--all]     lists them (non-interactive)
  *
  * How a deploy/rollback/promote ends (`releaseMode`):
- *   - ci: TYPETORCH_SIGNING_KEY + TYPETORCH_ALLOW_ENV_SIGNING_KEY=1 in the real environment (the CI escape hatch):
- *     signed and published without a person;
  *   - approval required by typetorch.json "approval" ("all" by default, or "prod" for prod-channel branches):
- *     - a person at a terminal (proposer "cli", no --propose): the proposal is written and the approve prompt follows
- *       at once (one command, still y + passphrase);
- *     - anyone else: the proposal is written and nothing is published;
- *   - approval not required: signed with the passphrase when a person and a key file are there, else unsigned (with a
- *     warning: kernel 0.3 refuses unsigned messages).
+ *     - a person at a terminal (proposer "cli", no --propose): the proposal is written and the y/N follows at once
+ *       (one command);
+ *     - anyone else (an agent, the dev-server, --propose): the proposal is written and nothing is published;
+ *   - approval not required ("none", or "prod" for a dev-channel branch): published at once.
  *
- * Limitation until kernel 0.3 verifies signatures: approval is enforced by the CLI only; anything holding the Open
- * Cloud deploy key could still publish a raw, unsigned message, and kernel 0.2 would accept it.
+ * Limitation: the approval is enforced by the CLI only. Deploy messages are not signed, so anything that holds the Open
+ * Cloud deploy key (or runs code on any server of the universe) can still publish a deploy message (audit S-C2).
  */
-import { existsSync } from "node:fs";
 import { flagBool, flagString, UsageError, type ParsedArgs } from "../args";
 import { approvalRequired, type ApprovalPolicy, type Project } from "../config";
 import type { LiveHead } from "../deployments";
 import { settings } from "../env";
 import { gitInfo } from "../git";
 import { interaction, NotInteractiveError, type Interaction } from "../interact";
-import { decryptKeyFile, readKeyFile, WrongPassphraseError } from "../keystore";
-import { bold, dim, emitJson, formatTimings, info, isJson, red, Stopwatch, table, warn, yellow } from "../log";
-import { formatSources, strictest, branchChannel, type Channel } from "../naming";
+import { bold, dim, emitJson, formatTimings, info, isJson, red, Stopwatch, table, yellow } from "../log";
+import { branchChannel, formatSources, strictest, type Channel } from "../naming";
+import { DEPLOY_TOPIC, type OpenCloud } from "../opencloud";
 import {
 	age,
 	appendProposal,
@@ -42,17 +39,12 @@ import {
 	type ProposalKind,
 	type ProposalState,
 } from "../proposals";
-import type { SigningKey } from "../signing";
-import { checkSigningKey, keyFilePath, openCloud, project, projectStateDir, readHistory, registryApi, warnRegistryFallback } from "./common";
-import { checkChannelGuard } from "./deploy";
-import { makeEntry, registryMessage, release, signEntry, type ReleaseResult } from "./release";
-import { DEPLOY_TOPIC } from "../opencloud";
-import type { History } from "./common";
-import type { OpenCloud } from "../opencloud";
 import type { RegistryApi } from "../registry";
+import { openCloud, project, projectStateDir, readHistory, registryApi, warnRegistryFallback, type History } from "./common";
+import { checkChannelGuard } from "./deploy";
+import { makeEntry, messageFor, registryMessage, release, type ReleaseResult } from "./release";
 
 export const PROPOSED_BY_VAR = "TYPETORCH_PROPOSED_BY";
-export const PASSPHRASE_TRIES = 3;
 
 export interface Proposer {
 	name: string;
@@ -71,92 +63,21 @@ export function resolveProposer(flag: string | undefined, interactive: boolean):
 	return { name: interactive ? "cli" : "agent", explicit: false };
 }
 
-export type ReleaseMode =
-	| { kind: "ci"; key: SigningKey }
-	| { kind: "approve-now" }
-	| { kind: "propose" }
-	| { kind: "sign-now" }
-	| { kind: "unsigned" };
+export type ReleaseMode = { kind: "approve-now" } | { kind: "propose" } | { kind: "publish" };
 
 /** How a release ends (see the module comment). */
-export function releaseMode(input: {
-	policy: ApprovalPolicy;
-	branchChannel: Channel;
-	proposer: Proposer;
-	interactive: boolean;
-	propose: boolean;
-	ciKey?: SigningKey;
-	keyFileExists: boolean;
-}): ReleaseMode {
-	const person = input.interactive && input.proposer.name === "cli";
-	if (input.ciKey && !input.propose && (!input.proposer.explicit || input.proposer.name === "ci" || input.proposer.name === "cli")) {
-		return { kind: "ci", key: input.ciKey };
-	}
-	if (approvalRequired(input.policy, input.branchChannel)) return person && !input.propose ? { kind: "approve-now" } : { kind: "propose" };
+export function releaseMode(input: { policy: ApprovalPolicy; branchChannel: Channel; proposer: Proposer; interactive: boolean; propose: boolean }): ReleaseMode {
 	if (input.propose) return { kind: "propose" };
-	return person && input.keyFileExists ? { kind: "sign-now" } : { kind: "unsigned" };
+	if (!approvalRequired(input.policy, input.branchChannel)) return { kind: "publish" };
+	const person = input.interactive && input.proposer.name === "cli";
+	return person ? { kind: "approve-now" } : { kind: "propose" };
 }
 
-/** The mode for a command, with the checks that must pass before anything is built or uploaded. */
+/** The mode for a command. */
 export function modeFor(proj: Project, args: ParsedArgs, branchChannel: Channel, io: Interaction = interaction()): { mode: ReleaseMode; proposer: Proposer } {
 	const proposer = resolveProposer(flagString(args, "proposed-by"), io.interactive);
-	const ciKey = settings().ciSigningKey();
-	const keyFileExists = existsSync(keyFilePath(proj, flagString(args, "key-file")));
-	const mode = releaseMode({
-		policy: proj.config.approval,
-		branchChannel,
-		proposer,
-		interactive: io.interactive,
-		propose: flagBool(args, "propose"),
-		ciKey,
-		keyFileExists,
-	});
-	if (mode.kind === "ci") {
-		checkSigningKey(proj, mode.key, "TYPETORCH_SIGNING_KEY from the environment (CI escape hatch)");
-		warn("signing with TYPETORCH_SIGNING_KEY from the environment (TYPETORCH_ALLOW_ENV_SIGNING_KEY=1): the CI escape hatch, no approval prompt");
-	}
-	if (mode.kind === "approve-now" && !keyFileExists) {
-		throw new UsageError(
-			`approving needs the signing key, and there is none at ${keyFilePath(proj, flagString(args, "key-file"))}: run \`typetorch keys init\` first (or pass --propose to approve later)`,
-		);
-	}
-	const plaintext = safePlaintextKey();
-	if (plaintext && mode.kind !== "ci") {
-		warn(`a plaintext TYPETORCH_SIGNING_KEY in ${plaintext.source} is ignored; \`typetorch keys init\` encrypts it into a key file`);
-	}
+	const mode = releaseMode({ policy: proj.config.approval, branchChannel, proposer, interactive: io.interactive, propose: flagBool(args, "propose") });
 	return { mode, proposer };
-}
-
-function safePlaintextKey() {
-	try {
-		return settings().plaintextSigningKey();
-	} catch {
-		return undefined;
-	}
-}
-
-let unsignedWarned = false;
-export function warnUnsigned() {
-	if (unsignedWarned) return;
-	unsignedWarned = true;
-	warn("this deploy message is unsigned: kernel 0.3 servers will refuse it (approval \"none\" without a key; `typetorch keys init`)");
-}
-
-/** Asks for the passphrase (no echo) and decrypts the key file; up to PASSPHRASE_TRIES tries. */
-export async function unlockSigningKey(proj: Project, io: Interaction, keyFile = keyFilePath(proj)): Promise<SigningKey> {
-	if (!io.interactive) throw new NotInteractiveError("signing needs the passphrase typed on an interactive terminal");
-	const file = readKeyFile(keyFile);
-	for (let attempt = 1; ; attempt++) {
-		const passphrase = await io.secret(`passphrase for ${keyFile}: `);
-		try {
-			const key = decryptKeyFile(file, passphrase);
-			checkSigningKey(proj, key, keyFile);
-			return key;
-		} catch (error) {
-			if (!(error instanceof WrongPassphraseError) || attempt >= PASSPHRASE_TRIES) throw error;
-			info(red("wrong passphrase, try again"));
-		}
-	}
 }
 
 /** The human description of a proposal (approve shows it before asking). */
@@ -185,13 +106,13 @@ export function describeProposal(state: ProposalState, head: LiveHead | undefine
 }
 
 /**
- * Approves one pending proposal: details -> y/N -> passphrase -> sign -> publish -> "approved" event. Returns undefined
- * when the person says no (the proposal stays pending).
+ * Approves one pending proposal: details -> y/N -> publish -> "approved" event. Returns undefined when the person says
+ * no (the proposal stays pending).
  */
 export async function approveProposal(
 	proj: Project,
 	state: ProposalState,
-	options: { io?: Interaction; noRegistry?: boolean; keyFile?: string; approver?: string; oc?: OpenCloud } = {},
+	options: { io?: Interaction; noRegistry?: boolean; approver?: string; oc?: OpenCloud } = {},
 ): Promise<ReleaseResult | undefined> {
 	const io = options.io ?? interaction();
 	if (!io.interactive) throw new NotInteractiveError("approving needs a person at an interactive terminal (stdin is not a TTY)");
@@ -214,7 +135,6 @@ export async function approveProposal(
 		info(`not published; proposal ${p.id} stays pending (typetorch approve ${p.id} / typetorch reject ${p.id})`);
 		return undefined;
 	}
-	const key = await unlockSigningKey(proj, io, options.keyFile ?? keyFilePath(proj));
 	const approver = options.approver ?? gitInfo(proj.root).userName;
 	let result: ReleaseResult;
 	try {
@@ -231,7 +151,6 @@ export async function approveProposal(
 			note: p.message,
 			assetName: p.artifact.assetName,
 			watch,
-			signingKey: key,
 			extra: {
 				...(p.artifact.sha256 ? { sha256: p.artifact.sha256 } : {}),
 				...(p.changes ? { changes: p.changes } : {}),
@@ -287,11 +206,11 @@ export function reportProposal(proposal: Proposal, extra: Record<string, unknown
 }
 
 export type ReleaseOutcome =
-	| { kind: "published"; result: ReleaseResult; signed: boolean }
+	| { kind: "published"; result: ReleaseResult }
 	| { kind: "proposed"; proposal: Proposal }
 	| { kind: "declined"; proposal: Proposal };
 
-/** Ends a deploy, rollback or promote according to its mode: publish (signed or not), propose, or propose + approve. */
+/** Ends a deploy, rollback or promote according to its mode: publish, propose, or propose + approve here. */
 export async function finishRelease(input: {
 	proj: Project;
 	mode: ReleaseMode;
@@ -303,7 +222,6 @@ export async function finishRelease(input: {
 	history: History;
 	watch: Stopwatch;
 	noRegistry?: boolean;
-	keyFile?: string;
 	assetName?: string;
 	extra?: Record<string, unknown>;
 	io?: Interaction;
@@ -314,14 +232,10 @@ export async function finishRelease(input: {
 		const proposal = propose(proj, request, input.proposer);
 		if (mode.kind === "propose") return { kind: "proposed", proposal };
 		info(`proposal ${proposal.id} written; approve it now (or later: typetorch approve ${proposal.id})`);
-		const result = await approveProposal(proj, { proposal, status: "pending" }, { io, noRegistry: input.noRegistry, keyFile: input.keyFile, oc: input.oc });
-		return result ? { kind: "published", result, signed: true } : { kind: "declined", proposal };
+		const result = await approveProposal(proj, { proposal, status: "pending" }, { io, noRegistry: input.noRegistry, oc: input.oc });
+		return result ? { kind: "published", result } : { kind: "declined", proposal };
 	}
 	if (!input.oc) settings().requireApiKey("deploy"); // throws the "no key" message
-	let key: SigningKey | undefined;
-	if (mode.kind === "ci") key = mode.key;
-	else if (mode.kind === "sign-now") key = await unlockSigningKey(proj, io, input.keyFile ?? keyFilePath(proj));
-	else warnUnsigned();
 	const result = await release({
 		proj,
 		oc: input.oc!,
@@ -335,10 +249,9 @@ export async function finishRelease(input: {
 		note: request.message,
 		assetName: input.assetName,
 		watch: input.watch,
-		signingKey: key,
 		extra: { ...(request.changes ? { changes: request.changes } : {}), proposedBy: input.proposer.name, ...input.extra },
 	});
-	return { kind: "published", result, signed: key !== undefined };
+	return { kind: "published", result };
 }
 
 /**
@@ -366,14 +279,9 @@ export async function releaseExisting(input: {
 	const note = flagString(args, "message");
 	const head = history.heads.get(branch);
 	if (input.dryRun) {
-		let ending: string;
-		try {
-			ending = modeFor(proj, args, input.branchChannel).mode.kind;
-		} catch (error) {
-			ending = `refused: ${(error as Error).message}`;
-		}
+		const ending = modeFor(proj, args, input.branchChannel).mode.kind;
 		const entry = makeEntry({ action: kind, branch, artifact: input.artifact, by: input.by }, history.snapshot?.value, history.local);
-		const data = signEntry(entry, ending === "ci" ? settings().ciSigningKey() : undefined);
+		const data = messageFor(entry);
 		const plan = {
 			dryRun: true,
 			branch,
@@ -384,13 +292,13 @@ export async function releaseExisting(input: {
 			registry: history.snapshot
 				? { readable: true, message: registryMessage(kind, branch, input.artifact.artifactId, note) }
 				: { readable: false, reason: history.unavailable },
-			message: { topic: DEPLOY_TOPIC, data, signed: data.sig !== undefined },
+			message: { topic: DEPLOY_TOPIC, data },
 		};
 		if (isJson()) return emitJson(plan);
 		info(bold(`dry run: would ${kind === "rollback" ? "roll back" : "promote"} ${input.summary} as #${entry.seq}`));
 		info(`  approval  policy "${proj.config.approval}": ${ending}`);
 		info(`  registry  ${history.snapshot ? `would publish "${plan.registry.message}"` : `not used (${history.unavailable})`}`);
-		info(`  message   ${DEPLOY_TOPIC} ${JSON.stringify({ ...data, sig: data.sig ? "<signature>" : undefined })}`);
+		info(`  message   ${DEPLOY_TOPIC} ${JSON.stringify(data)}`);
 		return;
 	}
 	const { mode, proposer } = modeFor(proj, args, input.branchChannel);
@@ -405,7 +313,6 @@ export async function releaseExisting(input: {
 		history,
 		watch: input.watch,
 		noRegistry: flagBool(args, "no-registry"),
-		keyFile: keyFilePath(proj, flagString(args, "key-file")),
 		assetName: input.artifact.assetName,
 		extra: input.artifact.sha256 ? { sha256: input.artifact.sha256 } : undefined,
 	});
@@ -417,13 +324,13 @@ export async function releaseExisting(input: {
 	const { result } = outcome;
 	const timings = input.watch.total();
 	if (isJson()) return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, timings });
-	info(bold(`${kind === "rollback" ? "rolled back" : "promoted"} #${result.entry.seq} ${input.summary}${outcome.signed ? "" : " (UNSIGNED)"} in ${timings.total.toFixed(2)} s`));
+	info(bold(`${kind === "rollback" ? "rolled back" : "promoted"} #${result.entry.seq} ${input.summary} in ${timings.total.toFixed(2)} s`));
 	info(dim(`  ${formatTimings(timings)}`));
 }
 
 // Commands ---------------------------------------------------------------------------------------------------------
 
-export const approveFlags = { "no-registry": "boolean", "key-file": "string" } as const;
+export const approveFlags = { "no-registry": "boolean" } as const;
 
 export async function approveCommand(args: ParsedArgs) {
 	const io = interaction();
@@ -455,10 +362,10 @@ export async function approveCommand(args: ParsedArgs) {
 			if (!state) throw new UsageError(`no pending proposal "${answer}"`);
 		}
 	}
-	const result = await approveProposal(proj, state, { io, noRegistry: flagBool(args, "no-registry"), keyFile: keyFilePath(proj, flagString(args, "key-file")) });
+	const result = await approveProposal(proj, state, { io, noRegistry: flagBool(args, "no-registry") });
 	if (!result) return;
 	if (isJson()) return emitJson({ proposal: state.proposal.id, deployment: result.entry, message: result.message, registry: result.registry });
-	info(bold(`approved ${state.proposal.id}: #${result.entry.seq} ${state.proposal.branch} -> ${result.entry.artifactId} (asset ${result.entry.assetId}, signed)`));
+	info(bold(`approved ${state.proposal.id}: #${result.entry.seq} ${state.proposal.branch} -> ${result.entry.artifactId} (asset ${result.entry.assetId})`));
 	if (result.entry.timings) info(dim(`  ${formatTimings(result.entry.timings)}`));
 }
 
@@ -511,4 +418,3 @@ export async function proposalsCommand(args: ParsedArgs) {
 	info(proposalTable(states));
 	if (states.some((s) => s.status === "pending")) info(dim("approve with: typetorch approve <id>   reject with: typetorch reject <id>"));
 }
-

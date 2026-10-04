@@ -12,7 +12,6 @@ import { doctorCommand, doctorFlags } from "./commands/doctor";
 import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history";
 import { approveCommand, approveFlags, proposalsCommand, proposalsFlags, rejectCommand, rejectFlags } from "./commands/approve";
 import { kernelCommand, kernelFlags } from "./commands/kernel";
-import { keysCommand, keysFlags } from "./commands/keys";
 import { promoteCommand, promoteFlags } from "./commands/promote";
 import { rollbackCommand, rollbackFlags } from "./commands/rollback";
 import { redact, Settings, useSettings } from "./env";
@@ -54,16 +53,15 @@ const COMMANDS: Record<string, Command> = {
 		run: deployCommand,
 		summary: "build, upload, wait for Approved, then approve (or propose) and tell live servers",
 		usage: `typetorch deploy [--branch <b>] [--channel prod|dev] [--no-build] [--dry-run] [--message <text>] [--force]
-                 [--no-registry] [--moderation-timeout <s>] [--propose] [--proposed-by <who>] [--key-file <path>]
+                 [--no-registry] [--moderation-timeout <s>] [--propose] [--proposed-by <who>]
 
   clean build -> upload (new Model asset) -> moderation = Approved -> "uploaded" record -> approval -> registry ->
-  signed deploy message -> deployments.jsonl (in the state dir: TYPETORCH_STATE_DIR, default .typetorch/)
+  deploy message -> deployments.jsonl (in the state dir: TYPETORCH_STATE_DIR, default .typetorch/)
   Approval (typetorch.json "approval": "all" by default, "prod", or "none"): a person at a terminal approves right
-  after the upload (y + the key's passphrase). Anyone else (an agent, the dev-server, --propose) only writes a proposal:
+  after the upload (y/N). Anyone else (an agent, the dev-server, --propose) only writes a proposal:
   approve it with \`typetorch approve <id>\`.
   --propose            write a proposal even when you could approve now
   --proposed-by <who>  who prepares it: cli, agent, dev-server/claude... (default: cli at a terminal, else agent)
-  --key-file <path>    the encrypted signing key (default ~/.config/typetorch/keys/<universeId>.key)
   --dry-run      build and show what would be uploaded and sent; nothing leaves the machine except registry reads
   --no-build     deploy the last build (.typetorch/payload.rbxm)
   --force        allow a dev-channel or dirty artifact on a prod-channel branch, or publish a config draft that has
@@ -80,11 +78,10 @@ const COMMANDS: Record<string, Command> = {
   deployments (any branch) or in uploads.jsonl (an upload whose deploy stopped, or \`typetorch upload\`). A
   dev-channel or dirty artifact needs --force on a prod-channel branch.
   Approval (typetorch.json "approval": "all" by default, "prod", or "none"): a person at a terminal approves right
-  after the upload (y + the key's passphrase). Anyone else (an agent, the dev-server, --propose) only writes a proposal:
+  after the upload (y/N). Anyone else (an agent, the dev-server, --propose) only writes a proposal:
   approve it with \`typetorch approve <id>\`.
   --propose            write a proposal even when you could approve now
-  --proposed-by <who>  who prepares it: cli, agent, dev-server/claude... (default: cli at a terminal, else agent)
-  --key-file <path>    the encrypted signing key (default ~/.config/typetorch/keys/<universeId>.key)`,
+  --proposed-by <who>  who prepares it: cli, agent, dev-server/claude... (default: cli at a terminal, else agent)`,
 	},
 	rollback: {
 		flags: rollbackFlags,
@@ -95,11 +92,10 @@ const COMMANDS: Record<string, Command> = {
   No build, upload or moderation wait. Without --to: the newest earlier deployment on the branch whose artifact
   differs from the live one. Searches the registry (when readable) and the local log.
   Approval (typetorch.json "approval": "all" by default, "prod", or "none"): a person at a terminal approves right
-  after the upload (y + the key's passphrase). Anyone else (an agent, the dev-server, --propose) only writes a proposal:
+  after the upload (y/N). Anyone else (an agent, the dev-server, --propose) only writes a proposal:
   approve it with \`typetorch approve <id>\`.
   --propose            write a proposal even when you could approve now
-  --proposed-by <who>  who prepares it: cli, agent, dev-server/claude... (default: cli at a terminal, else agent)
-  --key-file <path>    the encrypted signing key (default ~/.config/typetorch/keys/<universeId>.key)`,
+  --proposed-by <who>  who prepares it: cli, agent, dev-server/claude... (default: cli at a terminal, else agent)`,
 	},
 	deployments: {
 		flags: deploymentsFlags,
@@ -130,33 +126,20 @@ const COMMANDS: Record<string, Command> = {
 
   1. lune run scripts/check.luau in the kernel dir  2. version (package.json = Constants.luau) + content hash, printed;
   a git checkout must be clean and tagged v<version>  3. rojo build <kernel>/place.project.json -> .typetorch/place.rbxl
-  with KernelVersion/KernelHash/KernelCommit/SigningPublicKey on ServerScriptService.TypeTorchKernel.
+  with KernelVersion/KernelHash/KernelCommit on ServerScriptService.TypeTorchKernel.
   Publishing only patches the kernel slots once plans/13 lands (needs spike S12). Until then --replace-place --yes
   publishes the whole kernel place, which WIPES Studio/Team Create content; the place version before and after go to
   kernel-deploys.jsonl in the state dir. Kernel dir: --kernel, else typetorch.json "kernel", else
   node_modules/@typetorch/kernel, else ../kernel.`,
 	},
-	keys: {
-		flags: keysFlags,
-		run: keysCommand,
-		summary: "keys init|status: the passphrase-encrypted Ed25519 key that signs approved deploys",
-		usage: `typetorch keys init [--key-file <path>] [--force]
-typetorch keys status [--key-file <path>]
-
-  init (interactive): creates the key (or encrypts a plaintext TYPETORCH_SIGNING_KEY from CLI 0.2.0), asks for a
-  passphrase twice, writes the encrypted key file (scrypt + AES-256-GCM; default
-  ~/.config/typetorch/keys/<universeId>.key, never inside the repo) and the public key to typetorch.json
-  "signingPublicKey". status: the key file, its public key and whether it matches typetorch.json.`,
-	},
 	approve: {
 		flags: approveFlags,
 		run: approveCommand,
-		summary: "approve a deploy proposal: details, y/N, passphrase, sign, publish (interactive only)",
-		usage: `typetorch approve [id] [--no-registry] [--key-file <path>]
+		summary: "approve a deploy proposal: details, y/N, publish (interactive only)",
+		usage: `typetorch approve [id] [--no-registry]
 
   Lists pending proposals (newest first), shows the one you pick (branch, artifact, notes, sources, size, proposer,
-  age), asks y/N and the signing key's passphrase (not echoed), then signs and publishes it like a deploy. Refuses
-  when stdin isn't an interactive terminal.`,
+  age), asks y/N, then publishes it like a deploy. Refuses when stdin isn't an interactive terminal.`,
 	},
 	reject: {
 		flags: rejectFlags,
@@ -192,7 +175,7 @@ function help(): string {
 		"global options: --json (machine output), --verbose, --config <typetorch.json>, --env-file <path>, --help",
 		"keys (environment, the TYPETORCH_ENV_FILE file, or .env here or above; never copied to child processes):",
 		"  OPENCLOUD_ASSETS_KEY, OPENCLOUD_DEPLOY_KEY, OPENCLOUD_PLACE_KEY per job, else TYPETORCH_API_KEY / OPENCLOUD_API_KEY",
-		"deploys are approved and signed by a person: typetorch approve (key from typetorch keys init)",
+		"deploys are approved by a person at a terminal: typetorch approve",
 	].join("\n");
 }
 

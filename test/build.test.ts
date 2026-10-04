@@ -23,7 +23,6 @@ import { Settings, useSettings } from "../src/env";
 import { Stopwatch } from "../src/log";
 import type { OpenCloud } from "../src/opencloud";
 import { readRegistry, type RegistryApi } from "../src/registry";
-import { generateSigningKey, parseSigningKey, verifyFields } from "../src/signing";
 import { withStateLock } from "../src/state";
 
 afterEach(() => useSettings(undefined));
@@ -184,17 +183,14 @@ describe("release: one seq source, signed messages, registry aborts", () => {
 		expect(seqs).toEqual([1, 2, 3]);
 	});
 
-	test("messages are signed; the signature verifies with the public key and the head carries it", async () => {
+	test("messages are unsigned {b,a,i,s,c,ch,t,r}; the entry keeps t and r", async () => {
 		const { proj, oc, published } = setup();
-		const { seed, publicKey } = generateSigningKey();
-		const result = await release({ proj, oc, history: withLocal(proj, undefined), action: "rollback", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch(), signingKey: parseSigningKey(seed) });
+		const result = await release({ proj, oc, history: withLocal(proj, undefined), action: "rollback", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch() });
 		const message = JSON.parse(published[0]);
+		expect(Object.keys(message)).toEqual(["b", "a", "i", "s", "c", "ch", "t", "r"]);
 		expect(message.r).toBe(1);
-		expect(typeof message.sig).toBe("string");
-		const { sig, ...fields } = message;
-		expect(verifyFields(publicKey, fields, sig)).toBe(true);
-		expect(verifyFields(publicKey, { ...fields, a: 6 }, sig)).toBe(false);
-		expect(result.entry).toMatchObject({ t: message.t, r: 1, sig });
+		expect(result.entry).toMatchObject({ t: message.t, r: 1 });
+		expect(result.entry).not.toHaveProperty("sig");
 	});
 
 	function fakeRegistry(patch: () => Promise<string>): RegistryApi {
@@ -219,7 +215,7 @@ describe("release: one seq source, signed messages, registry aborts", () => {
 		expect(readLocalLog(join(proj.root, ".typetorch"))).toEqual([]);
 	});
 
-	test("the registry head carries the signed fields", async () => {
+	test("the registry head carries the message's t and the sources", async () => {
 		const { proj, oc, published } = setup();
 		let written: any;
 		const api = fakeRegistry(async () => "hash");
@@ -227,13 +223,13 @@ describe("release: one seq source, signed messages, registry aborts", () => {
 			written = entries.TypeTorch;
 			return "hash";
 		};
-		const key = parseSigningKey(generateSigningKey().seed);
 		const snapshot = await readRegistry(api);
-		const result = await release({ proj, oc, api, history: withLocal(proj, snapshot), action: "deploy", branch: "dev", artifact: { ...artifact, sources: { template: "12b63b9" } }, by: "me", force: false, watch: new Stopwatch(), signingKey: key });
+		const result = await release({ proj, oc, api, history: withLocal(proj, snapshot), action: "deploy", branch: "dev", artifact: { ...artifact, sources: { template: "12b63b9" } }, by: "me", force: false, watch: new Stopwatch() });
 		const message = JSON.parse(published[0]);
 		expect(result.registry).toBe("published");
-		expect(written.branches.dev).toMatchObject({ seq: 1, t: message.t, sig: message.sig, sources: { template: "12b63b9" } });
-		expect(written.deployments[0].sig).toBeUndefined(); // only the head keeps the signature
+		expect(written.branches.dev).toMatchObject({ seq: 1, t: message.t, sources: { template: "12b63b9" } });
+		expect(written.branches.dev).not.toHaveProperty("sig");
+		expect(written.deployments[0].t).toBeUndefined(); // only the head keeps the message fields
 	});
 
 	test("a publish failure after the registry write keeps the seq used (registry-only line)", async () => {

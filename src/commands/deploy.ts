@@ -1,24 +1,23 @@
 /**
  * `typetorch deploy`: clean build (with the Notes attribute) -> upload (new Model asset) -> moderation = Approved ->
  * "uploaded" record -> then, by the approval policy (approve.ts): a proposal for `typetorch approve` (agents, the
- * dev-server), the approve prompt right here (a person at a terminal), or registry -> signed message -> "published"
+ * dev-server), the y/N right here (a person at a terminal), or registry -> deploy message -> "published"
  * record. The registry is read in parallel with the build so a conflict (or a missing scope) is known before anything
  * is uploaded.
  */
 import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args";
-import { assertNoIdCollision, buildPayload, GENERATED_PATHS, payloadBytes, readBuiltPayload, resolveTarget, type PayloadMeta } from "../build";
+import { assertNoIdCollision, buildPayload, payloadBytes, readBuiltPayload, type PayloadMeta } from "../build";
 import { appendUpload } from "../deployments";
-import { settings } from "../env";
 import { gitInfo } from "../git";
 import { bold, dim, emitJson, formatBytes, formatSeconds, formatTimings, info, isJson, Stopwatch, warn } from "../log";
 import { branchChannel, branchNameError, formatSources, strictest, type Channel } from "../naming";
 import { DEPLOY_TOPIC } from "../opencloud";
 import { assertNoForeignDraft, tryReadRegistry, type RegistrySnapshot } from "../registry";
 import { assetNaming, fixCensoredName, uploadPayload } from "../upload";
-import { finishRelease, modeFor, reportProposal, resolveProposer } from "./approve";
+import { finishRelease, modeFor, reportProposal } from "./approve";
 import { describeBuild } from "./build";
-import { channelFlag, keyFilePath, openCloud, project, projectStateDir, registryApi, warnRegistryFallback, withLocal } from "./common";
-import { makeEntry, registryMessage, signEntry } from "./release";
+import { channelFlag, openCloud, project, projectStateDir, registryApi, warnRegistryFallback, withLocal } from "./common";
+import { makeEntry, messageFor, registryMessage } from "./release";
 
 export const deployFlags = {
 	branch: "string",
@@ -31,7 +30,6 @@ export const deployFlags = {
 	"moderation-timeout": "string",
 	propose: "boolean",
 	"proposed-by": "string",
-	"key-file": "string",
 } as const;
 
 export class ChannelGuardError extends Error {
@@ -71,11 +69,7 @@ export async function deployCommand(args: ParsedArgs) {
 	if (branchFlag && branchNameError(branchFlag)) throw new UsageError(branchNameError(branchFlag)!);
 	const noBuild = flagBool(args, "no-build");
 
-	// How this deploy ends (publish, propose, or propose + approve here), checked before anything is built: a person
-	// approving needs a key file. Re-checked after the registry read, which may make the branch prod-channel.
 	const builtBefore = noBuild ? readBuiltPayload(proj.root) : undefined;
-	const plannedBranch = branchFlag ?? builtBefore?.meta.branch ?? resolveTarget(proj, gitInfo(proj.root, GENERATED_PATHS), {}).branch;
-	if (!dryRun) modeFor(proj, args, branchChannel(proj.config, plannedBranch));
 
 	// One client per job (each with its own key when configured): uploads, and messaging + registry.
 	const assets = openCloud("assets", dryRun);
@@ -147,15 +141,9 @@ export async function deployCommand(args: ParsedArgs) {
 	};
 
 	if (dryRun) {
-		let ending: string;
-		try {
-			ending = modeFor(proj, args, targetChannel).mode.kind;
-		} catch (error) {
-			ending = `refused: ${(error as Error).message}`;
-		}
+		const ending = modeFor(proj, args, targetChannel).mode.kind;
 		const entry = makeEntry({ action: "deploy", branch, artifact: { ...artifact, assetId: 0 }, by }, snapshot?.value, history.local);
-		const ci = ending === "ci" ? settings().ciSigningKey() : undefined;
-		const data = signEntry(entry, ci);
+		const data = messageFor(entry);
 		const plan = {
 			dryRun: true,
 			artifactId: meta.artifactId,
@@ -172,7 +160,7 @@ export async function deployCommand(args: ParsedArgs) {
 				: { readable: false, reason: read.unavailable },
 			seq: entry.seq,
 			from: entry.fromArtifactId ? { artifactId: entry.fromArtifactId, assetId: entry.fromAssetId } : undefined,
-			message: { topic: DEPLOY_TOPIC, data, signed: data.sig !== undefined },
+			message: { topic: DEPLOY_TOPIC, data },
 			stateDir: history.stateDir,
 			timings: watch.total(),
 		};
@@ -188,20 +176,13 @@ export async function deployCommand(args: ParsedArgs) {
 			`  registry     ${snapshot ? `readable (config v${snapshot.configVersion ?? "?"}${snapshot.exists ? "" : ", no TypeTorch key yet"}); would publish "${plan.registry.message}"` : `not used (${read.unavailable})`}`,
 		);
 		if (entry.fromArtifactId) info(`  replaces     ${entry.fromArtifactId} (asset ${entry.fromAssetId})`);
-		info(`  message      ${DEPLOY_TOPIC} ${JSON.stringify({ ...data, a: "<assetId>", sig: data.sig ? "<signature>" : undefined })}`);
+		info(`  message      ${DEPLOY_TOPIC} ${JSON.stringify({ ...data, a: "<assetId>" })}`);
 		info(dim(`  ${formatTimings(watch.total())}`));
 		return;
 	}
 
-	// The final mode, with the registry's channel for the branch; a person without a key file can still propose.
-	let decided: ReturnType<typeof modeFor>;
-	try {
-		decided = modeFor(proj, args, targetChannel);
-	} catch (error) {
-		if (!(error instanceof UsageError)) throw error;
-		warn(`${error.message}; proposing instead`);
-		decided = { mode: { kind: "propose" }, proposer: resolveProposer(flagString(args, "proposed-by"), false) };
-	}
+	// The final mode, with the registry's channel for the branch.
+	const decided = modeFor(proj, args, targetChannel);
 
 	const stateDir = projectStateDir(proj);
 	const upload = await uploadPayload(assets!, proj.config, meta, bytes, branch, {
@@ -256,7 +237,6 @@ export async function deployCommand(args: ParsedArgs) {
 		history,
 		watch,
 		noRegistry,
-		keyFile: keyFilePath(proj, flagString(args, "key-file")),
 		assetName: displayName,
 		extra: { sha256: meta.sha256 },
 	});
@@ -271,7 +251,7 @@ export async function deployCommand(args: ParsedArgs) {
 		return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, assetName: name.name, timings });
 	}
 	info(
-		bold(`deployed #${result.entry.seq} ${branch}@${meta.commit || "uncommitted"}${meta.dirty ? "*" : ""} -> ${meta.artifactId} (asset ${upload.assetId}${result.message.sig ? ", signed" : ", UNSIGNED"}) in ${formatSeconds(timings.total)}`),
+		bold(`deployed #${result.entry.seq} ${branch}@${meta.commit || "uncommitted"}${meta.dirty ? "*" : ""} -> ${meta.artifactId} (asset ${upload.assetId}) in ${formatSeconds(timings.total)}`),
 	);
 	info(dim(`  ${formatTimings(timings)}`));
 }

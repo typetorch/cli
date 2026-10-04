@@ -25,8 +25,7 @@ export const MAX_VALUE_CHARS = 9_500;
 
 /**
  * A branch's live head. Heads are ordered by (seq, time): the higher seq wins, and on equal seq the later deployedAt
- * (`t` when present). `t`, `r` and `sig` are the signed deploy message's fields (plans/03), so a kernel can verify the
- * head exactly like the message it came from.
+ * (`t` when present). `t` and `r` are the deploy message's fields.
  */
 export interface BranchHead {
 	artifactId: string;
@@ -41,8 +40,6 @@ export interface BranchHead {
 	t?: number;
 	/** 1 when the message was a rollback. */
 	r?: 1;
-	/** base64 Ed25519 signature of the message (absent when the deploy was unsigned). */
-	sig?: string;
 	/** Commits of the game and the @typetorch packages in the payload. */
 	sources?: BuildSources;
 }
@@ -63,10 +60,9 @@ export interface RegistryDeployment {
 	fromAssetId?: number;
 	fromArtifactId?: string;
 	sources?: BuildSources;
-	/** The deploy message's `t`, `r` and `sig` (kept on the branch head; not in the registry's deployments list). */
+	/** The deploy message's `t` and `r` (kept on the branch head; not in the registry's deployments list). */
 	t?: number;
 	r?: 1;
-	sig?: string;
 }
 
 export interface RegistryValue {
@@ -131,7 +127,6 @@ export function headFromDeployment(entry: RegistryDeployment): BranchHead {
 	};
 	if (entry.t !== undefined) head.t = entry.t;
 	if (entry.r === 1) head.r = 1;
-	if (entry.sig) head.sig = entry.sig;
 	if (entry.sources) head.sources = entry.sources;
 	return head;
 }
@@ -140,7 +135,7 @@ export function headFromDeployment(entry: RegistryDeployment): BranchHead {
 export function recordDeployment(value: RegistryValue, entry: RegistryDeployment): RegistryValue {
 	const next: RegistryValue = structuredClone(value);
 	next.branches[entry.branch] = headFromDeployment(entry);
-	const { sig: _sig, t: _t, r: _r, ...listed } = entry; // the head carries the signed fields; keep the list small
+	const { t: _t, r: _r, ...listed } = entry; // the head carries the message fields; keep the list small
 	next.deployments.push(listed);
 	return trimRegistry(next).value;
 }

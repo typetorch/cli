@@ -8,7 +8,6 @@ import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSyn
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { readRbxm } from "../src/rbxm";
-import { generateSigningKey, parseSigningKey, verifyFields } from "../src/signing";
 
 const cli = resolve(import.meta.dir, "..", "src", "index.ts");
 const fixture = resolve(import.meta.dir, "..", "test-fixture");
@@ -24,7 +23,7 @@ symlinkSync(join(fixture, "node_modules"), join(dir, "node_modules"), "junction"
 writeFileSync(join(dir, "typetorch.json"), readFileSync(join(fixture, "typetorch.example.json")));
 writeFileSync(join(dir, ".gitignore"), "node_modules/\nout/\ninclude/\n.typetorch/\nsrc/shared/build.ts\nsrc/local-secret.ts\n.env\n");
 
-// The CLI runs without any key or signing key from this process's environment.
+// The CLI runs without any key from this process's environment.
 const cleanEnv: Record<string, string> = {};
 for (const [key, value] of Object.entries(process.env)) {
 	if (value !== undefined && !/(_KEY|TOKEN|SECRET|^TYPETORCH_)/i.test(key)) cleanEnv[key] = value;
@@ -107,7 +106,7 @@ check(
 		r.json?.message?.data?.b === "feature-thing" &&
 		r.json?.message?.data?.i === dirtyId &&
 		r.json?.seq === 1 &&
-		r.json?.message?.signed === false &&
+		Object.keys(r.json?.message?.data ?? {}).join() === "b,a,i,s,c,ch,t" &&
 		r.json?.asset?.description === `artifact=${dirtyId}\ncommit=${c2}`,
 	r.stderr || r.json,
 );
@@ -179,7 +178,7 @@ check("an unpublished upload is listed with its promote command", r.code === 0 &
 r = tt(["promote", "feature-thing", "123456789012", "--dry-run", "--no-registry", "--json"]);
 check("promote an upload by asset id", r.code === 0 && r.json?.to?.artifactId === `${c2}-abcdef` && r.json?.message?.data?.a === 123456789012, r.stderr || r.json);
 
-// 8. Approval: proposals without a terminal, approve refuses, reject; keys init needs a terminal; CI escape hatch
+// 8. Approval: proposals without a terminal, approve refuses, reject; signing is gone
 r = tt(["rollback", "--no-registry", "--proposed-by", "dev-server/claude", "--json"]);
 const proposalId: string = r.json?.proposal?.id ?? "";
 check(
@@ -194,20 +193,14 @@ check("approve refuses without an interactive terminal", r.code !== 0 && /intera
 r = tt(["reject", proposalId, "--reason", "e2e"]);
 r = tt(["proposals", "--all", "--json"]);
 check("reject", r.json?.proposals?.find((p: any) => p.proposal.id === proposalId)?.status === "rejected", r.json);
-r = tt(["keys", "init", "--key-file", join(mkdtempSync(join(tmpdir(), "tt-e2e-keys-")), "1.key")]);
-check("keys init refuses without a terminal", r.code !== 0 && /interactive terminal/.test(r.stderr), r.stderr);
-r = tt(["keys", "status", "--json"]);
-check("keys status", r.code === 0 && r.json?.exists === false && r.json?.approval === "all", r.stderr || r.json);
-const ci = generateSigningKey();
-writeFileSync(join(dir, ".env"), `TYPETORCH_SIGNING_KEY=${ci.seed}\nTYPETORCH_ALLOW_ENV_SIGNING_KEY=1\n`);
+r = tt(["keys", "status"]);
+check("the keys command is gone", r.code === 2 && /unknown command "keys"/.test(r.stderr), r.stderr);
+r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json", "--propose"]);
+check("--propose: the dry run says it would only propose", r.code === 0 && r.json?.approval?.ending === "propose", r.stderr || r.json);
+writeFileSync(join(dir, "typetorch.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(dir, "typetorch.json"), "utf8")), approval: "none", signingPublicKey: "old" }, null, "\t"));
 r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json"]);
-check("a plaintext key in .env is ignored (it only proposes, with a warning)", r.json?.approval?.ending === "propose" && r.json?.message?.signed === false && /plaintext TYPETORCH_SIGNING_KEY/.test(r.stderr), r.stderr || r.json);
-rmSync(join(dir, ".env"));
-r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json"], { TYPETORCH_SIGNING_KEY: ci.seed, TYPETORCH_ALLOW_ENV_SIGNING_KEY: "1" });
-const { sig, ...fields } = r.json?.message?.data ?? {};
-check("CI escape hatch (both in the environment): signed, verifies", r.code === 0 && r.json?.approval?.ending === "ci" && verifyFields(parseSigningKey(ci.seed).publicKey, fields, sig), r.stderr || r.json);
-r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json", "--proposed-by", "dev-server/claude"], { TYPETORCH_SIGNING_KEY: ci.seed, TYPETORCH_ALLOW_ENV_SIGNING_KEY: "1" });
-check("...but never for the dev-server", r.json?.approval?.ending === "propose" && r.json?.message?.signed === false, r.json?.approval);
+check("approval none: publishes at once; an old signingPublicKey is ignored silently", r.code === 0 && r.json?.approval?.ending === "publish" && !/signingPublicKey|unknown key/.test(r.stderr), r.stderr || r.json);
+sh(["git", "checkout", "--", "typetorch.json"]);
 
 // 9. Clean builds: ignored source files and non-ModuleScripts are refused
 sh(["git", "checkout", "--", "."]);

@@ -1,6 +1,6 @@
 /**
  * Child processes. Output is captured and shown only on failure (or with --verbose), to keep the CLI concise.
- * Every child gets an explicit minimal environment (env.ts `childEnv`): no API keys, no signing key, nothing loaded
+ * Every child gets an explicit minimal environment (env.ts `childEnv`): no API keys, nothing loaded
  * from a .env file. `extra` adds the few variables a step needs (never a secret).
  */
 import { childEnv } from "./env";

@@ -6,7 +6,6 @@
 import { debug } from "./log";
 import { redact } from "./env";
 import type { Channel } from "./naming";
-import { signFields, type SigningKey } from "./signing";
 
 export const API = "https://apis.roblox.com";
 
@@ -196,9 +195,8 @@ export const MESSAGE_LIMIT = 1024;
 /**
  * The deploy message the kernel reads (Kernel.server.luau onDeployMessage). At most 1 KiB. Servers on branch `b` swap
  * to it and persist it as their branch head (in-game DataStore `head/<branch>`, higher seq wins), so it carries
- * everything a head needs even when the configs registry isn't writable. `sig` (decision D1) is an Ed25519 signature
- * over the other fields (signing.ts `canonicalString`; format in plans/03). Kernel 0.2 ignores it; kernel 0.3 requires
- * it.
+ * everything a head needs even when the configs registry isn't writable. Unsigned: signing was removed (user decision,
+ * 2026-10-04); a person approves each deploy in the CLI instead (`typetorch approve`).
  */
 export interface DeployMessage {
 	/** Branch: only servers on this branch swap. */
@@ -217,15 +215,10 @@ export interface DeployMessage {
 	t: number;
 	/** 1 for rollbacks. */
 	r?: 1;
-	/** base64 Ed25519 signature of the canonical string of the fields above. */
-	sig?: string;
 }
 
-/** Builds a deploy message, signed when a key is given. */
-export function deployMessage(
-	input: Omit<DeployMessage, "t" | "r" | "sig"> & { rollback?: boolean; t?: number },
-	key?: SigningKey,
-): DeployMessage {
+/** Builds a deploy message. */
+export function deployMessage(input: Omit<DeployMessage, "t" | "r"> & { rollback?: boolean; t?: number }): DeployMessage {
 	const message: DeployMessage = {
 		b: input.b,
 		a: input.a,
@@ -236,7 +229,6 @@ export function deployMessage(
 		t: input.t ?? Date.now(),
 	};
 	if (input.rollback) message.r = 1;
-	if (key) message.sig = signFields(key, message);
 	return message;
 }
 

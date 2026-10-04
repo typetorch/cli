@@ -21,7 +21,6 @@
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { parseSigningKey, SIGNING_KEY_VAR, type SigningKey } from "./signing";
 
 /** The shared key variables, in priority order (used by every job without its own key). */
 export const API_KEY_VARS = ["TYPETORCH_API_KEY", "OPENCLOUD_API_KEY", "ROBLOX_API_KEY"] as const;
@@ -45,9 +44,7 @@ export const ENV_FILE_VAR = "TYPETORCH_ENV_FILE";
 export const CHILD_ENV_VAR = "TYPETORCH_CHILD_ENV";
 
 /** Variables holding secrets: never passed to a child, always redacted. */
-export const SECRET_VARS: readonly string[] = [...API_KEY_VARS, ...Object.values(JOB_KEY_VARS), SIGNING_KEY_VAR];
-/** CI opt-in for signing with TYPETORCH_SIGNING_KEY from the environment (see `Settings.ciSigningKey`). */
-export const ALLOW_ENV_SIGNING_VAR = "TYPETORCH_ALLOW_ENV_SIGNING_KEY";
+export const SECRET_VARS: readonly string[] = [...API_KEY_VARS, ...Object.values(JOB_KEY_VARS)];
 
 export function parseDotEnv(text: string): Record<string, string> {
 	const values: Record<string, string> = {};
@@ -196,29 +193,6 @@ export class Settings {
 			? `${this.envFile}${this.envFileMissing ? " (missing)" : ""}, the environment, or a .env file here or in a parent folder`
 			: `the environment, a ${ENV_FILE_VAR} file, or a .env file here or in a parent folder`;
 		throw new Error(`no Open Cloud API key for ${job}: set ${JOB_KEY_VARS[job]} (scopes ${JOB_SCOPES[job]}) or ${API_KEY_VARS.join(", ")} in ${where}`);
-	}
-
-	/**
-	 * A plaintext TYPETORCH_SIGNING_KEY wherever it is (environment or an env file): only for migrating it into an
-	 * encrypted key file, and for warnings. Never used to sign except through `ciSigningKey`. Throws (without the value)
-	 * when it is malformed.
-	 */
-	plaintextSigningKey(): (SigningKey & { source: string; seed: string }) | undefined {
-		const setting = this.get(SIGNING_KEY_VAR);
-		if (!setting) return undefined;
-		return { ...parseSigningKey(setting.value), source: setting.source, seed: setting.value.trim() };
-	}
-
-	/**
-	 * The CI escape hatch: TYPETORCH_SIGNING_KEY signs without a person only when BOTH it and
-	 * TYPETORCH_ALLOW_ENV_SIGNING_KEY=1 come from the real environment (not from any file, not from a .env Bun loaded).
-	 * Off by default; meant for a CI secret, never for a dev machine.
-	 */
-	ciSigningKey(): (SigningKey & { source: string }) | undefined {
-		const allow = this.get(ALLOW_ENV_SIGNING_VAR);
-		const setting = this.get(SIGNING_KEY_VAR);
-		if (allow?.value !== "1" || allow.source !== "environment" || setting?.source !== "environment") return undefined;
-		return { ...parseSigningKey(setting.value), source: "environment" };
 	}
 
 	/** Every secret value known (for redaction). */

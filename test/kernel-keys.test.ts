@@ -12,11 +12,9 @@ import {
 	stampKernelProject,
 	versionProblems,
 } from "../src/commands/kernel";
-import { removeEnvLine, setJsonStringField } from "../src/commands/keys";
 import type { Project } from "../src/config";
 import { parseDotEnv, Settings, useSettings } from "../src/env";
 import { setOutputMode } from "../src/log";
-import { parseSigningKey } from "../src/signing";
 
 afterEach(() => useSettings(undefined));
 
@@ -89,17 +87,5 @@ describe("kernel identity (S-L5)", () => {
 		expect(slot.Kernel.$path).toBe(join(dir, "src/server/Kernel.server.luau").replace(/\\/g, "/"));
 		expect(project.tree.ServerScriptService.TypeTorchKernel.$attributes).toBeUndefined(); // not mutated
 		expect(absolutePaths({ a: [{ $path: "x" }] }, "/k")).toEqual({ a: [{ $path: resolve("/k", "x").replace(/\\/g, "/") }] });
-	});
-});
-
-describe("keys helpers", () => {
-	test("removeEnvLine drops only that variable", () => {
-		expect(removeEnvLine("A=1\r\nTYPETORCH_SIGNING_KEY=x\nB=2\n", "TYPETORCH_SIGNING_KEY")).toBe("A=1\nB=2\n");
-		expect(removeEnvLine("TYPETORCH_SIGNING_KEY=x\n", "TYPETORCH_SIGNING_KEY")).toBe("");
-	});
-	test("setJsonStringField keeps the formatting", () => {
-		const text = '{\n\t"project": "game",\n\t"creator": { "groupId": 1 }\n}\n';
-		expect(setJsonStringField(text, "signingPublicKey", "KEY")).toBe('{\n\t"project": "game",\n\t"creator": { "groupId": 1 },\n\t"signingPublicKey": "KEY"\n}\n');
-		expect(setJsonStringField('{ "signingPublicKey": "OLD" }', "signingPublicKey", "NEW")).toBe('{ "signingPublicKey": "NEW" }');
 	});
 });

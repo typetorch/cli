@@ -2,7 +2,7 @@
 
 `typetorch` builds a roblox-ts game into a payload, uploads it to Roblox as a private Model asset, and hot-swaps it
 into live servers without a restart. It also promotes and rolls back already uploaded builds, lists deployments with
-their git identity, and checks and publishes the kernel place. **Every deploy is approved and signed by a person**
+their git identity, and checks and publishes the kernel place. **Every deploy is approved by a person**
 (`typetorch approve`); agents and the remote-claude dev-server only prepare them.
 
 Part of TypeTorch: the kernel (`@typetorch/kernel`) is baked into the place and swaps payloads; the framework
@@ -45,7 +45,6 @@ A game repo has `typetorch.json` next to `default.project.json`:
   "members": { "123456789": "owner" },   // userId -> owner | admin | dev
   "devBadgeId": null,
   "kernel": "node_modules/@typetorch/kernel",
-  "signingPublicKey": "…",               // written by `typetorch keys init`
   "approval": "all"                      // "all" (default) | "prod" | "none": which deploys need `typetorch approve`
 }
 ```
@@ -67,38 +66,29 @@ scripts, git) get an allowlisted environment without any key. Keys are never pri
 | `OPENCLOUD_DEPLOY_KEY` | deploy messages and the registry (`deploy`, `rollback`, `promote`, `config push`, `deployments`) | `universe-messaging-service:publish`, `universe:read` (+ `universe:write` to write the registry) |
 | `OPENCLOUD_PLACE_KEY` | `kernel deploy` (manual only) | `universe.place:write` (+ `asset:read` to record the place version) |
 | `TYPETORCH_API_KEY`, `OPENCLOUD_API_KEY` or `ROBLOX_API_KEY` | any job without its own key | all of the above |
-| `TYPETORCH_SIGNING_KEY` + `TYPETORCH_ALLOW_ENV_SIGNING_KEY=1` | **CI escape hatch only, off by default**: a plaintext seed that signs without approval. Both must come from the real environment (never from a file) and it never signs for `--proposed-by agent` / `dev-server/...`. Don't set it on a dev machine | not an Open Cloud key |
 
-Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_KEY_FILE` (the signing key
-file), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_CHILD_ENV=NAME,NAME` (extra
+Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_CHILD_ENV=NAME,NAME` (extra
 non-secret variables for child processes).
 
 ### Approving deploys
 
-Every deploy, rollback and promote is approved and signed by a person in their own terminal (`"approval": "all"`, the
-default; `"prod"` asks only for prod-channel branches, `"none"` never asks).
+Every deploy, rollback and promote is approved by a person in their own terminal (`"approval": "all"`, the default;
+`"prod"` asks only for prod-channel branches, `"none"` never asks). No key or passphrase is involved: it is a y/N.
 
-1. **Once:** `typetorch keys init` (interactive). It makes the Ed25519 key, asks for a passphrase twice (12+ characters,
-   not echoed), and writes the key **encrypted** (scrypt N=2^17 + AES-256-GCM) to
-   `~/.config/typetorch/keys/<universeId>.key` (`--key-file` / `TYPETORCH_KEY_FILE` to change; never inside the repo).
-   The public key goes into `typetorch.json` `"signingPublicKey"`; commit it. A plaintext `TYPETORCH_SIGNING_KEY` from
-   CLI 0.2.0 is offered for encryption (same public key) and its env line can be removed. `typetorch keys status`
-   shows the file and whether it matches.
-2. **You deploy:** `typetorch deploy` in a terminal builds, uploads and waits for moderation, then shows the details and
-   asks y/N and the passphrase: one command.
-3. **Anyone else deploys** (an agent, the remote-claude dev-server, a script, or you with `--propose`): the same build,
+1. **You deploy:** `typetorch deploy` in a terminal builds, uploads and waits for moderation, then shows the details and
+   asks y/N: one command.
+2. **Anyone else deploys** (an agent, the remote-claude dev-server, a script, or you with `--propose`): the same build,
    upload and moderation, then a **proposal** in `proposals.jsonl` (state dir) and nothing published. It prints
-   `approve with: typetorch approve <id>`. Proposals expire after 24 h.
-4. **`typetorch approve [id]`** lists the pending proposals (newest first), shows branch, artifact, notes, sources, size,
-   proposer and age, asks y/N and the passphrase, then signs, publishes and logs it. It refuses when stdin isn't an
-   interactive terminal. `typetorch reject <id>` drops one; `typetorch proposals [--all]` lists them.
+   `approve with: typetorch approve <id>`. Proposals expire after 24 h. `--proposed-by` / `TYPETORCH_PROPOSED_BY` names
+   who prepared it (default: `cli` at a terminal, `agent` otherwise).
+3. **`typetorch approve [id]`** lists the pending proposals (newest first), shows branch, artifact, notes, sources, size,
+   proposer and age, asks y/N, then publishes and logs it. It refuses when stdin isn't an interactive terminal.
+   `typetorch reject <id>` drops one; `typetorch proposals [--all]` lists them.
 
-`kernel deploy` bakes the public key into the place for kernel 0.3, which will refuse unsigned messages; kernel 0.2
-ignores `sig`.
-
-> **Limitation until kernel 0.3:** approval is enforced by the CLI only. Anything that holds the Open Cloud deploy key
-> could still publish a raw, unsigned deploy message, and kernel 0.2 servers accept it. Kernel 0.3 verifies the
-> signature on every message and stored head, which closes this. Until then, keep the deploy key away from agents.
+> **Limitation:** deploy messages are not signed (signing was removed by decision, 2026-10-04), so approval is enforced
+> by the CLI only. Anything that holds the Open Cloud deploy key, or runs code on any server of the universe, can still
+> publish a deploy message. Keep the deploy key away from agents. An old `signingPublicKey` in typetorch.json is
+> ignored.
 
 ## Commands
 
@@ -106,17 +96,16 @@ ignores `sig`.
 |---|---|
 | `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs rbxtsc (`bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first |
 | `typetorch upload [--no-build]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
-| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--no-registry] [--propose] [--proposed-by <who>]` | clean build, upload, wait until Approved, log "uploaded"; then approve here (a person at a terminal) or write a proposal; on approval: registry, signed deploy message, log "published". Per-stage timings |
+| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--no-registry] [--propose] [--proposed-by <who>]` | clean build, upload, wait until Approved, log "uploaded"; then approve here (a person at a terminal) or write a proposal; on approval: registry, deploy message, log "published". Per-stage timings |
 | `typetorch promote <branch> <artifactId\|assetId\|#seq\|commit> [--force] [--dry-run]` | point a branch at an already uploaded, approved payload (from the deployments or `uploads.jsonl`) with a new seq; no rebuild |
 | `typetorch rollback [--branch] [--to <commit\|artifactId\|assetId\|#seq>] [--force] [--dry-run]` | point the branch at an earlier, already approved asset (no build or upload) and tell its servers |
 | `typetorch deployments [--branch] [--limit n]` | deployment history with git identity; `*` = each branch's live head; lists uploads that never went out |
 | `typetorch branch ls` | branches, channels and live heads |
 | `typetorch config push [--dry-run]` | copy `defaultBranch`, `channels`, `members`, `devBadgeId` (and `revoked`) into the registry |
 | `typetorch kernel deploy [--kernel <dir>] [--dry-run] [--replace-place --yes] [--allow-dirty] [--allow-untagged]` | see below |
-| `typetorch approve [id]` | approve a proposal: details, y/N, passphrase, sign, publish (interactive terminal only) |
+| `typetorch approve [id]` | approve a proposal: details, y/N, publish (interactive terminal only) |
 | `typetorch reject <id> [--reason]` / `typetorch proposals [--all]` | drop a proposal / list them |
-| `typetorch keys init [--key-file <path>] [--force]` / `keys status` | create the encrypted signing key (interactive) / show it |
-| `typetorch doctor` | checks bun, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the signing key and the state dir, and probes each key's scopes with harmless calls |
+| `typetorch doctor` | checks bun, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy and the state dir, and probes each key's scopes with harmless calls |
 
 Every command takes `--json` (one JSON document on stdout; human lines go to stderr), `--verbose`, `--config <path>`
 and `--env-file <path>`.
@@ -171,9 +160,8 @@ and `--env-file <path>`.
 ### Deploy message
 
 `POST /cloud/v2/universes/{universeId}:publishMessage`, topic `TypeTorch/deploy`, message
-`{"b":branch,"a":assetId,"i":artifactId,"s":seq,"c":commit,"ch":channel,"t":unixMs,"r":1?,"sig":"…"?}` (`r` only for
-rollbacks). `sig` is base64 Ed25519 over `tt1\n<b>\n<a>\n<i>\n<s>\n<c>\n<ch>\n<t>\n<r>` (exact rules and a test vector in
-TypeTorch `plans/03-artifact.md`). Servers on branch `b` swap, and persist it as their branch head (the higher `s`
+`{"b":branch,"a":assetId,"i":artifactId,"s":seq,"c":commit,"ch":channel,"t":unixMs,"r":1?}` (`r` only for rollbacks;
+unsigned). Servers on branch `b` swap, and persist it as their branch head (the higher `s`
 wins; heads are ordered by `(seq, time)`).
 
 ### Logs and the state dir
@@ -191,7 +179,7 @@ one log and one seq. If a deploy stops after the upload, `typetorch deployments`
 One ConfigService key, `TypeTorch`, in the experience's `InExperienceConfig` repository, written through the Open
 Cloud configs API (read the draft and the published config, PATCH the draft, publish with `deploymentStrategy:
 "Immediate"`). A write is refused when the draft holds unpublished changes to other keys (`--force` publishes them
-anyway). The value keeps each branch's head (with the message's `t`, `r` and `sig`, so a kernel can verify it) and the
+anyway). The value keeps each branch's head (with the message's `t` and `r`) and the
 last 25 deployments, under the 10,000-character value limit.
 
 **The registry is optional.** When it can't be read (no `universe:read`), `deploy`, `rollback` and `promote` warn once
@@ -206,7 +194,7 @@ log. **When it can be read but not written, the deploy aborts** before the messa
 2. checks the version (package.json `version` = `KERNEL_VERSION` in `src/shared/Constants.luau`, and the kernel API)
    and prints it with a content hash (place.project.json and `src/`, LF line endings). A git checkout must be clean and
    tagged `v<version>` (`--allow-dirty`, `--allow-untagged`);
-3. builds `.typetorch/place.rbxl` with `KernelVersion`, `KernelHash`, `KernelCommit` and `SigningPublicKey` attributes
+3. builds `.typetorch/place.rbxl` with `KernelVersion`, `KernelHash` and `KernelCommit` attributes
    on `ServerScriptService.TypeTorchKernel`;
 4. publishes **only with `--replace-place --yes`**, which replaces the whole place and wipes Studio/Team Create
    content (patching just the kernel slots comes later; see TypeTorch `plans/13`). The place version before and after

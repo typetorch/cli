@@ -1,6 +1,6 @@
 /**
  * Pointing a branch at an (already approved) payload asset: shared by `deploy`, `rollback` and `promote`.
- *   lock the state dir -> seq -> signed message -> registry (when readable) -> deploy message -> local log -> unlock
+ *   lock the state dir -> seq -> message -> registry (when readable) -> deploy message -> local log -> unlock
  *
  * One seq source (P-C1/S-L8): the seq is one above the highest in the registry (re-read inside the write) and the
  * state dir's log (re-read under the lock). When the registry is readable but the write fails, the release ABORTS
@@ -12,7 +12,6 @@ import { formatSeconds, info, type Stopwatch } from "../log";
 import type { BuildSources, Channel } from "../naming";
 import { DEPLOY_TOPIC, deployMessage, encodeDeployMessage, type DeployMessage, type OpenCloud } from "../opencloud";
 import { recordDeployment, RegistryConflictError, writeRegistry, type RegistryApi, type RegistryDeployment } from "../registry";
-import type { SigningKey } from "../signing";
 import { withStateLock } from "../state";
 import type { History } from "./common";
 
@@ -40,8 +39,6 @@ export interface ReleaseInput {
 	note?: string;
 	assetName?: string;
 	watch: Stopwatch;
-	/** Signs the deploy message (and the registry head); unsigned without it. */
-	signingKey?: SigningKey;
 	/** Extra fields for the local log line. */
 	extra?: Partial<LocalDeployment>;
 }
@@ -87,15 +84,19 @@ export function makeEntry(
 	return entry;
 }
 
-/** The (signed) deploy message for an entry; its t/r/sig are copied onto the entry so the registry head carries them. */
-export function signEntry(entry: RegistryDeployment, key: SigningKey | undefined): DeployMessage {
-	const message = deployMessage(
-		{ b: entry.branch, a: entry.assetId, i: entry.artifactId, s: entry.seq, c: entry.commit, ch: entry.channel, rollback: entry.action === "rollback" },
-		key,
-	);
+/** The deploy message for an entry; its t/r are copied onto the entry so the registry head carries them. */
+export function messageFor(entry: RegistryDeployment): DeployMessage {
+	const message = deployMessage({
+		b: entry.branch,
+		a: entry.assetId,
+		i: entry.artifactId,
+		s: entry.seq,
+		c: entry.commit,
+		ch: entry.channel,
+		rollback: entry.action === "rollback",
+	});
 	entry.t = message.t;
 	if (message.r === 1) entry.r = 1;
-	if (message.sig) entry.sig = message.sig;
 	encodeDeployMessage(message); // fail before anything is written when it is over 1 KiB
 	return message;
 }
@@ -122,7 +123,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 					{ message: registryMessage(input.action, input.branch, input.artifact.artifactId, input.note), force: input.force, dryRun: false },
 					(current) => {
 						entry = makeEntry(input, current, local);
-						message = signEntry(entry, input.signingKey);
+						message = messageFor(entry);
 						return recordDeployment(current, entry);
 					},
 				);
@@ -145,7 +146,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 		}
 		if (!entry || !message) {
 			entry = makeEntry(input, history.snapshot?.value, local);
-			message = signEntry(entry, input.signingKey);
+			message = messageFor(entry);
 		}
 
 		const localEntry: LocalDeployment = {
@@ -166,7 +167,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 			if (registry === "published") appendLocalLog(history.stateDir, { ...localEntry, registry, timings: watch.total() }, "registry-only");
 			throw error;
 		}
-		info(`  publish     ${formatSeconds(watch.timings.publish)}  ${DEPLOY_TOPIC} ${JSON.stringify({ ...message, sig: message.sig ? `${message.sig.slice(0, 12)}...` : undefined })}`);
+		info(`  publish     ${formatSeconds(watch.timings.publish)}  ${DEPLOY_TOPIC} ${JSON.stringify(message)}`);
 		const logged: LocalDeployment = { ...localEntry, timings: watch.total() };
 		appendLocalLog(history.stateDir, logged);
 		return { entry: logged, message, registry, configVersion };

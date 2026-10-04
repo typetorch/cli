@@ -10,7 +10,7 @@ import {
 } from "../src/deployments";
 import { makeEntry } from "../src/commands/release";
 import { checkChannelGuard } from "../src/commands/deploy";
-import { deployMessage } from "../src/opencloud";
+import { deployMessage, encodeDeployMessage } from "../src/opencloud";
 import {
 	applyProjectConfig,
 	emptyRegistry,
@@ -192,6 +192,11 @@ describe("deploy entries and messages", () => {
 		);
 		expect(entry.seq).toBe(1);
 		expect(entry.fromAssetId).toBeUndefined();
+	});
+	test("a deploy message with the longest branch name stays well under 1 KiB", () => {
+		const message = deployMessage({ b: "b".repeat(64), a: 999999999999999, i: "uncommitted-dirty-abcdef", s: 9999999, c: "abcdef0", ch: "prod", rollback: true });
+		expect(new TextEncoder().encode(encodeDeployMessage(message)).length).toBeLessThan(300);
+		expect(() => encodeDeployMessage({ ...message, b: "x".repeat(1100) })).toThrow(/1024-byte/);
 	});
 	test("deploy message shape (kernel contract)", () => {
 		const message = deployMessage({ b: "dev", a: 123, i: "dev-a1b2c3d", s: 7, c: "a1b2c3d", ch: "dev", t: 1000 });
