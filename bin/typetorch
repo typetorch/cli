@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# typetorch for bash/zsh (Git Bash, macOS, Linux): runs this checkout of the CLI with Bun. Add this folder to PATH.
+exec bun "$(dirname "$0")/../src/index.ts" "$@"

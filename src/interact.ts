@@ -30,7 +30,9 @@ export class PromptCancelledError extends Error {
 /** Reads one line from the terminal in raw mode; `hidden` echoes nothing. Ctrl+C cancels. */
 function readLine(question: string, hidden: boolean): Promise<string> {
 	const stdin = process.stdin;
-	if (typeof stdin.setRawMode !== "function") return Promise.reject(new NotInteractiveError("this terminal has no raw mode"));
+	if (typeof stdin.setRawMode !== "function") {
+		return Promise.reject(new NotInteractiveError("this terminal can't read keys without echo (no raw mode); run the command in PowerShell or Windows Terminal"));
+	}
 	process.stderr.write(question);
 	return new Promise((resolve, reject) => {
 		let value = "";
@@ -71,7 +73,8 @@ function readLine(question: string, hidden: boolean): Promise<string> {
 }
 
 export function terminalInteraction(): Interaction {
-	const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY && typeof process.stdin.setRawMode === "function");
+	// A person: stdin and stderr are terminals. (Raw mode, for the no-echo prompts, is checked when reading.)
+	const interactive = Boolean(process.stdin.isTTY && process.stderr.isTTY);
 	return {
 		interactive,
 		async confirm(question) {
