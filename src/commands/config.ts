@@ -20,7 +20,7 @@ export async function configCommand(args: ParsedArgs) {
 	if (sub !== "push") throw new UsageError(`unknown config subcommand "${sub ?? ""}" (only "push")`);
 	const proj = project(args);
 	const dryRun = flagBool(args, "dry-run");
-	const api = new RegistryApi(openCloud()!, proj.config.universeId);
+	const api = new RegistryApi(openCloud("deploy")!, proj.config.universeId);
 	const result = await writeRegistry(
 		api,
 		{ message: `typetorch config push ${proj.config.project}`, force: flagBool(args, "force"), dryRun },

@@ -13,7 +13,7 @@
  */
 import { isRecord, jsonEqual } from "./json";
 import { debug, warn } from "./log";
-import type { Channel } from "./naming";
+import type { BuildSources, Channel } from "./naming";
 import { ApiError, type OpenCloud } from "./opencloud";
 import type { ProjectConfig, Role } from "./config";
 
@@ -23,6 +23,11 @@ export const MAX_DEPLOYMENTS = 25;
 /** The configs API limits a value to 10,000 characters; keep a margin. */
 export const MAX_VALUE_CHARS = 9_500;
 
+/**
+ * A branch's live head. Heads are ordered by (seq, time): the higher seq wins, and on equal seq the later deployedAt
+ * (`t` when present). `t`, `r` and `sig` are the signed deploy message's fields (plans/03), so a kernel can verify the
+ * head exactly like the message it came from.
+ */
 export interface BranchHead {
 	artifactId: string;
 	assetId: number;
@@ -32,12 +37,20 @@ export interface BranchHead {
 	seq: number;
 	deployedAt: string;
 	by: string;
+	/** The deploy message's `t` (unix ms). */
+	t?: number;
+	/** 1 when the message was a rollback. */
+	r?: 1;
+	/** base64 Ed25519 signature of the message (absent when the deploy was unsigned). */
+	sig?: string;
+	/** Commits of the game and the @typetorch packages in the payload. */
+	sources?: BuildSources;
 }
 
 export interface RegistryDeployment {
 	seq: number;
 	at: string;
-	action: "deploy" | "rollback";
+	action: "deploy" | "rollback" | "promote";
 	branch: string;
 	channel: Channel;
 	artifactId: string;
@@ -49,6 +62,11 @@ export interface RegistryDeployment {
 	/** What the branch ran before this entry (absent for a branch's first deploy). */
 	fromAssetId?: number;
 	fromArtifactId?: string;
+	sources?: BuildSources;
+	/** The deploy message's `t`, `r` and `sig` (kept on the branch head; not in the registry's deployments list). */
+	t?: number;
+	r?: 1;
+	sig?: string;
 }
 
 export interface RegistryValue {
@@ -101,7 +119,7 @@ export function nextSeq(value: RegistryValue): number {
 }
 
 export function headFromDeployment(entry: RegistryDeployment): BranchHead {
-	return {
+	const head: BranchHead = {
 		artifactId: entry.artifactId,
 		assetId: entry.assetId,
 		channel: entry.channel,
@@ -111,13 +129,19 @@ export function headFromDeployment(entry: RegistryDeployment): BranchHead {
 		deployedAt: entry.at,
 		by: entry.by,
 	};
+	if (entry.t !== undefined) head.t = entry.t;
+	if (entry.r === 1) head.r = 1;
+	if (entry.sig) head.sig = entry.sig;
+	if (entry.sources) head.sources = entry.sources;
+	return head;
 }
 
 /** Points `entry.branch` at the entry's artifact and appends the entry (then trims to the limits). */
 export function recordDeployment(value: RegistryValue, entry: RegistryDeployment): RegistryValue {
 	const next: RegistryValue = structuredClone(value);
 	next.branches[entry.branch] = headFromDeployment(entry);
-	next.deployments.push(entry);
+	const { sig: _sig, t: _t, r: _r, ...listed } = entry; // the head carries the signed fields; keep the list small
+	next.deployments.push(listed);
 	return trimRegistry(next).value;
 }
 

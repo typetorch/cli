@@ -1,14 +1,20 @@
 /**
  * Deployment history from two sources: the registry (when the configs API is usable) and the local log
- * `.typetorch/deployments.jsonl` (one JSON line per deploy/rollback made from this machine). Game servers persist the
- * newest head they hear about (higher seq wins), so a branch's live head is its highest-seq entry in either source.
+ * `deployments.jsonl` in the state dir (state.ts; one JSON line per published deploy/rollback/promote). Game servers
+ * persist the newest head they hear about, so a branch's live head is its highest entry in either source, ordered by
+ * (seq, time).
+ *
+ * `uploads.jsonl` in the same dir records every payload upload ("uploaded", written before anything is published), so
+ * an approved asset whose publish failed can still be promoted (`typetorch promote`).
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { table } from "./log";
+import { parseArtifactId, type BuildSources, type Channel } from "./naming";
 import type { RegistryDeployment, RegistryValue } from "./registry";
 
-export const LOCAL_LOG = ".typetorch/deployments.jsonl";
+export const LOCAL_LOG = "deployments.jsonl";
+export const UPLOAD_LOG = "uploads.jsonl";
 
 export interface LocalDeployment extends RegistryDeployment {
 	universeId?: number;
@@ -21,19 +27,21 @@ export interface LocalDeployment extends RegistryDeployment {
 	registry?: "published" | "unchanged" | "unavailable" | "failed" | "skipped";
 	configVersion?: number;
 	timings?: Record<string, number>;
+	/**
+	 * "published": the deploy message went out. "registry-only": the registry was written but the message failed (the
+	 * seq is used; servers still pick the head up from the registry).
+	 */
+	event?: "published" | "registry-only";
 }
 
-export function readLocalLog(root: string, universeId?: number): LocalDeployment[] {
-	const file = join(root, LOCAL_LOG);
+function readJsonLines<T>(file: string, keep: (entry: any) => boolean): T[] {
 	if (!existsSync(file)) return [];
-	const entries: LocalDeployment[] = [];
+	const entries: T[] = [];
 	for (const line of readFileSync(file, "utf8").split(/\r?\n/)) {
 		if (line.trim() === "") continue;
 		try {
-			const entry = JSON.parse(line) as LocalDeployment;
-			if (typeof entry.seq !== "number" || typeof entry.branch !== "string") continue;
-			if (universeId !== undefined && entry.universeId !== undefined && entry.universeId !== universeId) continue;
-			entries.push(entry);
+			const entry = JSON.parse(line);
+			if (keep(entry)) entries.push(entry as T);
 		} catch {
 			// A torn line (crash mid-write) is skipped.
 		}
@@ -41,10 +49,74 @@ export function readLocalLog(root: string, universeId?: number): LocalDeployment
 	return entries;
 }
 
-export function appendLocalLog(root: string, entry: LocalDeployment) {
-	const file = join(root, LOCAL_LOG);
+function appendJsonLine(file: string, entry: unknown) {
 	mkdirSync(dirname(file), { recursive: true });
 	appendFileSync(file, JSON.stringify(entry) + "\n");
+}
+
+/** The deployments in `dir` (the state dir), optionally only those of one universe. */
+export function readLocalLog(dir: string, universeId?: number): LocalDeployment[] {
+	return readJsonLines<LocalDeployment>(
+		join(dir, LOCAL_LOG),
+		(entry) =>
+			typeof entry?.seq === "number" &&
+			typeof entry?.branch === "string" &&
+			(universeId === undefined || entry.universeId === undefined || entry.universeId === universeId),
+	);
+}
+
+export function appendLocalLog(dir: string, entry: LocalDeployment, event: NonNullable<LocalDeployment["event"]> = "published") {
+	appendJsonLine(join(dir, LOCAL_LOG), { ...entry, event });
+}
+
+/** One uploaded payload asset (written right after moderation, before any registry write or deploy message). */
+export interface UploadRecord {
+	event: "uploaded";
+	at: string;
+	artifactId: string;
+	assetId: number;
+	/** Roblox's moderation state when the upload finished: only "Approved" can be published. */
+	moderation: string;
+	/** The branch it was built for (it can be promoted to others). */
+	branch: string;
+	channel: Channel;
+	commit: string;
+	commitHash: string;
+	dirty: boolean;
+	sha256: string;
+	sources?: BuildSources;
+	assetName?: string;
+	universeId?: number;
+	project?: string;
+	by?: string;
+}
+
+export function readUploads(dir: string, universeId?: number): UploadRecord[] {
+	return readJsonLines<UploadRecord>(
+		join(dir, UPLOAD_LOG),
+		(entry) =>
+			entry?.event === "uploaded" &&
+			typeof entry?.assetId === "number" &&
+			typeof entry?.artifactId === "string" &&
+			(universeId === undefined || entry.universeId === undefined || entry.universeId === universeId),
+	);
+}
+
+export function appendUpload(dir: string, record: Omit<UploadRecord, "event" | "at">): UploadRecord {
+	const full: UploadRecord = { event: "uploaded", at: new Date().toISOString(), ...record };
+	appendJsonLine(join(dir, UPLOAD_LOG), full);
+	return full;
+}
+
+/** Uploads that were never published to any branch (the deploy failed after the upload, or `typetorch upload`). */
+export function unpublishedUploads(uploads: UploadRecord[], rows: RegistryDeployment[]): UploadRecord[] {
+	const published = new Set(rows.map((d) => d.assetId));
+	const seen = new Set<number>();
+	return uploads.filter((u) => {
+		if (published.has(u.assetId) || seen.has(u.assetId)) return false;
+		seen.add(u.assetId);
+		return true;
+	});
 }
 
 export interface DeploymentRow extends LocalDeployment {
@@ -55,7 +127,12 @@ function rowKey(d: RegistryDeployment): string {
 	return `${d.seq}|${d.branch}|${d.assetId}|${d.action}`;
 }
 
-/** Registry and local entries merged (the registry's copy wins), oldest first. */
+/** (seq, time) order: seq first, then the time (ISO strings compare correctly). */
+export function compareDeployments(a: { seq: number; at?: string }, b: { seq: number; at?: string }): number {
+	return a.seq - b.seq || (a.at ?? "").localeCompare(b.at ?? "");
+}
+
+/** Registry and local entries merged (the registry's copy wins), oldest first by (seq, time). */
 export function mergeDeployments(registry: RegistryDeployment[], local: LocalDeployment[]): DeploymentRow[] {
 	const rows = new Map<string, DeploymentRow>();
 	for (const d of local) rows.set(rowKey(d), { ...d, source: "local" });
@@ -64,7 +141,7 @@ export function mergeDeployments(registry: RegistryDeployment[], local: LocalDep
 		const existing = rows.get(key);
 		rows.set(key, existing ? { ...existing, ...d, source: "both" } : { ...d, source: "registry" });
 	}
-	return [...rows.values()].sort((a, b) => a.seq - b.seq || a.at.localeCompare(b.at));
+	return [...rows.values()].sort(compareDeployments);
 }
 
 export interface LiveHead {
@@ -78,14 +155,17 @@ export interface LiveHead {
 	deployedAt: string;
 	by: string;
 	dirty?: boolean;
+	sources?: BuildSources;
 }
 
-/** Each branch's live head: the highest seq among the registry heads and every known deployment. */
+/** Each branch's live head: the highest (seq, time) among the registry heads and every known deployment. */
 export function liveHeads(registry: RegistryValue | undefined, rows: RegistryDeployment[]): Map<string, LiveHead> {
 	const heads = new Map<string, LiveHead>();
 	const offer = (head: LiveHead) => {
 		const current = heads.get(head.branch);
-		if (!current || head.seq > current.seq) heads.set(head.branch, head);
+		if (!current || compareDeployments({ seq: head.seq, at: head.deployedAt }, { seq: current.seq, at: current.deployedAt }) > 0) {
+			heads.set(head.branch, head);
+		}
 	};
 	for (const [branch, head] of Object.entries(registry?.branches ?? {})) {
 		if (!head || typeof head.assetId !== "number") continue;
@@ -103,6 +183,7 @@ export function liveHeads(registry: RegistryValue | undefined, rows: RegistryDep
 			deployedAt: d.at,
 			by: d.by,
 			dirty: d.dirty,
+			sources: d.sources,
 		});
 	}
 	return heads;
@@ -118,16 +199,21 @@ export function nextSeqFrom(registry: RegistryValue | undefined, local: Registry
 }
 
 /**
- * Finds a deployment by `#seq`, payload asset id (8+ digits), artifact id, or commit prefix (4+ hex chars).
- * Searches newest first, entries of `preferBranch` before others.
+ * Finds an artifact by `#seq`, payload asset id (8+ digits), artifact id (exact, then a prefix of 7+ characters,
+ * so `12b63b9-3f` works), or commit prefix (4+ hex chars). Old and new id formats both match. Searches newest first,
+ * entries of `preferBranch` before others.
  */
-export function matchDeployment<T extends RegistryDeployment>(rows: T[], wanted: string, preferBranch?: string): T | undefined {
+export function matchDeployment<T extends { seq: number; at?: string; branch: string; assetId: number; artifactId: string; commit?: string; commitHash?: string }>(
+	rows: T[],
+	wanted: string,
+	preferBranch?: string,
+): T | undefined {
 	const text = wanted.trim();
 	if (text === "") return undefined;
 	const ordered = [...rows].sort((a, b) => {
 		const pa = a.branch === preferBranch ? 1 : 0;
 		const pb = b.branch === preferBranch ? 1 : 0;
-		return pb - pa || b.seq - a.seq;
+		return pb - pa || compareDeployments(b, a);
 	});
 	if (text.startsWith("#")) {
 		const seq = Number(text.slice(1));
@@ -137,11 +223,20 @@ export function matchDeployment<T extends RegistryDeployment>(rows: T[], wanted:
 		const byAsset = ordered.find((d) => String(d.assetId) === text);
 		if (byAsset) return byAsset;
 	}
-	const byArtifact = ordered.find((d) => d.artifactId === text);
+	const lower = text.toLowerCase();
+	const byArtifact = ordered.find((d) => d.artifactId === lower);
 	if (byArtifact) return byArtifact;
-	if (/^[0-9a-f]{4,40}$/i.test(text)) {
-		const lower = text.toLowerCase();
-		return ordered.find((d) => d.commitHash?.toLowerCase().startsWith(lower) || d.commit?.toLowerCase().startsWith(lower));
+	if (lower.length >= 7 && lower.includes("-")) {
+		const byPrefix = ordered.find((d) => d.artifactId.startsWith(lower));
+		if (byPrefix) return byPrefix;
+	}
+	if (/^[0-9a-f]{4,40}$/.test(lower)) {
+		return ordered.find(
+			(d) =>
+				d.commitHash?.toLowerCase().startsWith(lower) ||
+				d.commit?.toLowerCase().startsWith(lower) ||
+				parseArtifactId(d.artifactId).commit?.startsWith(lower),
+		);
 	}
 	return undefined;
 }
@@ -150,7 +245,7 @@ export function matchDeployment<T extends RegistryDeployment>(rows: T[], wanted:
 export function previousDifferent<T extends RegistryDeployment>(rows: T[], branch: string, head: { artifactId: string; assetId: number }): T | undefined {
 	return [...rows]
 		.filter((d) => d.branch === branch && d.artifactId !== head.artifactId && d.assetId !== head.assetId)
-		.sort((a, b) => b.seq - a.seq)[0];
+		.sort((a, b) => compareDeployments(b, a))[0];
 }
 
 function time(iso: string): string {
@@ -163,7 +258,7 @@ export function formatDeploymentsTable(rows: DeploymentRow[], heads: Map<string,
 		const live = heads.get(d.branch);
 		const isLive = live !== undefined && live.seq === d.seq && live.assetId === d.assetId;
 		const git = `${d.branch}@${d.commit || "uncommitted"}${d.dirty ? "*" : ""}`;
-		const action = d.action === "rollback" && d.fromArtifactId ? `rollback (from ${d.fromArtifactId})` : d.action;
+		const action = (d.action === "rollback" || d.action === "promote") && d.fromArtifactId ? `${d.action} (from ${d.fromArtifactId})` : d.action;
 		return [
 			isLive ? "*" : " ",
 			`#${d.seq}`,
@@ -175,5 +270,5 @@ export function formatDeploymentsTable(rows: DeploymentRow[], heads: Map<string,
 			d.source === "local" ? `${action} [local]` : action,
 		];
 	});
-	return table([" ", "seq", "time (UTC)", "channel", "branch@commit", "artifact", "asset", "action"], body);
+	return table([" ", "#", "time (UTC)", "channel", "branch@commit", "artifact", "asset", "action"], body);
 }

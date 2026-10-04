@@ -1,23 +1,20 @@
 /**
- * Pointing a branch at an (already approved) payload asset: shared by `deploy` and `rollback`.
- *   registry (when usable) -> deploy message -> local log
- * The deploy message is what moves live servers (and they persist it as their branch head), so a registry that can't
- * be written is a warning, not a failure.
+ * Pointing a branch at an (already approved) payload asset: shared by `deploy`, `rollback` and `promote`.
+ *   lock the state dir -> seq -> signed message -> registry (when readable) -> deploy message -> local log -> unlock
+ *
+ * One seq source (P-C1/S-L8): the seq is one above the highest in the registry (re-read inside the write) and the
+ * state dir's log (re-read under the lock). When the registry is readable but the write fails, the release ABORTS
+ * before the message: a deployment missing from a registry others read would let them reuse its seq.
  */
 import type { Project } from "../config";
-import { appendLocalLog, liveHeads, mergeDeployments, nextSeqFrom, type LocalDeployment } from "../deployments";
-import { formatSeconds, info, warn, type Stopwatch } from "../log";
-import type { Channel } from "../naming";
-import { DEPLOY_TOPIC, deployMessage, type DeployMessage, type OpenCloud } from "../opencloud";
-import {
-	recordDeployment,
-	RegistryConflictError,
-	RegistryUnavailableError,
-	writeRegistry,
-	type RegistryApi,
-	type RegistryDeployment,
-} from "../registry";
-import { warnRegistryFallback, type History } from "./common";
+import { appendLocalLog, liveHeads, mergeDeployments, nextSeqFrom, readLocalLog, type LocalDeployment } from "../deployments";
+import { formatSeconds, info, type Stopwatch } from "../log";
+import type { BuildSources, Channel } from "../naming";
+import { DEPLOY_TOPIC, deployMessage, encodeDeployMessage, type DeployMessage, type OpenCloud } from "../opencloud";
+import { recordDeployment, RegistryConflictError, writeRegistry, type RegistryApi, type RegistryDeployment } from "../registry";
+import type { SigningKey } from "../signing";
+import { withStateLock } from "../state";
+import type { History } from "./common";
 
 export interface ReleaseArtifact {
 	artifactId: string;
@@ -26,14 +23,16 @@ export interface ReleaseArtifact {
 	commit: string;
 	commitHash: string;
 	dirty: boolean;
+	sources?: BuildSources;
 }
 
 export interface ReleaseInput {
 	proj: Project;
+	/** A client with the deploy key (messaging + configs). */
 	oc: OpenCloud;
 	api?: RegistryApi;
 	history: History;
-	action: "deploy" | "rollback";
+	action: RegistryDeployment["action"];
 	branch: string;
 	artifact: ReleaseArtifact;
 	by: string;
@@ -41,6 +40,8 @@ export interface ReleaseInput {
 	note?: string;
 	assetName?: string;
 	watch: Stopwatch;
+	/** Signs the deploy message (and the registry head); unsigned without it. */
+	signingKey?: SigningKey;
 	/** Extra fields for the local log line. */
 	extra?: Partial<LocalDeployment>;
 }
@@ -50,6 +51,11 @@ export interface ReleaseResult {
 	message: DeployMessage;
 	registry: NonNullable<LocalDeployment["registry"]>;
 	configVersion?: number;
+}
+
+/** The registry is readable but could not be written: nothing was published. */
+export class ReleaseAbortedError extends Error {
+	override name = "ReleaseAbortedError";
 }
 
 /** The deployment entry for `branch`, with seq and "from" taken from what is known (registry value + local log). */
@@ -73,11 +79,25 @@ export function makeEntry(
 		dirty: input.artifact.dirty,
 		by: input.by,
 	};
+	if (input.artifact.sources) entry.sources = input.artifact.sources;
 	if (previous) {
 		entry.fromAssetId = previous.assetId;
 		entry.fromArtifactId = previous.artifactId;
 	}
 	return entry;
+}
+
+/** The (signed) deploy message for an entry; its t/r/sig are copied onto the entry so the registry head carries them. */
+export function signEntry(entry: RegistryDeployment, key: SigningKey | undefined): DeployMessage {
+	const message = deployMessage(
+		{ b: entry.branch, a: entry.assetId, i: entry.artifactId, s: entry.seq, c: entry.commit, ch: entry.channel, rollback: entry.action === "rollback" },
+		key,
+	);
+	entry.t = message.t;
+	if (message.r === 1) entry.r = 1;
+	if (message.sig) entry.sig = message.sig;
+	encodeDeployMessage(message); // fail before anything is written when it is over 1 KiB
+	return message;
 }
 
 export function registryMessage(action: string, branch: string, artifactId: string, note?: string): string {
@@ -86,63 +106,69 @@ export function registryMessage(action: string, branch: string, artifactId: stri
 
 export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 	const { proj, oc, api, history, watch } = input;
-	let entry: RegistryDeployment | undefined;
-	let registry: ReleaseResult["registry"] = "unavailable";
-	let configVersion: number | undefined;
+	return withStateLock(history.stateDir, `${input.action} ${input.branch} ${input.artifact.artifactId}`, async () => {
+		// Re-read the log under the lock: another deploy from this machine may have appended since history was read.
+		const local = readLocalLog(history.stateDir, proj.config.universeId);
+		let entry: RegistryDeployment | undefined;
+		let message: DeployMessage | undefined;
+		let registry: ReleaseResult["registry"];
+		let configVersion: number | undefined;
 
-	if (api && history.snapshot) {
-		const started = performance.now();
-		try {
-			const result = await writeRegistry(
-				api,
-				{ message: registryMessage(input.action, input.branch, input.artifact.artifactId, input.note), force: input.force, dryRun: false },
-				(current) => {
-					entry = makeEntry(input, current, history.local);
-					return recordDeployment(current, entry);
-				},
-			);
-			configVersion = result.configVersion;
-			registry = result.changed ? "published" : "unchanged";
-		} catch (error) {
-			if (error instanceof RegistryConflictError) throw error;
-			if (error instanceof RegistryUnavailableError) {
-				warnRegistryFallback(error.message);
-				registry = "unavailable";
-			} else {
-				warn(`registry write failed (${(error as Error).message}); continuing with the deploy message`);
-				registry = "failed";
+		if (api && history.snapshot) {
+			const started = performance.now();
+			try {
+				const result = await writeRegistry(
+					api,
+					{ message: registryMessage(input.action, input.branch, input.artifact.artifactId, input.note), force: input.force, dryRun: false },
+					(current) => {
+						entry = makeEntry(input, current, local);
+						message = signEntry(entry, input.signingKey);
+						return recordDeployment(current, entry);
+					},
+				);
+				configVersion = result.configVersion;
+				registry = result.changed ? "published" : "unchanged";
+			} catch (error) {
+				if (error instanceof RegistryConflictError) throw error;
+				const retry =
+					input.action === "deploy"
+						? ` The upload is approved and recorded: once the registry works, \`typetorch promote ${input.branch} ${input.artifact.assetId}\` publishes it without a rebuild (or add --no-registry).`
+						: " Fix the registry (or pass --no-registry) and run it again.";
+				throw new ReleaseAbortedError(
+					`the registry is readable but writing it failed, so nothing was published (a deployment missing from the registry could let another machine reuse its seq): ${(error as Error).message}.${retry}`,
+				);
 			}
+			watch.set("registry", Math.round(performance.now() - started) / 1000);
+			info(`  registry    ${formatSeconds(watch.timings.registry)}  ${registry}${configVersion !== undefined ? ` (config v${configVersion})` : ""}`);
+		} else {
+			registry = api ? "unavailable" : "skipped";
 		}
-		watch.set("registry", Math.round(performance.now() - started) / 1000);
-		info(`  registry    ${formatSeconds(watch.timings.registry)}  ${registry}${configVersion !== undefined ? ` (config v${configVersion})` : ""}`);
-	} else {
-		registry = api ? "unavailable" : "skipped";
-	}
-	entry ??= makeEntry(input, history.snapshot?.value, history.local);
+		if (!entry || !message) {
+			entry = makeEntry(input, history.snapshot?.value, local);
+			message = signEntry(entry, input.signingKey);
+		}
 
-	const message = deployMessage({
-		b: entry.branch,
-		a: entry.assetId,
-		i: entry.artifactId,
-		s: entry.seq,
-		c: entry.commit,
-		ch: entry.channel,
-		rollback: input.action === "rollback",
+		const localEntry: LocalDeployment = {
+			...entry,
+			universeId: proj.config.universeId,
+			project: proj.config.project,
+			assetName: input.assetName,
+			message: input.note,
+			registry,
+			configVersion,
+			...input.extra,
+		};
+		const text = encodeDeployMessage(message);
+		try {
+			await watch.stage("publish", () => oc.publishMessage(proj.config.universeId, DEPLOY_TOPIC, text));
+		} catch (error) {
+			// The registry may already point at it; log the seq as used so it is never handed out twice.
+			if (registry === "published") appendLocalLog(history.stateDir, { ...localEntry, registry, timings: watch.total() }, "registry-only");
+			throw error;
+		}
+		info(`  publish     ${formatSeconds(watch.timings.publish)}  ${DEPLOY_TOPIC} ${JSON.stringify({ ...message, sig: message.sig ? `${message.sig.slice(0, 12)}...` : undefined })}`);
+		const logged: LocalDeployment = { ...localEntry, timings: watch.total() };
+		appendLocalLog(history.stateDir, logged);
+		return { entry: logged, message, registry, configVersion };
 	});
-	await watch.stage("publish", () => oc.publishMessage(proj.config.universeId, DEPLOY_TOPIC, JSON.stringify(message)));
-	info(`  publish     ${formatSeconds(watch.timings.publish)}  ${DEPLOY_TOPIC} ${JSON.stringify(message)}`);
-
-	const local: LocalDeployment = {
-		...entry,
-		universeId: proj.config.universeId,
-		project: proj.config.project,
-		assetName: input.assetName,
-		message: input.note,
-		registry,
-		configVersion,
-		...input.extra,
-		timings: watch.total(),
-	};
-	appendLocalLog(proj.root, local);
-	return { entry: local, message, registry, configVersion };
 }

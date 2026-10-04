@@ -8,11 +8,11 @@ import { matchDeployment, previousDifferent } from "../deployments";
 import { gitInfo } from "../git";
 import { bold, dim, emitJson, formatTimings, info, isJson, Stopwatch } from "../log";
 import { branchChannel, branchFromGit, branchNameError, strictest } from "../naming";
-import { DEPLOY_TOPIC, deployMessage } from "../opencloud";
+import { DEPLOY_TOPIC } from "../opencloud";
 import { assertNoForeignDraft } from "../registry";
-import { openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common";
+import { openCloud, project, readHistory, registryApi, signingKey, warnRegistryFallback } from "./common";
 import { checkChannelGuard } from "./deploy";
-import { makeEntry, registryMessage, release } from "./release";
+import { makeEntry, registryMessage, release, signEntry } from "./release";
 
 export const rollbackFlags = {
 	branch: "string",
@@ -34,8 +34,9 @@ export async function rollbackCommand(args: ParsedArgs) {
 	if (!branch) throw new UsageError("which branch? pass --branch <name>");
 	if (branchNameError(branch)) throw new UsageError(branchNameError(branch)!);
 
-	const oc = openCloud(dryRun);
+	const oc = openCloud("deploy", dryRun);
 	const api = registryApi(oc, proj, noRegistry);
+	const key = signingKey(proj);
 	const watch = new Stopwatch();
 	const history = await watch.stage("read", () => readHistory(proj, api, noRegistry ? "--no-registry" : "no API key (dry run)"));
 	if (!history.snapshot && api) warnRegistryFallback(history.unavailable ?? "unknown");
@@ -44,7 +45,7 @@ export async function rollbackCommand(args: ParsedArgs) {
 	const head = history.heads.get(branch);
 	if (!head) {
 		throw new Error(
-			`branch "${branch}" has no deployments in the ${history.snapshot ? "registry or the " : ""}local log (.typetorch/deployments.jsonl)`,
+			`branch "${branch}" has no deployments in the ${history.snapshot ? "registry or the " : ""}local log (${history.stateDir}/deployments.jsonl)`,
 		);
 	}
 	const wanted = flagString(args, "to");
@@ -52,7 +53,7 @@ export async function rollbackCommand(args: ParsedArgs) {
 	if (!target) {
 		throw new Error(
 			wanted
-				? `no deployment matches "${wanted}" (try a #seq, asset id, artifact id or commit from \`typetorch deployments\`)`
+				? `no deployment matches "${wanted}" (try a #seq, asset id, artifact id (old or new form) or commit from \`typetorch deployments\`)`
 				: `nothing to roll back to: no earlier deployment on "${branch}" has a different artifact than ${head.artifactId}`,
 		);
 	}
@@ -68,12 +69,13 @@ export async function rollbackCommand(args: ParsedArgs) {
 		commit: target.commit,
 		commitHash: target.commitHash,
 		dirty: target.dirty,
+		sources: target.sources,
 	};
 	const summary = `${branch}: ${head.artifactId} (asset ${head.assetId}) -> ${target.artifactId} (asset ${target.assetId}, #${target.seq})`;
 
 	if (dryRun) {
 		const entry = makeEntry({ action: "rollback", branch, artifact, by: git.userName }, history.snapshot?.value, history.local);
-		const message = deployMessage({ b: branch, a: target.assetId, i: target.artifactId, s: entry.seq, c: target.commit, ch: target.channel, rollback: true });
+		const message = signEntry(entry, key);
 		const plan = {
 			dryRun: true,
 			branch,
@@ -83,7 +85,7 @@ export async function rollbackCommand(args: ParsedArgs) {
 			registry: history.snapshot
 				? { readable: true, message: registryMessage("rollback", branch, target.artifactId, note) }
 				: { readable: false, reason: history.unavailable },
-			message: { topic: DEPLOY_TOPIC, data: message },
+			message: { topic: DEPLOY_TOPIC, data: message, signed: message.sig !== undefined },
 		};
 		if (isJson()) return emitJson(plan);
 		info(bold(`dry run: would roll back ${summary} as #${entry.seq}`));
@@ -105,6 +107,7 @@ export async function rollbackCommand(args: ParsedArgs) {
 		force,
 		note,
 		watch,
+		signingKey: key,
 		extra: target.sha256 ? { sha256: target.sha256 } : undefined,
 	});
 	const timings = watch.total();

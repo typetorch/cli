@@ -1,6 +1,6 @@
 /** `typetorch deployments` and `typetorch branch ls`: registry (when readable) + the local log. */
 import { flagInt, flagString, UsageError, type ParsedArgs } from "../args";
-import { formatDeploymentsTable } from "../deployments";
+import { formatDeploymentsTable, unpublishedUploads } from "../deployments";
 import { dim, emitJson, info, isJson, table } from "../log";
 import { branchChannel } from "../naming";
 import { openCloud, project, readHistory, registryApi } from "./common";
@@ -13,19 +13,25 @@ function sourceNote(unavailable: string | undefined): string {
 
 export async function deploymentsCommand(args: ParsedArgs) {
 	const proj = project(args);
-	const oc = openCloud(true);
+	const oc = openCloud("deploy", true);
 	const history = await readHistory(proj, registryApi(oc, proj, false));
 	const branch = flagString(args, "branch");
 	const limit = flagInt(args, "limit", 20);
 	let rows = history.rows;
 	if (branch) rows = rows.filter((d) => d.branch === branch);
 	rows = rows.slice(-limit);
+	// Uploads that never went out (a deploy that stopped after moderation, or `typetorch upload`): promote them.
+	const pending = unpublishedUploads(history.uploads, history.rows)
+		.filter((u) => !branch || u.branch === branch)
+		.slice(-5);
 	if (isJson()) {
 		return emitJson({
 			source: history.snapshot ? "registry+local" : "local",
 			registryUnavailable: history.unavailable,
+			stateDir: history.stateDir,
 			heads: Object.fromEntries(history.heads),
 			deployments: rows,
+			unpublishedUploads: pending,
 		});
 	}
 	if (rows.length === 0) {
@@ -33,7 +39,12 @@ export async function deploymentsCommand(args: ParsedArgs) {
 		return;
 	}
 	info(formatDeploymentsTable(rows, history.heads));
-	info(dim(`* = live head of its branch; times UTC; ${sourceNote(history.unavailable)}`));
+	info(dim(`* = live head of its branch; # = deploy number (seq); times UTC; ${sourceNote(history.unavailable)}`));
+	for (const upload of pending) {
+		info(
+			`uploaded, never published: ${upload.artifactId} (asset ${upload.assetId}, ${upload.moderation}, ${upload.at.replace("T", " ").slice(0, 19)}): typetorch promote ${upload.branch} ${upload.assetId}`,
+		);
+	}
 }
 
 export const branchFlags = {} as const;
@@ -42,7 +53,7 @@ export async function branchCommand(args: ParsedArgs) {
 	const sub = args.positionals[0] ?? "ls";
 	if (sub !== "ls" && sub !== "list") throw new UsageError(`unknown branch subcommand "${sub}" (only "ls" for now)`);
 	const proj = project(args);
-	const oc = openCloud(true);
+	const oc = openCloud("deploy", true);
 	const history = await readHistory(proj, registryApi(oc, proj, false));
 	const registry = history.snapshot?.value;
 	const names = new Set<string>([

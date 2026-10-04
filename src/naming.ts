@@ -44,37 +44,61 @@ export function strictest(...channels: (Channel | undefined)[]): Channel {
 }
 
 /**
- * Artifact id: `<channel>-<commit>`, or `<channel>-<commit>-dirty-<sha6>` for a build from a dirty tree (sha6 = the
- * first 6 hex of the payload's sha256). A repo without commits uses "uncommitted" and is always dirty. This is the
- * base id; a clean build may get a revision suffix (`revisionArtifactId`). Ids use only [a-z0-9.-].
+ * Artifact ids (plans/03 "How to read an artifact id"):
+ *   <commit7>-<hash6>          a clean build, e.g. 12b63b9-3fa91c
+ *   <commit7>-dirty-<hash6>    a build from a working tree with uncommitted changes (local only)
+ *   uncommitted-dirty-<hash6>  a repo without commits
+ * commit7 = the first 7 hex of the game repo's HEAD (what `$git("Commit")` compiles in). hash6 = the first 6 hex of
+ * the SHA-256 of the payload built with ArtifactId = the id without its hash (`<commit7>` or `<commit7>-dirty`), so
+ * the same bytes always give the same id and different bytes a different one. The channel is not part of the id (it is
+ * metadata: one artifact can be promoted from dev to prod and keeps its id). Ids use only [a-z0-9-].
+ * Older ids (`<channel>-<commit>[.r<N>]`, `<channel>-<commit>-dirty-<sha6>`, `asset-<assetId>`) are still read.
  */
-export function artifactId(input: { channel: Channel; commit: string; dirty: boolean; sha256?: string }): string {
+export function artifactId(input: { commit: string; dirty: boolean; sha256: string }): string {
+	if (!/^[0-9a-f]{6,}$/.test(input.sha256)) throw new Error("an artifact id needs the payload sha256 (hex)");
+	return `${provisionalArtifactId(input)}-${input.sha256.slice(0, 6)}`;
+}
+
+/** The id stamped into the payload whose hash completes the id: `<commit7>` or `<commit7>-dirty`. */
+export function provisionalArtifactId(input: { commit: string; dirty: boolean }): string {
 	const commit = input.commit || "uncommitted";
-	if (!input.dirty) return `${input.channel}-${commit}`;
-	if (!input.sha256) throw new Error("a dirty artifact id needs the payload sha256");
-	return `${input.channel}-${commit}-dirty-${input.sha256.slice(0, 6)}`;
+	return input.dirty || !input.commit ? `${commit}-dirty` : commit;
 }
 
-/** The provisional id stamped into the payload whose hash names a dirty artifact (see build.ts). */
-export function provisionalArtifactId(input: { channel: Channel; commit: string }): string {
-	return `${input.channel}-${input.commit || "uncommitted"}-dirty`;
+export interface ParsedArtifactId {
+	/** "hash": the current scheme; "legacy": <channel>-<commit>...; "asset": asset-<id>; "unknown": anything else. */
+	format: "hash" | "legacy" | "asset" | "unknown";
+	commit?: string;
+	dirty?: boolean;
+	hash?: string;
+	/** Legacy ids only. */
+	channel?: Channel;
+	/** Legacy `.r<N>` suffix. */
+	revision?: number;
+	assetId?: number;
 }
 
-/**
- * Clean ids carry a revision when the same commit was deployed before with other bytes (a dependency changed, e.g. a
- * newer @typetorch/framework): `<channel>-<commit>` is revision 1, then `<channel>-<commit>.r2`, `.r3`, ... The kernel
- * skips a deploy message whose id equals the running one, so different bytes need a different id.
- */
-export function revisionArtifactId(base: string, revision: number): string {
-	return revision <= 1 ? base : `${base}.r${revision}`;
-}
+const HASH_ID = /^([0-9a-f]{7}|uncommitted)(-dirty)?-([0-9a-f]{6})$/;
+const LEGACY_ID = /^(prod|dev)-([0-9a-f]{4,40}|uncommitted)(?:-dirty-([0-9a-f]{6}))?(?:\.r([1-9]\d{0,5}))?$/;
 
-/** The revision of `id` within `base`'s family (`base` = 1, `base.r<N>` = N), or undefined for any other id. */
-export function artifactRevision(id: string, base: string): number | undefined {
-	if (id === base) return 1;
-	if (!id.startsWith(`${base}.r`)) return undefined;
-	const rest = id.slice(base.length + 2);
-	return /^[1-9]\d{0,5}$/.test(rest) ? Number(rest) : undefined;
+/** Reads any artifact id the CLI ever wrote (history keeps old ones). */
+export function parseArtifactId(id: string): ParsedArtifactId {
+	let m = HASH_ID.exec(id);
+	if (m) return { format: "hash", commit: m[1] === "uncommitted" ? "" : m[1], dirty: m[2] !== undefined, hash: m[3] };
+	m = LEGACY_ID.exec(id);
+	if (m) {
+		return {
+			format: "legacy",
+			channel: m[1] as Channel,
+			commit: m[2] === "uncommitted" ? "" : m[2],
+			dirty: m[3] !== undefined,
+			hash: m[3],
+			revision: m[4] ? Number(m[4]) : undefined,
+		};
+	}
+	m = /^asset-(\d+)$/.exec(id);
+	if (m) return { format: "asset", assetId: Number(m[1]) };
+	return { format: "unknown" };
 }
 
 /** An artifact known from the deployment history; `sha256` is absent on entries logged before it was recorded. */
@@ -93,38 +117,6 @@ export function compareEarlier(artifactId: string, sha256: string, earlier: Earl
 	return matches.every((e) => e.sha256 === sha256) ? "same" : "different";
 }
 
-/** The newest earlier id of `base`'s family (highest revision), the id a clean build is stamped with first. */
-export function latestRevision(base: string, earlier: EarlierArtifact[]): { artifactId: string; revision: number } | undefined {
-	let latest: { artifactId: string; revision: number } | undefined;
-	for (const e of earlier) {
-		const revision = artifactRevision(e.artifactId, base);
-		if (revision !== undefined && (!latest || revision > latest.revision)) latest = { artifactId: e.artifactId, revision };
-	}
-	return latest;
-}
-
-/**
- * The id of a clean build, given the sha256 of its payload stamped with `stampedId` (latestRevision's id, else `base`):
- * - nothing of `base`'s family was deployed before: `base`
- * - `stampedId` was deployed before with these exact bytes: `stampedId` (a no-op redeploy)
- * - otherwise the next free revision, `base.r<highest + 1>`
- */
-export function chooseRevision(input: {
-	base: string;
-	stampedId: string;
-	sha256: string;
-	earlier: EarlierArtifact[];
-}): { artifactId: string; revision: number } {
-	const latest = latestRevision(input.base, input.earlier);
-	if (!latest) return { artifactId: input.base, revision: 1 };
-	const stampedRevision = artifactRevision(input.stampedId, input.base);
-	if (stampedRevision !== undefined && compareEarlier(input.stampedId, input.sha256, input.earlier) === "same") {
-		return { artifactId: input.stampedId, revision: stampedRevision };
-	}
-	const revision = latest.revision + 1;
-	return { artifactId: revisionArtifactId(input.base, revision), revision };
-}
-
 export const ASSET_NAME_MAX = 50;
 
 function slug(text: string): string {
@@ -136,30 +128,37 @@ function slug(text: string): string {
 }
 
 /**
- * Asset display name: `tt-<branch>-<commit>[-r<N>][-dirty][-<channel>]`, only [a-z0-9-], at most 50 chars. `-r<N>` is
- * the artifact's revision (2+). The channel is appended only when it differs from the one the branch implies (a
- * `--channel` override). Roblox's text filter censored the earlier "TT <project> <branch>@<commit>" names; this shape
- * passes it (2026-10-04). The branch part is shortened when needed so the commit always survives.
+ * Asset display name: `tt-<branch>-<artifactId>[-<channel>]`, only [a-z0-9-], at most 50 chars. The channel is
+ * appended only when it differs from the one the branch implies (a `--channel` override). The branch part is shortened
+ * when needed so the artifact id always survives. Roblox's text filter still censors some names (deploy renames them).
  */
-export function assetDisplayName(input: {
-	branch: string;
-	commit: string;
-	dirty: boolean;
-	channel: Channel;
-	impliedChannel: Channel;
-	revision?: number;
-}): string {
-	const suffix = [
-		slug(input.commit) || "uncommitted",
-		input.revision !== undefined && input.revision > 1 ? `r${input.revision}` : undefined,
-		input.dirty ? "dirty" : undefined,
-		input.channel !== input.impliedChannel ? input.channel : undefined,
-	]
+export function assetDisplayName(input: { branch: string; artifactId: string; channel: Channel; impliedChannel: Channel }): string {
+	const suffix = [slug(input.artifactId) || "unknown", input.channel !== input.impliedChannel ? input.channel : undefined]
 		.filter(Boolean)
 		.join("-");
 	const budget = ASSET_NAME_MAX - "tt-".length - 1 - suffix.length;
 	const branch = slug(input.branch).slice(0, Math.max(0, budget)).replace(/-+$/, "");
 	return (branch ? `tt-${branch}-${suffix}` : `tt-${suffix}`).slice(0, ASSET_NAME_MAX);
+}
+
+/**
+ * Where the code in a payload came from: the game repo's commit (`template`) and the @typetorch packages it was built
+ * with. Each is `<commit7>`, `<commit7>*` (a dirty working tree), or `v<version>` (an npm release), when known.
+ */
+export interface BuildSources {
+	template: string;
+	framework?: string;
+	kernel?: string;
+}
+
+export const SOURCE_NAMES = ["template", "framework", "kernel"] as const;
+
+/** `template 12b63b9, framework 9a6547f*, kernel 7706b13` */
+export function formatSources(sources: Partial<BuildSources> | undefined): string {
+	if (!sources) return "";
+	return SOURCE_NAMES.filter((name) => sources[name])
+		.map((name) => `${name} ${sources[name]}`)
+		.join(", ");
 }
 
 export interface DescriptionInput {
@@ -170,12 +169,27 @@ export interface DescriptionInput {
 	dirty: boolean;
 	builtAt: string;
 	sha256: string;
+	sources?: BuildSources;
 	ciUrl?: string;
+	/** "What changed" lines (changes.ts), shown by the dev menu; written after a `---` line. */
+	changes?: string[];
 }
 
-/** Asset description: one `key=value` per line, the full git identity (descriptions are not censored). */
+export const DESCRIPTION_MAX = 1000;
+export const CHANGES_SEPARATOR = "---";
+
+const CONTROL = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g;
+
+/**
+ * Asset description (Roblox does not censor descriptions; the dev menu reads it with GetProductInfo):
+ *   key=value identity lines (artifact, commit, branch, channel, dirty, built, sha256, framework?, kernel?, ci?)
+ *   ---
+ *   up to 8 "what changed" lines
+ * At most 1000 characters: change lines are cut first (whole lines, then the last one shortened), never identity lines.
+ * Control characters are removed, so every line is one line.
+ */
 export function assetDescription(input: DescriptionInput): string {
-	return [
+	const identity = [
 		`artifact=${input.artifactId}`,
 		`commit=${input.commitHash || "uncommitted"}`,
 		`branch=${input.branch}`,
@@ -183,11 +197,40 @@ export function assetDescription(input: DescriptionInput): string {
 		`dirty=${input.dirty}`,
 		`built=${input.builtAt}`,
 		`sha256=${input.sha256}`,
+		input.sources?.framework ? `framework=${input.sources.framework}` : undefined,
+		input.sources?.kernel ? `kernel=${input.sources.kernel}` : undefined,
 		input.ciUrl ? `ci=${input.ciUrl}` : undefined,
 	]
 		.filter((line): line is string => line !== undefined)
+		.map((line) => line.replace(CONTROL, " "))
 		.join("\n")
-		.slice(0, 1000);
+		.slice(0, DESCRIPTION_MAX);
+	const changes = (input.changes ?? []).map((line) => line.replace(CONTROL, " ").trim()).filter(Boolean);
+	if (changes.length === 0) return identity;
+	let text = `${identity}\n${CHANGES_SEPARATOR}`;
+	let added = 0;
+	for (const line of changes) {
+		const room = DESCRIPTION_MAX - text.length - 1;
+		if (room <= 0) break;
+		if (line.length <= room) text += `\n${line}`;
+		else if (room >= 12) text += `\n${line.slice(0, room - 1)}…`;
+		else break;
+		added++;
+		if (line.length > room) break;
+	}
+	return added > 0 ? text : identity;
+}
+
+/** Splits a description into its identity (key=value) and its change lines. */
+export function parseAssetDescription(text: string): { identity: Record<string, string>; changes: string[] } {
+	const lines = text.split(/\r?\n/);
+	const separator = lines.indexOf(CHANGES_SEPARATOR);
+	const identity: Record<string, string> = {};
+	for (const line of separator === -1 ? lines : lines.slice(0, separator)) {
+		const eq = line.indexOf("=");
+		if (eq > 0) identity[line.slice(0, eq)] = line.slice(eq + 1);
+	}
+	return { identity, changes: separator === -1 ? [] : lines.slice(separator + 1).filter(Boolean) };
 }
 
 /** The GitHub Actions run URL, when running in Actions. */
@@ -199,17 +242,22 @@ export function ciRunUrl(env: Record<string, string | undefined> = process.env):
 }
 
 /**
- * The generated `src/shared/build.ts` (exact text; the framework imports BUILD from it, and the template's
- * scripts/build-info.ts writes the same). The last line, the build time, makes the text differ on EVERY build:
- * rbxtsc's incremental compile skips files whose text is unchanged, which would leave `$git()`/`$compileTime()` stale.
+ * The generated `src/shared/build.ts` (the framework imports BUILD from it; the template's scripts/build-info.ts
+ * writes the same). The last line, the build time, makes the text differ on EVERY build: rbxtsc's incremental compile
+ * skips files whose text is unchanged, which would leave `$git()`/`$compileTime()` stale. `SOURCES` sits beside BUILD
+ * (whose fields stay as they are) and names the commits of the game and the @typetorch packages.
  */
-export function buildFileSource(input: { dirty: boolean; channel: Channel; builtAt: string }): string {
+export function buildFileSource(input: { dirty: boolean; channel: Channel; builtAt: string; sources?: BuildSources }): string {
+	const sources = SOURCE_NAMES.filter((name) => input.sources?.[name])
+		.map((name) => `${name}: ${JSON.stringify(input.sources![name])}`)
+		.join(", ");
 	return [
 		"// Generated by `typetorch build`. Do not edit.",
 		'import { $compileTime, $git } from "rbxts-transform-debug";',
 		'import type { BuildInfo } from "@typetorch/framework";',
 		'const GIT = $git("Branch", "Commit");',
 		`export const BUILD: BuildInfo = { branch: GIT.Branch, commit: GIT.Commit, dirty: ${input.dirty}, channel: "${input.channel}", builtAt: $compileTime() };`,
+		`export const SOURCES: { readonly template?: string; readonly framework?: string; readonly kernel?: string } = { ${sources} };`,
 		`// ${input.builtAt}`,
 		"",
 	].join("\n");

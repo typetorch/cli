@@ -26,6 +26,7 @@ export const GLOBAL_FLAGS: FlagSpec = {
 	json: "boolean",
 	verbose: "boolean",
 	config: "string",
+	"env-file": "string",
 };
 
 export function parseArgs(argv: string[], spec: FlagSpec): ParsedArgs {

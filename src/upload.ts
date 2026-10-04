@@ -1,22 +1,16 @@
 /** Uploading a payload as a NEW Model asset, named from its git identity, and gating on moderation. */
-import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
 import type { PayloadMeta } from "./build";
 import type { ProjectConfig } from "./config";
 import { seconds, warn } from "./log";
 import { assetDescription, assetDisplayName, branchChannel, ciRunUrl } from "./naming";
 import type { OpenCloud } from "./opencloud";
 
-export const UPLOAD_LOG = ".typetorch/uploads.jsonl";
-
-export function assetNaming(config: ProjectConfig, meta: PayloadMeta, branch: string) {
+export function assetNaming(config: ProjectConfig, meta: PayloadMeta, branch: string, changes?: string[]) {
 	const displayName = assetDisplayName({
 		branch,
-		commit: meta.commit,
-		dirty: meta.dirty,
+		artifactId: meta.artifactId,
 		channel: meta.channel,
 		impliedChannel: branchChannel(config, branch),
-		revision: meta.revision,
 	});
 	const description = assetDescription({
 		artifactId: meta.artifactId,
@@ -26,22 +20,29 @@ export function assetNaming(config: ProjectConfig, meta: PayloadMeta, branch: st
 		dirty: meta.dirty,
 		builtAt: meta.builtAt,
 		sha256: meta.sha256,
+		sources: meta.sources,
 		ciUrl: ciRunUrl(),
+		changes,
 	});
 	return { displayName, description };
 }
 
+/**
+ * Moderation did not approve the upload in time (or rejected it). The asset is still recorded in uploads.jsonl; once
+ * Roblox approves it, `typetorch promote <branch> <assetId>` publishes it without a rebuild.
+ */
 export class ModerationError extends Error {
 	override name = "ModerationError";
 	constructor(
 		readonly assetId: number,
 		readonly state: string | undefined,
-		timedOut: boolean,
+		readonly timedOut: boolean,
+		branch = "<branch>",
 	) {
 		super(
 			timedOut
-				? `asset ${assetId} is still ${state ?? "in moderation"} after the timeout; not deploying (deploy it later with --to or re-run)`
-				: `asset ${assetId} moderation is ${state ?? "unknown"}; refusing to deploy anything but Approved`,
+				? `asset ${assetId} is still ${state ?? "in moderation"} after the timeout; nothing was published. Once it is Approved, publish it without a rebuild: typetorch promote ${branch} ${assetId}`
+				: `asset ${assetId} moderation is ${state ?? "unknown"}; refusing to publish anything but Approved`,
 		);
 	}
 }
@@ -67,9 +68,16 @@ export async function uploadPayload(
 	meta: PayloadMeta,
 	bytes: Uint8Array,
 	branch: string,
-	options: { moderationTimeout?: number; onStage?: (stage: "upload" | "moderation", s: number, detail: string) => void } = {},
+	options: {
+		/** "What changed" lines for the description (changes.ts). */
+		changes?: string[];
+		moderationTimeout?: number;
+		onStage?: (stage: "upload" | "moderation", s: number, detail: string) => void;
+		/** Called once moderation is known (Approved or not), before anything is published: the "uploaded" record. */
+		onUploaded?: (result: { assetId: number; displayName: string; moderation: string }) => void;
+	} = {},
 ): Promise<UploadResult> {
-	const { displayName, description } = assetNaming(config, meta, branch);
+	const { displayName, description } = assetNaming(config, meta, branch, options.changes);
 	const uploadStarted = performance.now();
 	const operationId = await oc.createModelAsset({
 		bytes,
@@ -95,7 +103,8 @@ export async function uploadPayload(
 	}
 	const moderationSeconds = seconds(performance.now() - moderationStarted);
 	options.onStage?.("moderation", moderationSeconds, state ?? "unknown");
-	if (state !== "Approved") throw new ModerationError(assetId, state, timedOut);
+	options.onUploaded?.({ assetId, displayName, moderation: state ?? "unknown" });
+	if (state !== "Approved") throw new ModerationError(assetId, state, timedOut, branch);
 	const storedName = typeof operation?.response?.displayName === "string" ? operation.response.displayName : undefined;
 	return { assetId, displayName, description, storedName, moderationState: state, uploadSeconds, moderationSeconds };
 }
@@ -126,10 +135,4 @@ export async function fixCensoredName(oc: OpenCloud, upload: UploadResult): Prom
 		warn(`could not check or fix the asset name: ${(error as Error).message}`);
 		return { renamed: false };
 	}
-}
-
-export function logUpload(root: string, record: Record<string, unknown>) {
-	const file = join(root, UPLOAD_LOG);
-	mkdirSync(dirname(file), { recursive: true });
-	appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), ...record }) + "\n");
 }

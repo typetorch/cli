@@ -6,6 +6,7 @@
 import { debug } from "./log";
 import { redact } from "./env";
 import type { Channel } from "./naming";
+import { signFields, type SigningKey } from "./signing";
 
 export const API = "https://apis.roblox.com";
 
@@ -175,14 +176,29 @@ export class OpenCloud {
 			timeoutMs: 300_000,
 		});
 	}
+
+	/**
+	 * The newest version number of a place (Assets API version list; needs asset:read on the place). Used to record
+	 * the version before a kernel deploy. Throws when the key can't read it.
+	 */
+	async latestPlaceVersion(placeId: number): Promise<number> {
+		const body = await this.call("GET", `/assets/v1/assets/${placeId}/versions?maxPageSize=1`);
+		const path: unknown = body?.assetVersions?.[0]?.path;
+		const version = typeof path === "string" ? Number(path.split("/").pop()) : Number.NaN;
+		if (!Number.isSafeInteger(version)) throw new Error(`no version in the place's version list: ${JSON.stringify(body).slice(0, 300)}`);
+		return version;
+	}
 }
 
 export const DEPLOY_TOPIC = "TypeTorch/deploy";
+export const MESSAGE_LIMIT = 1024;
 
 /**
  * The deploy message the kernel reads (Kernel.server.luau onDeployMessage). At most 1 KiB. Servers on branch `b` swap
  * to it and persist it as their branch head (in-game DataStore `head/<branch>`, higher seq wins), so it carries
- * everything a head needs even when the configs registry isn't writable.
+ * everything a head needs even when the configs registry isn't writable. `sig` (decision D1) is an Ed25519 signature
+ * over the other fields (signing.ts `canonicalString`; format in plans/03). Kernel 0.2 ignores it; kernel 0.3 requires
+ * it.
  */
 export interface DeployMessage {
 	/** Branch: only servers on this branch swap. */
@@ -201,10 +217,14 @@ export interface DeployMessage {
 	t: number;
 	/** 1 for rollbacks. */
 	r?: 1;
+	/** base64 Ed25519 signature of the canonical string of the fields above. */
+	sig?: string;
 }
 
+/** Builds a deploy message, signed when a key is given. */
 export function deployMessage(
-	input: Omit<DeployMessage, "t" | "r"> & { rollback?: boolean; t?: number },
+	input: Omit<DeployMessage, "t" | "r" | "sig"> & { rollback?: boolean; t?: number },
+	key?: SigningKey,
 ): DeployMessage {
 	const message: DeployMessage = {
 		b: input.b,
@@ -216,5 +236,14 @@ export function deployMessage(
 		t: input.t ?? Date.now(),
 	};
 	if (input.rollback) message.r = 1;
+	if (key) message.sig = signFields(key, message);
 	return message;
+}
+
+/** The JSON text sent to MessagingService; throws when it is over the 1 KiB limit. */
+export function encodeDeployMessage(message: DeployMessage): string {
+	const text = JSON.stringify(message);
+	const size = new TextEncoder().encode(text).length;
+	if (size > MESSAGE_LIMIT) throw new Error(`the deploy message is ${size} bytes, over MessagingService's ${MESSAGE_LIMIT}-byte limit`);
+	return text;
 }

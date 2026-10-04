@@ -5,15 +5,19 @@ import {
 	liveHeads,
 	mergeDeployments,
 	readLocalLog,
+	readUploads,
 	type DeploymentRow,
 	type LiveHead,
 	type LocalDeployment,
+	type UploadRecord,
 } from "../deployments";
-import { findApiKey, requireApiKey } from "../env";
+import { settings, type KeyJob } from "../env";
 import { debug, warn } from "../log";
 import { isChannel, type Channel } from "../naming";
 import { OpenCloud } from "../opencloud";
 import { REGISTRY_FALLBACK_NOTE, RegistryApi, tryReadRegistry, type RegistrySnapshot } from "../registry";
+import { TEST_VECTOR_PUBLIC_KEY, type SigningKey } from "../signing";
+import { stateDir } from "../state";
 
 export function project(args: ParsedArgs): Project {
 	const loaded = loadProject(flagString(args, "config"));
@@ -28,13 +32,51 @@ export function channelFlag(args: ParsedArgs): Channel | undefined {
 	return value;
 }
 
-/** An Open Cloud client; with `optional`, undefined when no key is configured (dry runs). */
-export function openCloud(optional = false): OpenCloud | undefined {
+/**
+ * An Open Cloud client holding the key for one job (its own key, else the shared one); with `optional`, undefined when
+ * no key is configured (dry runs). The key goes only into this client, never into the environment.
+ */
+export function openCloud(job: KeyJob, optional = false): OpenCloud | undefined {
 	if (optional) {
-		const key = findApiKey();
+		const key = settings().apiKey(job);
 		return key ? new OpenCloud(key.key) : undefined;
 	}
-	return new OpenCloud(requireApiKey().key);
+	return new OpenCloud(settings().requireApiKey(job).key);
+}
+
+/** The project's state dir (TYPETORCH_STATE_DIR, else `<root>/.typetorch`). */
+export function projectStateDir(proj: Project): string {
+	return stateDir(proj.root);
+}
+
+let unsignedWarned = false;
+
+/**
+ * The deploy signing key (TYPETORCH_SIGNING_KEY), checked against typetorch.json "signingPublicKey". Without a key
+ * messages go out unsigned, with a warning (kernel 0.3 servers refuse them).
+ */
+export function signingKey(proj: Project): SigningKey | undefined {
+	const key = settings().signingKey();
+	const configured = proj.config.signingPublicKey;
+	if (!key) {
+		if (!unsignedWarned) {
+			unsignedWarned = true;
+			warn(
+				`deploy messages are unsigned (no TYPETORCH_SIGNING_KEY): kernel 0.3 servers will refuse them. Run \`typetorch keys init\`${configured ? " or restore the key for typetorch.json signingPublicKey" : ""}.`,
+			);
+		}
+		return undefined;
+	}
+	if (key.publicKey === TEST_VECTOR_PUBLIC_KEY || configured === TEST_VECTOR_PUBLIC_KEY) {
+		throw new Error("the signing key is the public test-vector key from plans/03; run `typetorch keys init --force` for a real one");
+	}
+	if (configured && configured !== key.publicKey) {
+		throw new Error(
+			`TYPETORCH_SIGNING_KEY (from ${key.source}) does not match typetorch.json "signingPublicKey"; servers would refuse its signatures. Use the matching key, or run \`typetorch keys init --force\` and redeploy the kernel.`,
+		);
+	}
+	if (!configured) warn(`typetorch.json has no "signingPublicKey" for the signing key from ${key.source}; add it (typetorch keys init prints it) so kernel deploys bake it in`);
+	return key;
 }
 
 export interface History {
@@ -44,6 +86,8 @@ export interface History {
 	local: LocalDeployment[];
 	rows: DeploymentRow[];
 	heads: Map<string, LiveHead>;
+	uploads: UploadRecord[];
+	stateDir: string;
 }
 
 let fallbackWarned = false;
@@ -75,29 +119,20 @@ export async function readHistory(
 }
 
 export function withLocal(proj: Project, snapshot: RegistrySnapshot | undefined, unavailable?: string): History {
-	const local = readLocalLog(proj.root, proj.config.universeId);
+	const dir = projectStateDir(proj);
+	const local = readLocalLog(dir, proj.config.universeId);
 	const rows = mergeDeployments(snapshot?.value.deployments ?? [], local);
-	return { snapshot, unavailable, local, rows, heads: liveHeads(snapshot?.value, rows) };
+	return {
+		snapshot,
+		unavailable,
+		local,
+		rows,
+		heads: liveHeads(snapshot?.value, rows),
+		uploads: readUploads(dir, proj.config.universeId),
+		stateDir: dir,
+	};
 }
 
 export function registryApi(oc: OpenCloud | undefined, proj: Project, disabled: boolean): RegistryApi | undefined {
 	return oc && !disabled ? new RegistryApi(oc, proj.config.universeId) : undefined;
-}
-
-/**
- * Earlier artifacts for picking a build's revision (`buildPayload`'s `earlier`): the local log plus the registry when
- * there is a key and it is readable. The registry read starts now, alongside the build; when it fails, only the local
- * log is checked (`deploy --no-build` checks again).
- */
-export function earlierArtifacts(proj: Project, oc: OpenCloud | undefined): () => Promise<DeploymentRow[]> {
-	const api = registryApi(oc, proj, false);
-	const read: Promise<{ snapshot?: RegistrySnapshot; unavailable?: string; failed?: boolean }> = api
-		? tryReadRegistry(api).catch((error) => ({ unavailable: (error as Error).message ?? String(error), failed: true }))
-		: Promise.resolve({ unavailable: "no API key" });
-	return async () => {
-		const result = await read;
-		if (result.failed) warn(`could not read the registry (${result.unavailable}); checking revisions against the local log only`);
-		else if (result.unavailable) debug(`revision check without the registry: ${result.unavailable}`);
-		return withLocal(proj, result.snapshot, result.unavailable).rows;
-	};
 }

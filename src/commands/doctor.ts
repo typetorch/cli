@@ -1,5 +1,6 @@
 /**
- * `typetorch doctor`: tools, config, API key (never printed) and Open Cloud scopes, probed with harmless calls:
+ * `typetorch doctor`: tools, config, env file, API keys per job and the signing key (never printed), the state dir,
+ * and Open Cloud scopes, each probed with its job's key through harmless calls:
  *   assets       GET an operation that doesn't exist        404 = scope ok, 401/403 = missing
  *   messaging    publish to topic "TypeTorch/doctor"          200 = ok (no server listens to that topic)
  *   configs read GET the InExperienceConfig repository       200/404 = ok, 401/403 = missing universe:read
@@ -10,13 +11,14 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type ParsedArgs, flagString } from "../args";
 import { CONFIG_FILE, findProjectRoot, loadProject, type Project } from "../config";
-import { dotEnvFiles, findApiKey } from "../env";
+import { JOB_KEY_VARS, JOB_SCOPES, settings, type KeyJob } from "../env";
 import { gitInfo } from "../git";
 import { emitJson, green, info, isJson, red, yellow } from "../log";
 import { OpenCloud } from "../opencloud";
 import { capture } from "../proc";
 import { rojoBinary } from "../build";
 import { REPOSITORY } from "../registry";
+import { stateDir } from "../state";
 
 export const doctorFlags = {} as const;
 
@@ -111,28 +113,55 @@ export async function doctorCommand(args: ParsedArgs) {
 		checks.push({ name: "rbxtsc", status: proj ? "fail" : "warn", detail: "node_modules/roblox-ts not installed (run `bun install`)" });
 	}
 
-	// API key
-	const key = findApiKey();
-	checks.push(
-		key
-			? { name: "api key", status: "ok", detail: `${key.name} from ${key.source} (${key.key.length} chars)` }
-			: {
-					name: "api key",
-					status: "fail",
-					detail: `none (set TYPETORCH_API_KEY, OPENCLOUD_API_KEY or ROBLOX_API_KEY; .env files read: ${dotEnvFiles().join(", ") || "none"})`,
-				},
-	);
+	// Env file, keys (one per job, else the shared key), signing key, state dir
+	const config = settings();
+	if (config.envFile) {
+		checks.push({
+			name: "env file",
+			status: config.envFileMissing ? "fail" : "ok",
+			detail: `${config.envFile}${config.envFileMissing ? " does not exist" : ""}`,
+		});
+	} else {
+		checks.push({ name: "env file", status: "warn", detail: `none (TYPETORCH_ENV_FILE); keys come from .env files here or above: ${config.files.join(", ") || "none"}. A file outside the repo is safer` });
+	}
+	const keys: Record<KeyJob, ReturnType<typeof config.apiKey>> = { assets: config.apiKey("assets"), deploy: config.apiKey("deploy"), place: config.apiKey("place") };
+	for (const job of ["assets", "deploy", "place"] as const) {
+		const key = keys[job];
+		checks.push(
+			key
+				? { name: `key ${job}`, status: "ok", detail: `${key.name} from ${key.source}${key.dedicated ? "" : ` (shared; ${JOB_KEY_VARS[job]} would separate it)`}` }
+				: { name: `key ${job}`, status: job === "place" ? "warn" : "fail", detail: `none: set ${JOB_KEY_VARS[job]} (${JOB_SCOPES[job]}) or the shared TYPETORCH_API_KEY` },
+		);
+	}
+	try {
+		const signing = config.signingKey();
+		const configured = proj?.config.signingPublicKey;
+		checks.push(
+			!signing
+				? { name: "signing key", status: "warn", detail: "none: deploy messages go out unsigned and kernel 0.3 refuses them (typetorch keys init)" }
+				: configured && configured !== signing.publicKey
+					? { name: "signing key", status: "fail", detail: `TYPETORCH_SIGNING_KEY from ${signing.source} does not match typetorch.json signingPublicKey` }
+					: { name: "signing key", status: configured ? "ok" : "warn", detail: `from ${signing.source}, public ${signing.publicKey}${configured ? "" : " (not in typetorch.json yet)"}` },
+		);
+	} catch (error) {
+		checks.push({ name: "signing key", status: "fail", detail: (error as Error).message });
+	}
+	if (proj) checks.push({ name: "state dir", status: "ok", detail: stateDir(proj.root) });
 
-	// Scopes
-	if (key && proj) {
-		const oc = new OpenCloud(key.key);
+	// Scopes, each with its job's key
+	const assetsKey = keys.assets;
+	const deployKey = keys.deploy;
+	const placeKey = keys.place;
+	if (proj && (assetsKey || deployKey || placeKey)) {
+		const client = (key: typeof assetsKey) => new OpenCloud(key?.key ?? "");
 		const { universeId, placeId } = proj.config;
 		const configsBase = `/creator-configs-public-api/v1/configs/universes/${universeId}/repositories/${REPOSITORY}`;
 		const scopeMissing = (status: number) => status === 401 || status === 403;
+		const skipped = (name: string, job: KeyJob): Promise<Check> => Promise.resolve({ name, status: "warn", detail: `not probed: no ${job} key` });
 		const probes = await Promise.all([
-			probe(
+			!assetsKey ? skipped("scope assets", "assets") : probe(
 				"scope assets",
-				() => oc.request("GET", "/assets/v1/operations/00000000-0000-0000-0000-000000000000"),
+				() => client(assetsKey).request("GET", "/assets/v1/operations/00000000-0000-0000-0000-000000000000"),
 				(status, text) =>
 					status === 404 || status === 400
 						? ["ok", `asset:read (probe answered ${status})`]
@@ -140,9 +169,9 @@ export async function doctorCommand(args: ParsedArgs) {
 							? ["fail", `missing asset:read/asset:write (${status} ${short(text)})`]
 							: ["warn", `unexpected ${status} ${short(text)}`],
 			),
-			probe(
+			!deployKey ? skipped("scope messaging", "deploy") : probe(
 				"scope messaging",
-				() => oc.request("POST", `/cloud/v2/universes/${universeId}:publishMessage`, { json: { topic: "TypeTorch/doctor", message: JSON.stringify({ doctor: true, t: Date.now() }) } }),
+				() => client(deployKey).request("POST", `/cloud/v2/universes/${universeId}:publishMessage`, { json: { topic: "TypeTorch/doctor", message: JSON.stringify({ doctor: true, t: Date.now() }) } }),
 				(status, text) =>
 					status >= 200 && status < 300
 						? ["ok", "universe-messaging-service:publish (published to TypeTorch/doctor)"]
@@ -150,9 +179,9 @@ export async function doctorCommand(args: ParsedArgs) {
 							? ["fail", `missing universe-messaging-service:publish (${status} ${short(text)})`]
 							: ["warn", `unexpected ${status} ${short(text)}`],
 			),
-			probe(
+			!deployKey ? skipped("scope configs read", "deploy") : probe(
 				"scope configs read",
-				() => oc.request("GET", configsBase),
+				() => client(deployKey).request("GET", configsBase),
 				(status, text) =>
 					status === 200 || status === 404
 						? ["ok", `universe:read (${status === 404 ? "no published config yet" : "repository readable"})`]
@@ -165,10 +194,10 @@ export async function doctorCommand(args: ParsedArgs) {
 				status: "warn",
 				detail: "not probed: registry writes need universe:write (checked by the first deploy; without it deploys skip the registry)",
 			}),
-			probe(
+			!placeKey ? skipped("scope place publish", "place") : probe(
 				"scope place publish",
 				() =>
-					oc.request("POST", `/universes/v1/${universeId}/places/${placeId}/versions?versionType=Published`, {
+					client(placeKey).request("POST", `/universes/v1/${universeId}/places/${placeId}/versions?versionType=Published`, {
 						headers: { "content-type": "application/octet-stream" },
 						body: new Uint8Array(0),
 					}),

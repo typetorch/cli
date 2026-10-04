@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs, UsageError } from "../src/args";
 import { validateConfig } from "../src/config";
-import { loadDotEnv, parseDotEnv } from "../src/env";
+import { childEnv, parseDotEnv, Settings } from "../src/env";
 import { isGeneratedPath, porcelainPaths } from "../src/git";
 import { jsonEqual, parseJsonc } from "../src/json";
 
@@ -74,17 +74,69 @@ describe("env", () => {
 			D: "plain",
 		});
 	});
-	test("nearest .env wins, real env vars are kept", () => {
+	test("nearest .env wins, real env vars win over files, and nothing is copied into process.env", () => {
 		const root = mkdtempSync(join(tmpdir(), "tt-env-"));
 		const child = join(root, "a", "b");
 		mkdirSync(child, { recursive: true });
 		writeFileSync(join(root, ".env"), "TT_TEST_FAR=far\nTT_TEST_BOTH=far\nTT_TEST_REAL=file\n");
 		writeFileSync(join(child, ".env"), "TT_TEST_BOTH=near\n");
-		process.env.TT_TEST_REAL = "real";
-		loadDotEnv(child);
-		expect(process.env.TT_TEST_FAR).toBe("far");
-		expect(process.env.TT_TEST_BOTH).toBe("near");
-		expect(process.env.TT_TEST_REAL).toBe("real");
+		const settings = new Settings({ startDir: child, env: { TT_TEST_REAL: "real" } });
+		expect(settings.get("TT_TEST_FAR")).toEqual({ value: "far", source: join(root, ".env") });
+		expect(settings.get("TT_TEST_BOTH")?.value).toBe("near");
+		expect(settings.get("TT_TEST_REAL")).toEqual({ value: "real", source: "environment" });
+		expect(process.env.TT_TEST_FAR).toBeUndefined();
+		expect(process.env.TT_TEST_BOTH).toBeUndefined();
+	});
+	test("TYPETORCH_ENV_FILE (relative to the .env that names it) wins over .env files; --env-file wins over both", () => {
+		const root = mkdtempSync(join(tmpdir(), "tt-envfile-"));
+		const repo = join(root, "repo");
+		mkdirSync(join(root, "secrets"), { recursive: true });
+		mkdirSync(repo);
+		writeFileSync(join(repo, ".env"), "TYPETORCH_ENV_FILE=../secrets/game.env\nOPENCLOUD_API_KEY=repo-key-0000\n");
+		writeFileSync(join(root, "secrets", "game.env"), "OPENCLOUD_API_KEY=outside-key-0000\nOPENCLOUD_ASSETS_KEY=assets-key-0000\n");
+		const settings = new Settings({ startDir: repo, env: {} });
+		expect(settings.envFile).toBe(join(root, "secrets", "game.env"));
+		expect(settings.get("OPENCLOUD_API_KEY")?.value).toBe("outside-key-0000");
+		writeFileSync(join(root, "other.env"), "OPENCLOUD_API_KEY=flag-key-0000\n");
+		expect(new Settings({ startDir: repo, env: {}, envFile: join(root, "other.env") }).get("OPENCLOUD_API_KEY")?.value).toBe("flag-key-0000");
+		const missing = new Settings({ startDir: repo, env: { TYPETORCH_ENV_FILE: join(root, "nope.env") } });
+		expect(missing.envFileMissing).toBe(true);
+	});
+	test("a key per job, falling back to the shared key", () => {
+		const settings = new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-keys-")), env: { OPENCLOUD_ASSETS_KEY: "assets-key-0000", TYPETORCH_API_KEY: "shared-key-0000" } });
+		expect(settings.apiKey("assets")).toMatchObject({ key: "assets-key-0000", name: "OPENCLOUD_ASSETS_KEY", dedicated: true });
+		expect(settings.apiKey("deploy")).toMatchObject({ key: "shared-key-0000", name: "TYPETORCH_API_KEY", dedicated: false });
+		expect(settings.apiKey("place")?.key).toBe("shared-key-0000");
+		const none = new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-nokeys-")), env: { OPENCLOUD_DEPLOY_KEY: "deploy-key-0000" } });
+		expect(none.apiKey("deploy")?.key).toBe("deploy-key-0000");
+		expect(() => none.requireApiKey("place")).toThrow(/OPENCLOUD_PLACE_KEY/);
+	});
+	test("child processes get an allowlisted env: no keys, no signing key, no unknown variables", () => {
+		const env = {
+			PATH: "/bin",
+			Path: "C:\\bin",
+			HOME: "/home/me",
+			SystemRoot: "C:\\Windows",
+			OPENCLOUD_API_KEY: "shared-key-0000",
+			OPENCLOUD_DEPLOY_KEY: "deploy-key-0000",
+			TYPETORCH_SIGNING_KEY: "c2lnbmluZy1rZXktc2VlZA==",
+			GITHUB_TOKEN: "ghs_secret_token",
+			MY_SECRET: "x",
+			NODE_ENV: "development",
+		};
+		const settings = new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-child-")), env });
+		const child = childEnv({ TYPETORCH_CHANNEL: "prod" }, { env, settings });
+		expect(child).toEqual({ PATH: "/bin", Path: "C:\\bin", HOME: "/home/me", SystemRoot: "C:\\Windows", GIT_TERMINAL_PROMPT: "0", TYPETORCH_CHANNEL: "prod" });
+		// TYPETORCH_CHILD_ENV adds non-secret names; key names are never added
+		const extended = { ...env, TYPETORCH_CHILD_ENV: "NODE_ENV, OPENCLOUD_API_KEY" };
+		const withExtra = childEnv({}, { env: extended, settings: new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-child2-")), env: extended }) });
+		expect(withExtra.NODE_ENV).toBe("development");
+		expect(withExtra.OPENCLOUD_API_KEY).toBeUndefined();
+	});
+	test("a value equal to a secret never reaches a child, whatever its name", () => {
+		const env = { PATH: "/bin", TERM: "shared-key-0000", OPENCLOUD_API_KEY: "shared-key-0000" };
+		const child = childEnv({}, { env, settings: new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-child3-")), env }) });
+		expect(child.TERM).toBeUndefined();
 	});
 });
 

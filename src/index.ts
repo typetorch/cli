@@ -4,15 +4,17 @@
  * Run inside a game repo (a folder with typetorch.json). See README.md.
  */
 import pkg from "../package.json" with { type: "json" };
-import { flagBool, parseArgs, UsageError, type FlagSpec, type ParsedArgs } from "./args";
+import { flagBool, flagString, parseArgs, UsageError, type FlagSpec, type ParsedArgs } from "./args";
 import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands/build";
 import { configCommand, configFlags } from "./commands/config";
 import { deployCommand, deployFlags } from "./commands/deploy";
 import { doctorCommand, doctorFlags } from "./commands/doctor";
 import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history";
 import { kernelCommand, kernelFlags } from "./commands/kernel";
+import { keysCommand, keysFlags } from "./commands/keys";
+import { promoteCommand, promoteFlags } from "./commands/promote";
 import { rollbackCommand, rollbackFlags } from "./commands/rollback";
-import { loadDotEnv, redact } from "./env";
+import { redact, Settings, useSettings } from "./env";
 import { red, setOutputMode } from "./log";
 
 interface Command {
@@ -27,13 +29,15 @@ const COMMANDS: Record<string, Command> = {
 		flags: buildFlags,
 		run: buildCommand,
 		summary: "compile and pack the payload (.typetorch/payload.rbxm)",
-		usage: `typetorch build [--branch <b>] [--channel prod|dev]
+		usage: `typetorch build [--branch <b>] [--channel prod|dev] [--clean]
 
-  Writes src/shared/build.ts, runs rbxtsc, then rojo-builds default.project.json with the artifact identity
-  stamped on the root ($attributes ArtifactId, KernelApi, Channel, Commit, BuiltAt) into .typetorch/payload.rbxm,
-  plus .typetorch/payload.json (artifact id, git identity, sha256).
+  Writes src/shared/build.ts, runs rbxtsc (prod channel: $print/$warn compiled away, no source paths), then
+  rojo-builds default.project.json with the identity stamped on the root ($attributes ArtifactId, KernelApi, Channel,
+  Commit, BuiltAt, SourceTemplate/Framework/Kernel) into .typetorch/payload.rbxm (only Folders and ModuleScripts
+  allowed), plus .typetorch/payload.json. Artifact id: <commit7>-<hash6>, or <commit7>-dirty-<hash6>.
   --branch   TypeTorch branch (default: typetorch.json "branches"[git branch], else the git branch, lowercased, / -> -)
-  --channel  override the branch's channel (default: "channels"[branch], else prod for defaultBranch, else dev)`,
+  --channel  override the branch's channel (default: "channels"[branch], else prod for defaultBranch, else dev)
+  --clean    git clean -fdX out/ and include/ first (deploy and upload always do)`,
 	},
 	upload: {
 		flags: uploadFlags,
@@ -51,12 +55,23 @@ const COMMANDS: Record<string, Command> = {
 		usage: `typetorch deploy [--branch <b>] [--channel prod|dev] [--no-build] [--dry-run] [--message <text>] [--force]
                  [--no-registry] [--moderation-timeout <s>]
 
-  build -> upload (new Model asset) -> moderation = Approved -> registry -> deploy message -> .typetorch/deployments.jsonl
+  clean build -> upload (new Model asset) -> moderation = Approved -> "uploaded" record -> registry -> signed deploy
+  message -> deployments.jsonl (in the state dir: TYPETORCH_STATE_DIR, default .typetorch/)
   --dry-run      build and show what would be uploaded and sent; nothing leaves the machine except registry reads
   --no-build     deploy the last build (.typetorch/payload.rbxm)
   --force        allow a dev-channel or dirty artifact on a prod-channel branch, or publish a config draft that has
                  other unpublished changes
   --no-registry  skip the ConfigService registry (servers persist the head from the deploy message anyway)`,
+	},
+	promote: {
+		flags: promoteFlags,
+		run: promoteCommand,
+		summary: "point a branch at an already uploaded artifact (new seq, no rebuild)",
+		usage: `typetorch promote <branch> <artifactId|assetId|#seq|commit> [--force] [--dry-run] [--no-registry] [--message <text>]
+
+  Re-publishes an approved payload asset to <branch> with a new seq and a signed deploy message. Finds it in the
+  deployments (any branch) or in uploads.jsonl (an upload whose deploy stopped, or \`typetorch upload\`). A
+  dev-channel or dirty artifact needs --force on a prod-channel branch.`,
 	},
 	rollback: {
 		flags: rollbackFlags,
@@ -91,12 +106,25 @@ const COMMANDS: Record<string, Command> = {
 	kernel: {
 		flags: kernelFlags,
 		run: kernelCommand,
-		summary: "kernel deploy: build the kernel place and publish it (replaces the place)",
-		usage: `typetorch kernel deploy [--kernel <dir>] [--dry-run]
+		summary: "kernel deploy: check, identify, build and (with --replace-place --yes) publish the kernel place",
+		usage: `typetorch kernel deploy [--kernel <dir>] [--dry-run] [--replace-place --yes] [--allow-dirty] [--allow-untagged]
 
-  rojo build <kernel>/place.project.json -> .typetorch/place.rbxl, then publish it as the live place version.
-  Kernel dir: --kernel, else typetorch.json "kernel", else node_modules/@typetorch/kernel, else ../kernel.
-  REPLACES THE WHOLE PLACE; servers run it after they restart.`,
+  1. lune run scripts/check.luau in the kernel dir  2. version (package.json = Constants.luau) + content hash, printed;
+  a git checkout must be clean and tagged v<version>  3. rojo build <kernel>/place.project.json -> .typetorch/place.rbxl
+  with KernelVersion/KernelHash/KernelCommit/SigningPublicKey on ServerScriptService.TypeTorchKernel.
+  Publishing only patches the kernel slots once plans/13 lands (needs spike S12). Until then --replace-place --yes
+  publishes the whole kernel place, which WIPES Studio/Team Create content; the place version before and after go to
+  kernel-deploys.jsonl in the state dir. Kernel dir: --kernel, else typetorch.json "kernel", else
+  node_modules/@typetorch/kernel, else ../kernel.`,
+	},
+	keys: {
+		flags: keysFlags,
+		run: keysCommand,
+		summary: "keys init: create the Ed25519 key deploy messages are signed with",
+		usage: `typetorch keys init [--env-file <path>] [--force]
+
+  Writes TYPETORCH_SIGNING_KEY (base64 32-byte seed) to the env file (--env-file, else TYPETORCH_ENV_FILE, else the
+  git-ignored .env) and the public key to typetorch.json "signingPublicKey". Never prints the private key.`,
 	},
 	doctor: {
 		flags: doctorFlags,
@@ -115,8 +143,10 @@ function help(): string {
 		"",
 		...Object.entries(COMMANDS).map(([name, c]) => `  ${name.padEnd(width)}  ${c.summary}`),
 		"",
-		"global options: --json (machine output), --verbose, --config <typetorch.json>, --help",
-		"API key: TYPETORCH_API_KEY, OPENCLOUD_API_KEY or ROBLOX_API_KEY (environment or .env here or in a parent folder)",
+		"global options: --json (machine output), --verbose, --config <typetorch.json>, --env-file <path>, --help",
+		"keys (environment, the TYPETORCH_ENV_FILE file, or .env here or above; never copied to child processes):",
+		"  OPENCLOUD_ASSETS_KEY, OPENCLOUD_DEPLOY_KEY, OPENCLOUD_PLACE_KEY per job, else TYPETORCH_API_KEY / OPENCLOUD_API_KEY",
+		"  TYPETORCH_SIGNING_KEY signs deploy messages (typetorch keys init)",
 	].join("\n");
 }
 
@@ -150,7 +180,8 @@ async function main(argv: string[]): Promise<number> {
 		return 0;
 	}
 	setOutputMode({ json: flagBool(args, "json"), verbose: flagBool(args, "verbose") });
-	loadDotEnv(process.cwd());
+	// Settings stay in this object: nothing from an env file is copied into process.env (S-H2).
+	useSettings(new Settings({ startDir: process.cwd(), envFile: flagString(args, "env-file") }));
 	try {
 		await command.run(args);
 		return typeof process.exitCode === "number" ? process.exitCode : 0;
