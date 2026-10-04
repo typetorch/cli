@@ -139,8 +139,10 @@ export function placeKeysScript(keyAssetId: number | undefined): string {
 local result = {}
 local slot = game:GetService("ServerScriptService"):FindFirstChild("TypeTorchKernel")
 if slot then
+	-- Asset ids go back as decimal strings, so no JSON encoder can turn them into 1.2e+14.
+	local keyAssetId = slot:GetAttribute("KeyAssetId")
 	result.kernel = {
-		keyAssetId = slot:GetAttribute("KeyAssetId"),
+		keyAssetId = if typeof(keyAssetId) == "number" then string.format("%d", keyAssetId) else keyAssetId,
 		fallbackPublicKey = slot:GetAttribute("FallbackPublicKey"),
 		version = slot:GetAttribute("KernelVersion"),
 	}

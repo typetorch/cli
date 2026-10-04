@@ -153,6 +153,13 @@ export function keyChecks(facts: KeyFacts): Check[] {
 	return checks;
 }
 
+/** An asset id from the place: a number, or a decimal string (how the Luau script returns it). */
+function assetIdOf(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isSafeInteger(value)) return value;
+	if (typeof value === "string" && /^\d+$/.test(value) && Number.isSafeInteger(Number(value))) return Number(value);
+	return undefined;
+}
+
 /** The newest published kernel deploy recorded in the state dir. */
 export function lastKernelDeploy(stateDir: string): { keyAssetId?: number; fallbackPublicKey?: string; at?: string; placeVersionAfter?: number } | undefined {
 	const file = join(stateDir, "kernel-deploys.jsonl");
@@ -187,6 +194,8 @@ export async function gatherKeyFacts(input: {
 		main: { path: input.paths.main, ...inspectKeyFile(input.paths.main, { role: "main", universeId: c.universeId }) },
 		fallback: { path: input.paths.fallback, ...inspectKeyFile(input.paths.fallback, { role: "fallback", universeId: c.universeId }) },
 	};
+	// Nothing set up yet: keyChecks says so; no network.
+	if (!c.signingPublicKeys?.length && !c.fallbackPublicKey && !c.keyAssetId) return facts;
 	const recorded = lastKernelDeploy(input.stateDir);
 	const fromRecord = (why: string): KeyFacts["place"] =>
 		recorded
@@ -212,7 +221,7 @@ export async function gatherKeyFacts(input: {
 		const kernel = isRecord(result.kernel) ? result.kernel : undefined;
 		facts.place = kernel
 			? {
-					keyAssetId: typeof kernel.keyAssetId === "number" ? kernel.keyAssetId : undefined,
+					keyAssetId: assetIdOf(kernel.keyAssetId),
 					fallbackPublicKey: typeof kernel.fallbackPublicKey === "string" ? kernel.fallbackPublicKey : undefined,
 					source: "the place (Luau Execution)",
 				}

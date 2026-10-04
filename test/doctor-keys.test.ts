@@ -108,7 +108,7 @@ describe("doctor: gathering", () => {
 			if (url.pathname.endsWith("/luau-execution-session-tasks/t1")) {
 				return json({
 					state: "COMPLETE",
-					output: { results: [{ kernel: { keyAssetId: 555, fallbackPublicKey: fallback.publicKey, version: "0.3.0" }, asset: { publicKeys: `${main.publicKey}`, revokedKeys: "", children: 0 } }] },
+					output: { results: [{ kernel: { keyAssetId: "555", fallbackPublicKey: fallback.publicKey, version: "0.3.0" }, asset: { publicKeys: `${main.publicKey}`, revokedKeys: "", children: 0 } }] },
 				});
 			}
 			return new Response("{}", { status: 404 });
@@ -116,10 +116,19 @@ describe("doctor: gathering", () => {
 		const facts = await gatherKeyFacts({ config, paths, stateDir: mkdtempSync(join(tmpdir(), "tt-state-")), assets: new OpenCloud("test-api-key-not-real-0000") });
 		expect(script).toContain("InsertService");
 		expect(script).toContain("local id = 555");
+		expect(script).toContain('string.format("%d", keyAssetId)');
 		expect(facts.place).toEqual({ keyAssetId: 555, fallbackPublicKey: fallback.publicKey, source: "the place (Luau Execution)" });
 		expect(facts.asset).toEqual({ publicKeys: [main.publicKey], revokedKeys: [], children: 0 });
 		expect(keyChecks(facts).every((c) => c.status === "ok")).toBe(true);
 		expect(requests[0]).toBe("GET /assets/v1/assets/555");
+	});
+	test("nothing set up: no network at all", async () => {
+		const { paths } = setup();
+		globalThis.fetch = (async () => {
+			throw new Error("no network expected");
+		}) as unknown as typeof fetch;
+		const facts = await gatherKeyFacts({ config: { universeId: 42, placeId: 2, creator: { groupId: 3 } }, paths, stateDir: mkdtempSync(join(tmpdir(), "tt-state-")), assets: new OpenCloud("test-api-key-not-real-0000") });
+		expect(keyChecks(facts)).toHaveLength(1);
 	});
 	test("without an assets key: the place comes from the last kernel deploy recorded here", async () => {
 		const { paths, config, fallback } = setup();
