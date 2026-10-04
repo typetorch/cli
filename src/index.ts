@@ -13,6 +13,7 @@ import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from
 import { approveCommand, approveFlags, proposalsCommand, proposalsFlags, rejectCommand, rejectFlags } from "./commands/approve";
 import { kernelCommand, kernelFlags } from "./commands/kernel";
 import { keysCommand, keysFlags } from "./commands/keys";
+import { pinCommand, pinFlags } from "./commands/pin";
 import { promoteCommand, promoteFlags } from "./commands/promote";
 import { rollbackCommand, rollbackFlags } from "./commands/rollback";
 import { redact, Settings, useSettings } from "./env";
@@ -151,13 +152,29 @@ const COMMANDS: Record<string, Command> = {
   age), asks y/N, then publishes it like a deploy (signed with both keys on a prod-channel branch). Refuses when
   stdin isn't an interactive terminal.`,
 	},
+	pin: {
+		flags: pinFlags,
+		run: (args) => pinCommand(args),
+		summary: "A/B experiment pins on live servers (signed on prod-channel branches)",
+		usage: `typetorch pin <artifactId|assetId|#seq|commit> --branch <b> (--servers <jobId,...> | --pct <1-99>) [--by <userId>]
+typetorch pin --unpin --branch <b> (--servers <jobId,...> | --all) [<artifact>] [--by <userId>]
+              [--dry-run] [--no-registry] [--key-file <path>] [--fallback-key-file <path>]
+
+  Publishes TypeTorch/pin (kernel 0.2.3): servers of branch <b> whose JobId is listed, or whose bucket is below
+  --pct, run the artifact until the next deploy reaches them, an unpin, or they close. --all (unpin only) = every
+  server. Prod-channel branches: signed with both keys (sig + sigF) when published. Approval follows typetorch.json
+  "approval" like a deploy: a y/N here (pins can't be proposals: servers drop them after 120 s). --by: the userId
+  sent as the pinner (default: the only "owner" in members, else the creator userId); servers accept owners/admins.
+  Many JobIds are split over several messages (1 KiB each), each signed.`,
+	},
 	keys: {
 		flags: keysFlags,
 		run: (args) => keysCommand(args),
-		summary: "keys init [--fallback] / keys rotate: the keys that sign prod-channel deploys",
+		summary: "keys init [--fallback] / keys rotate / keys resign: the keys that sign prod-channel deploys",
 		usage: `typetorch keys init [--key-file <path>]
 typetorch keys init --fallback [--force] [--yes] [--fallback-key-file <path>]
-typetorch keys rotate [--yes] [--key-file <path>]
+typetorch keys rotate [--yes] [--key-file <path>] [--fallback-key-file <path>]
+typetorch keys resign [--key-file <path>] [--fallback-key-file <path>]
 
   Prod-channel deploys are signed with two Ed25519 keys (plans/03): sig (MAIN key) and sigF (FALLBACK key). Seeds
   live in plaintext key files outside every repo and are never printed:
@@ -172,8 +189,10 @@ typetorch keys rotate [--yes] [--key-file <path>]
     --force        replace the fallback pair (a leaked one): the old public key is added to the key asset's
                    RevokedKeys first, then a new pair is made; then \`typetorch kernel deploy\`
   rotate           a new main pair (a lost or leaked main key): the key asset gets a new version trusting only the new
-                   key and revoking the old one, the key file is replaced, and TypeTorch/rekey tells servers to re-read
-                   the key asset. No restart.
+                   key and revoking the old one, the key file is replaced, TypeTorch/rekey tells servers to re-read
+                   the key asset, then every prod-channel branch's live head is re-signed (keys resign). No restart.
+  resign           republish each prod-channel branch's live head as a fresh signed message: same artifact and asset,
+                   a new seq, r = "resign" (servers update the head, no swap). Follows the approval policy.
   --yes            skip the y/N (rotate, init --fallback --force)
   \`typetorch doctor\` checks both key files against typetorch.json, the key asset and the place.`,
 	},
