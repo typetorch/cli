@@ -738,7 +738,8 @@ async function kernelRestore(args: ParsedArgs) {
 			warn(`could not read the place's current version (asset:read): ${(error as Error).message}`);
 		}
 	}
-	warn(`this publishes ${basename(path)} as the new live version of place ${placeId}: everything published after it (Studio work, other kernel deploys) leaves the live place (it stays in version history)`);
+	const since = named && latest !== undefined && latest > named.version ? ` (versions v${named.version + 1}..v${latest} were saved after the version this file comes from)` : "";
+	warn(`this publishes ${basename(path)} as the new live version of place ${placeId}: everything published after it (Studio work, other kernel deploys) leaves the live place (it stays in version history)${since}`);
 	if (dryRun || !oc) {
 		if (isJson()) return emitJson({ dryRun: true, file: path, bytes: bytes.length, sha256: sha, placeId, latest: latest ?? null, kernel: summary.kernel });
 		info(bold("dry run: nothing published"));
