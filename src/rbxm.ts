@@ -266,74 +266,289 @@ class Writer {
 	}
 }
 
-/** An AttributesSerialize blob of string attributes (type 0x02), sorted by name. */
-export function writeStringAttributes(attributes: Record<string, string>): Uint8Array {
+/** Attribute values the writers encode: strings (0x02), booleans (0x03) and numbers as float64 (0x06). */
+export type AttributeValue = string | number | boolean;
+
+function writeAttributeValue(w: Writer, name: string, value: AttributeValue) {
+	if (typeof value === "string") {
+		w.u8(0x02);
+		w.string(value);
+	} else if (typeof value === "boolean") {
+		w.u8(0x03);
+		w.u8(value ? 1 : 0);
+	} else {
+		if (!Number.isFinite(value)) throw new RbxmError(`attribute ${name}: ${value} is not a finite number`);
+		const data = new Uint8Array(8);
+		new DataView(data.buffer).setFloat64(0, value, true);
+		w.u8(0x06);
+		w.bytes(data);
+	}
+}
+
+/** An AttributesSerialize blob (u32 count, then name, type byte and value per attribute), sorted by name. */
+export function writeAttributes(attributes: Record<string, AttributeValue>): Uint8Array {
 	const w = new Writer();
 	const names = Object.keys(attributes).sort();
 	w.u32(names.length);
 	for (const name of names) {
 		w.string(name);
-		w.u8(0x02);
-		w.string(attributes[name]);
+		writeAttributeValue(w, name, attributes[name]);
 	}
 	return w.done();
 }
 
+/** An AttributesSerialize blob of string attributes (type 0x02), sorted by name. */
+export function writeStringAttributes(attributes: Record<string, string>): Uint8Array {
+	return writeAttributes(attributes);
+}
+
+/** One instance for `writeRbxm`: `parent` is the index of its parent in the list, or -1 for a root. */
+export interface RbxmWriteInstance {
+	className: string;
+	name: string;
+	parent: number;
+	attributes?: Record<string, AttributeValue>;
+}
+
+const textBytes = (text: string) => new TextEncoder().encode(text);
+
+function concatBytes(parts: Uint8Array[]): Uint8Array {
+	let size = 0;
+	for (const part of parts) size += part.length;
+	const out = new Uint8Array(size);
+	let offset = 0;
+	for (const part of parts) {
+		out.set(part, offset);
+		offset += part.length;
+	}
+	return out;
+}
+
+function u32Bytes(value: number): Uint8Array {
+	const out = new Uint8Array(4);
+	new DataView(out.buffer).setUint32(0, value >>> 0, true);
+	return out;
+}
+
+export type ChunkCompression = "lz4" | "zstd" | "none";
+
+/** A chunk with its 16-byte header; "lz4" stores one literal-only LZ4 block. */
+function encodeChunk(name: string, data: Uint8Array, compression: ChunkCompression): Uint8Array {
+	const header = new Uint8Array(16);
+	header.set(textBytes(name).subarray(0, 4), 0);
+	const view = new DataView(header.buffer);
+	const stored = compression === "lz4" ? lz4LiteralBlock(data) : compression === "zstd" ? new Uint8Array(Bun.zstdCompressSync(data)) : data;
+	view.setUint32(4, compression === "none" ? 0 : stored.length, true);
+	view.setUint32(8, data.length, true);
+	return concatBytes([header, stored]);
+}
+
+function fileHeader(classes: number, instances: number): Uint8Array {
+	const header = new Uint8Array(32);
+	header.set(textBytes(MAGIC), 0);
+	header.set(SIGNATURE, 8);
+	const view = new DataView(header.buffer);
+	view.setUint32(16, classes, true);
+	view.setUint32(20, instances, true);
+	return header;
+}
+
 /**
- * A binary model (.rbxm) holding ONE instance with a Name and string attributes, nothing else (other properties keep
- * their defaults). Chunks: INST, PROP Name, PROP AttributesSerialize, PRNT (LZ4 literal blocks), END (stored).
- * Used for the key asset (keyasset.ts); readRbxm reads it back.
+ * A binary model (.rbxm) of the given instances, each with a Name and attributes only (other properties keep their
+ * defaults). Chunks: INST per class, PROP Name and PROP AttributesSerialize per class, PRNT, END. Used for the key
+ * asset, the placeholder that reserves a hot asset's id, and tests. `compression` defaults to LZ4 literal blocks.
  */
-export function writeSingleInstanceRbxm(input: { className: string; name: string; attributes: Record<string, string> }): Uint8Array {
-	const chunks: { name: string; data: Uint8Array; compress: boolean }[] = [];
-	const inst = new Writer();
-	inst.u32(0); // class id
-	inst.string(input.className);
-	inst.u8(0); // object format: regular instances
-	inst.u32(1);
-	inst.referents([0]);
-	chunks.push({ name: "INST", data: inst.done(), compress: true });
-	const name = new Writer();
-	name.u32(0);
-	name.string("Name");
-	name.u8(0x01); // String
-	name.string(input.name);
-	chunks.push({ name: "PROP", data: name.done(), compress: true });
-	const attrs = new Writer();
-	attrs.u32(0);
-	attrs.string("AttributesSerialize");
-	attrs.u8(0x01); // String (binary)
-	const blob = writeStringAttributes(input.attributes);
-	attrs.u32(blob.length);
-	attrs.bytes(blob);
-	chunks.push({ name: "PROP", data: attrs.done(), compress: true });
+export function writeRbxm(instances: RbxmWriteInstance[], options: { compression?: ChunkCompression } = {}): Uint8Array {
+	const compression = options.compression ?? "lz4";
+	const classes: { className: string; members: number[] }[] = [];
+	for (const [index, instance] of instances.entries()) {
+		if (instance.parent !== -1 && (instance.parent < 0 || instance.parent >= instances.length || instance.parent === index)) {
+			throw new RbxmError(`instance ${index} (${instance.name}) has no valid parent (${instance.parent})`);
+		}
+		let owner = classes.find((c) => c.className === instance.className);
+		if (!owner) {
+			owner = { className: instance.className, members: [] };
+			classes.push(owner);
+		}
+		owner.members.push(index);
+	}
+	const chunks: Uint8Array[] = [];
+	for (const [classId, owner] of classes.entries()) {
+		const inst = new Writer();
+		inst.u32(classId);
+		inst.string(owner.className);
+		inst.u8(0); // object format: regular instances
+		inst.u32(owner.members.length);
+		inst.referents(owner.members);
+		chunks.push(encodeChunk("INST", inst.done(), compression));
+	}
+	for (const [classId, owner] of classes.entries()) {
+		const name = new Writer();
+		name.u32(classId);
+		name.string("Name");
+		name.u8(0x01); // String
+		for (const member of owner.members) name.string(instances[member].name);
+		chunks.push(encodeChunk("PROP", name.done(), compression));
+		const attrs = new Writer();
+		attrs.u32(classId);
+		attrs.string("AttributesSerialize");
+		attrs.u8(0x01); // String (binary)
+		for (const member of owner.members) {
+			const own = instances[member].attributes;
+			const blob = own && Object.keys(own).length > 0 ? writeAttributes(own) : new Uint8Array(0);
+			attrs.u32(blob.length);
+			attrs.bytes(blob);
+		}
+		chunks.push(encodeChunk("PROP", attrs.done(), compression));
+	}
 	const prnt = new Writer();
 	prnt.u8(0); // version
-	prnt.u32(1);
-	prnt.referents([0]);
-	prnt.referents([-1]);
-	chunks.push({ name: "PRNT", data: prnt.done(), compress: true });
-	chunks.push({ name: "END", data: new TextEncoder().encode("</roblox>"), compress: false });
+	prnt.u32(instances.length);
+	prnt.referents(instances.map((_, index) => index));
+	prnt.referents(instances.map((instance) => instance.parent));
+	chunks.push(encodeChunk("PRNT", prnt.done(), compression));
+	chunks.push(encodeChunk("END", textBytes("</roblox>"), "none"));
+	return concatBytes([fileHeader(classes.length, instances.length), ...chunks]);
+}
 
-	const file = new Writer();
-	file.bytes(new TextEncoder().encode(MAGIC));
-	file.bytes(SIGNATURE);
-	file.u8(0); // version (u16)
-	file.u8(0);
-	file.u32(1); // class count
-	file.u32(1); // instance count
-	file.bytes(new Uint8Array(8)); // reserved
-	for (const chunk of chunks) {
-		const nameBytes = new Uint8Array(4);
-		nameBytes.set(new TextEncoder().encode(chunk.name));
-		file.bytes(nameBytes);
-		const stored = chunk.compress ? lz4LiteralBlock(chunk.data) : chunk.data;
-		file.u32(chunk.compress ? stored.length : 0);
-		file.u32(chunk.data.length);
-		file.u32(0); // reserved
-		file.bytes(stored);
+/**
+ * A binary model (.rbxm) holding ONE instance with a Name and attributes, nothing else (other properties keep their
+ * defaults). Chunks: INST, PROP Name, PROP AttributesSerialize, PRNT (LZ4 literal blocks), END (stored).
+ * Used for the key asset (keyasset.ts); readRbxm reads it back.
+ */
+export function writeSingleInstanceRbxm(input: { className: string; name: string; attributes: Record<string, AttributeValue> }): Uint8Array {
+	return writeRbxm([{ className: input.className, name: input.name, parent: -1, attributes: input.attributes }]);
+}
+
+// Editing ------------------------------------------------------------------------------------------------------------
+
+interface RawChunk {
+	name: string;
+	/** Byte range of the chunk (header + payload) in the file. */
+	start: number;
+	end: number;
+	compressedLength: number;
+	length: number;
+	payload: Uint8Array;
+}
+
+function rawChunks(bytes: Uint8Array): { chunks: RawChunk[]; tail: number } {
+	const header = new Reader(bytes);
+	if (new TextDecoder().decode(header.take(8)) !== MAGIC || !startsWith(header.take(6), SIGNATURE)) {
+		throw new RbxmError("not a binary Roblox model (.rbxm)");
 	}
-	return file.done();
+	header.take(18); // version, class count, instance count, reserved
+	const chunks: RawChunk[] = [];
+	while (header.offset < bytes.length) {
+		const start = header.offset;
+		const name = new TextDecoder().decode(header.take(4)).replace(/\0+$/, "");
+		const compressedLength = header.u32();
+		const length = header.u32();
+		header.u32(); // reserved
+		const payload = header.take(compressedLength === 0 ? length : compressedLength);
+		chunks.push({ name, start, end: header.offset, compressedLength, length, payload });
+		if (name === "END") break;
+	}
+	return { chunks, tail: header.offset };
+}
+
+function indexOfBytes(haystack: Uint8Array, needle: Uint8Array): number {
+	outer: for (let i = 0; i + needle.length <= haystack.length; i++) {
+		for (let j = 0; j < needle.length; j++) if (haystack[i + j] !== needle[j]) continue outer;
+		return i;
+	}
+	return -1;
+}
+
+/** Appends attributes to an AttributesSerialize blob; refuses a name the blob already holds. */
+function addAttributes(blob: Uint8Array, attributes: Record<string, AttributeValue>): Uint8Array {
+	const count = blob.length >= 4 ? new DataView(blob.buffer, blob.byteOffset, blob.byteLength).getUint32(0, true) : 0;
+	const rest = blob.length >= 4 ? blob.subarray(4) : new Uint8Array(0);
+	for (const name of Object.keys(attributes)) {
+		const encoded = textBytes(name);
+		if (indexOfBytes(rest, concatBytes([u32Bytes(encoded.length), encoded])) !== -1) {
+			throw new RbxmError(`the root already has a "${name}" attribute`);
+		}
+	}
+	const added = writeAttributes(attributes);
+	return concatBytes([u32Bytes(count + Object.keys(attributes).length), rest, added.subarray(4)]);
+}
+
+/**
+ * Adds attributes to the ONE root instance of a binary model and leaves everything else byte for byte: only the root
+ * class's PROP AttributesSerialize chunk is rewritten (as an LZ4 literal block), or added when the class has none.
+ * Used to stamp TypeTorchAssetId / TypeTorchAssetHash onto a hot asset's export before the upload. Refuses a model
+ * with more than one root, and an attribute name the root already has.
+ */
+export function setRootAttributes(bytes: Uint8Array, attributes: Record<string, AttributeValue>): Uint8Array {
+	const { chunks, tail } = rawChunks(bytes);
+	const classes = new Map<number, number[]>();
+	const parents = new Map<number, number>();
+	const props: { chunk: RawChunk; classId: number; name: string; data: Uint8Array }[] = [];
+	for (const chunk of chunks) {
+		if (chunk.name !== "INST" && chunk.name !== "PRNT" && chunk.name !== "PROP") continue;
+		const data = chunkData(chunk.payload, chunk.compressedLength, chunk.length);
+		const reader = new Reader(data);
+		if (chunk.name === "INST") {
+			const classId = reader.u32();
+			reader.string(); // class name
+			reader.u8(); // object format
+			classes.set(classId, reader.referents(reader.u32()));
+		} else if (chunk.name === "PRNT") {
+			reader.u8(); // version
+			const count = reader.u32();
+			const children = reader.referents(count);
+			const parentRefs = reader.referents(count);
+			for (let i = 0; i < count; i++) parents.set(children[i], parentRefs[i]);
+		} else {
+			const classId = reader.u32();
+			props.push({ chunk, classId, name: reader.string(), data });
+		}
+	}
+	const all = new Set([...classes.values()].flat());
+	const roots = [...all].filter((referent) => {
+		const parent = parents.get(referent) ?? -1;
+		return parent === -1 || !all.has(parent);
+	});
+	if (roots.length !== 1) throw new RbxmError(`expected one root instance, found ${roots.length}`);
+	const root = roots[0];
+	const [classId, members] = [...classes.entries()].find(([, referents]) => referents.includes(root))!;
+	const index = members.indexOf(root);
+
+	const existing = props.find((p) => p.classId === classId && p.name === "AttributesSerialize");
+	const blobs: Uint8Array[] = members.map(() => new Uint8Array(0));
+	if (existing) {
+		const reader = new Reader(existing.data);
+		reader.u32(); // class id
+		reader.string(); // property name
+		const type = reader.u8();
+		if (type !== 0x01) throw new RbxmError(`AttributesSerialize has type ${type}, expected 1 (String)`);
+		for (let i = 0; i < members.length; i++) blobs[i] = reader.take(reader.u32());
+	}
+	blobs[index] = addAttributes(blobs[index], attributes);
+	const head = new Writer();
+	head.u32(classId);
+	head.string("AttributesSerialize");
+	head.u8(0x01);
+	const replacement = encodeChunk("PROP", concatBytes([head.done(), ...blobs.flatMap((blob) => [u32Bytes(blob.length), blob])]), "lz4");
+
+	const out: Uint8Array[] = [bytes.subarray(0, 32)];
+	let placed = false;
+	for (const chunk of chunks) {
+		if (existing && chunk === existing.chunk) {
+			out.push(replacement);
+			placed = true;
+			continue;
+		}
+		if (!existing && !placed && (chunk.name === "PRNT" || chunk.name === "END")) {
+			out.push(replacement);
+			placed = true;
+		}
+		out.push(bytes.subarray(chunk.start, chunk.end));
+	}
+	if (!placed) throw new RbxmError("no PRNT or END chunk to put the attributes before");
+	out.push(bytes.subarray(tail));
+	return concatBytes(out);
 }
 
 /** `Root/Child/Grandchild` for an instance. */
