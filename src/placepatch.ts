@@ -608,6 +608,9 @@ function formatValue(type: number, value: Item | undefined): string | undefined 
 	return `0x${Buffer.from(value).toString("hex")}`;
 }
 
+/** Types whose missing values (in the kernel build) take the place's usual value: ids, not behaviour. */
+const USUAL_VALUE_TYPES = new Set([0x1b, 0x1c, 0x1f]);
+
 /** Types a missing property may be zero-filled with (zero = the engine default for these). */
 const ZERO_FILL_TYPES = new Set([0x01, 0x02, 0x03, 0x04, 0x05, 0x12, 0x1b, 0x21, 0x22]);
 
@@ -866,10 +869,14 @@ export function patchPlace(input: PatchInput): { bytes: Uint8Array; report: Patc
 			throw new PlacePatchError(`${plan.name}.${name}: the kernel build has Content external data; use --engine lune`);
 		}
 		if (fromKernel && !kernelValues) {
-			// The class's usual value (at least half of the place's instances share it), else fresh UniqueIds, else zero.
-			const usual = placeValues?.kind === "bytes" ? usualValue(placeValues.items) : undefined;
+			// Zero/empty is the engine default for what the kernel build leaves out (Disabled false, RunContext Legacy,
+			// no Tags, no attributes, no Capabilities). Only id-like values take the class's usual value (at least half
+			// of the place's instances share it): SourceAssetId (-1), HistoryId (nil), a SharedString index. A UniqueId
+			// without a usual value gets fresh ids; a SharedString without one is refused (index 0 is some other string).
+			const usual = USUAL_VALUE_TYPES.has(type) && placeValues?.kind === "bytes" ? usualValue(placeValues.items) : undefined;
 			if (usual) fallbackKernel = usual;
 			else if (type === TYPE.UniqueId) freshIds = true;
+			else if (type === TYPE.SharedString) throw new PlacePatchError(`${plan.name}.${name} (SharedString) has no value for the kernel's instances; use --engine lune`);
 			else fallbackKernel = zeroValue(type);
 			const n = plan.members.filter((m) => m.from === "kernel").length;
 			report.filled.push(`${plan.name}.${name}: ${freshIds ? "fresh ids" : formatValue(type, fallbackKernel)} for ${n} new instance(s) (not in the kernel build)`);

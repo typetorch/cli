@@ -509,6 +509,8 @@ async function patchFlow(args: ParsedArgs, prepared: PreparedKernel, engine: "sp
 		info("");
 		for (const line of summaryLines({ where, base, backup, before, engine, report, lunePatch, newKernel: { version: identity.version, hash: identity.hash, commit: identity.commit }, ts, lune: luneResult, output })) info(`  ${line}`);
 		if (report?.filled.length) info(dim(`  filled   ${report.filled.length} value(s) the kernel build doesn't set (UniqueId, SourceAssetId, Tags...): see ${output.path.replace(/\.rbxl$/, ".json")}`));
+		// A property only the kernel build has is now written explicitly (zero) for the game's own instances too.
+		for (const line of report?.filled.filter((f) => f.includes("existing instance")) ?? []) warn(`game instances get an explicit default: ${line}`);
 		info("");
 	}
 	if (problems.length > 0) {
