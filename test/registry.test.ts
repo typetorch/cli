@@ -210,3 +210,22 @@ describe("deploy entries and messages", () => {
 		expect(() => checkChannelGuard({ branch: "dev", branchChannel: "dev", artifactChannel: "dev", dirty: true, force: false })).not.toThrow();
 	});
 });
+
+describe("deployments table extras", () => {
+	test("relative age only for the last day", async () => {
+		const { ago } = await import("../src/deployments");
+		const now = Date.parse("2026-10-05T18:00:00Z");
+		expect(ago("2026-10-05T17:59:30Z", now)).toBe("just now");
+		expect(ago("2026-10-05T17:48:00Z", now)).toBe("12m ago");
+		expect(ago("2026-10-05T13:00:00Z", now)).toBe("5h ago");
+		expect(ago("2026-10-03T18:00:00Z", now)).toBe("");
+		expect(ago("not a date", now)).toBe("");
+	});
+	test("table columns line up even with colour codes", async () => {
+		const { table, visibleLength } = await import("../src/log");
+		const text = table(["a", "b"], [["\x1b[32mprod\x1b[0m", "x"], ["dev", "y"]]);
+		const [, first, second] = text.split("\n");
+		expect(visibleLength(first!).toString()).toBe(visibleLength(second!).toString());
+		expect(first!.indexOf("x") - "\x1b[32m\x1b[0m".length).toBe(second!.indexOf("y"));
+	});
+});

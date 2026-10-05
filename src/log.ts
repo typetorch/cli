@@ -119,11 +119,17 @@ export class Stopwatch {
 }
 
 /** Left-aligned text table; the last column is not padded. */
+/** A string's width on screen: ANSI colour codes take no room. */
+export function visibleLength(text: string): number {
+	return text.replace(/[[0-9;]*m/g, "").length;
+}
+
 export function table(header: string[], rows: string[][]): string {
-	const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => (r[i] ?? "").length)));
+	const widths = header.map((h, i) => Math.max(visibleLength(h), ...rows.map((r) => visibleLength(r[i] ?? ""))));
+	const pad = (cell: string, width: number) => cell + " ".repeat(Math.max(0, width - visibleLength(cell)));
 	const line = (cells: string[]) =>
 		cells
-			.map((cell, i) => (i === cells.length - 1 ? cell : (cell ?? "").padEnd(widths[i])))
+			.map((cell, i) => (i === cells.length - 1 ? cell : pad(cell ?? "", widths[i])))
 			.join("  ")
 			.trimEnd();
 	return [line(header), ...rows.map(line)].join("\n");

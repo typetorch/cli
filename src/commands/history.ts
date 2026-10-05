@@ -8,7 +8,12 @@ import { openCloud, project, readHistory, registryApi } from "./common.ts";
 export const deploymentsFlags = { branch: "string", limit: "string" } as const;
 
 function sourceNote(unavailable: string | undefined): string {
-	return unavailable ? `registry not read (${unavailable.split("\n")[0].slice(0, 160)}); local log only` : "registry + local log";
+	if (!unavailable) return "registry + local log";
+	// The usual cause: the configs API needs universe:read, which API keys can't get.
+	if (/universe:read|Scope not authorized/.test(unavailable)) return "local log only (the registry needs universe:read, which API keys can't get)";
+	const first = unavailable.split("\n")[0];
+	const short = first.length <= 120 ? first : `${first.slice(0, 120).replace(/\s+\S*$/, "")}...`;
+	return `registry not read (${short}); local log only`;
 }
 
 export async function deploymentsCommand(args: ParsedArgs) {
@@ -38,7 +43,7 @@ export async function deploymentsCommand(args: ParsedArgs) {
 		info(`no deployments${branch ? ` on ${branch}` : ""} yet (${sourceNote(history.unavailable)})`);
 		return;
 	}
-	info(formatDeploymentsTable(rows, history.heads));
+	info(formatDeploymentsTable([...rows].reverse(), history.heads)); // newest first (--json keeps oldest first)
 	info(dim(`* = live head of its branch; # = deploy number (seq); times UTC; ${sourceNote(history.unavailable)}`));
 	for (const upload of pending) {
 		info(

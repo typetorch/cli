@@ -10,7 +10,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { TestSummary } from "./cloudtest.ts";
-import { table } from "./log.ts";
+import { dim, green, table } from "./log.ts";
 import { parseArtifactId, type BuildSources, type Channel } from "./naming.ts";
 import type { RegistryDeployment, RegistryValue } from "./registry.ts";
 
@@ -279,8 +279,19 @@ function time(iso: string): string {
 	return iso ? iso.replace("T", " ").slice(0, 19) : "";
 }
 
+/** "just now", "12m ago", "5h ago" for the last day; "" for older or unknown times. */
+export function ago(iso: string, now = Date.now()): string {
+	const at = Date.parse(iso);
+	if (!Number.isFinite(at)) return "";
+	const seconds = Math.max(0, Math.round((now - at) / 1000));
+	if (seconds < 60) return "just now";
+	if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+	if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ago`;
+	return "";
+}
+
 /** The `typetorch deployments` table. `*` marks each branch's live head. */
-export function formatDeploymentsTable(rows: DeploymentRow[], heads: Map<string, LiveHead>): string {
+export function formatDeploymentsTable(rows: DeploymentRow[], heads: Map<string, LiveHead>, now = Date.now()): string {
 	const body = rows.map((d) => {
 		const live = heads.get(d.branch);
 		const isLive = live !== undefined && live.seq === d.seq && live.assetId === d.assetId;
@@ -289,9 +300,9 @@ export function formatDeploymentsTable(rows: DeploymentRow[], heads: Map<string,
 		return [
 			isLive ? "*" : " ",
 			`#${d.seq}`,
-			time(d.at),
-			d.channel ?? "",
-			git,
+			ago(d.at, now) ? `${time(d.at)} ${dim(`(${ago(d.at, now)})`)}` : time(d.at),
+			d.channel === "prod" ? green(d.channel) : (d.channel ?? ""),
+			d.channel === "prod" ? `${green(d.branch)}${git.slice(d.branch.length)}` : git,
 			d.artifactId,
 			String(d.assetId),
 			d.source === "local" ? `${action} [local]` : action,
