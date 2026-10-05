@@ -17,6 +17,7 @@ import { kernelCommand, kernelFlags } from "./commands/kernel.ts";
 import { keysCommand, keysFlags } from "./commands/keys.ts";
 import { pinCommand, pinFlags } from "./commands/pin.ts";
 import { promoteCommand, promoteFlags } from "./commands/promote.ts";
+import { REMOTE_CLAUDE_USAGE, remoteClaudeCommand } from "./commands/remote-claude.ts";
 import { rollbackCommand, rollbackFlags } from "./commands/rollback.ts";
 import { redact, Settings, useSettings } from "./env.ts";
 import { red, setOutputMode } from "./log.ts";
@@ -29,6 +30,8 @@ interface Command {
 	run: (args: ParsedArgs) => Promise<void>;
 	usage: string;
 	summary: string;
+	/** Takes the arguments as they are (no option parsing, --help included) and returns the exit code. */
+	raw?: (argv: string[]) => Promise<number>;
 }
 
 const COMMANDS: Record<string, Command> = {
@@ -241,6 +244,13 @@ typetorch assets list
   list    the lockfile
   Scopes (the assets key): asset:read, asset:write, universe.place.luau-execution-session:read and :write.`,
 	},
+	"remote-claude": {
+		flags: {},
+		run: async () => {},
+		raw: (argv) => remoteClaudeCommand(argv),
+		summary: "prompt Claude Code on this machine from the in-game DEV > Claude tab (runs @typetorch/dev-server)",
+		usage: REMOTE_CLAUDE_USAGE,
+	},
 	doctor: {
 		flags: doctorFlags,
 		run: doctorCommand,
@@ -281,6 +291,10 @@ async function main(argv: string[]): Promise<number> {
 		console.error(red(`unknown command "${name}"`));
 		console.error(help());
 		return 2;
+	}
+	if (command.raw) {
+		useSettings(new Settings({ startDir: process.cwd() }));
+		return command.raw(rest);
 	}
 	let args: ParsedArgs;
 	try {

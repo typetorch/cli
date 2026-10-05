@@ -48,6 +48,26 @@ r = node([bin, "help", "deploy"]);
 check("typetorch help deploy", r.code === 0 && r.out.includes("typetorch deploy"), `exit ${r.code}`);
 r = node([bin, "no-such-command"]);
 check("unknown command exits 2", r.code === 2 && r.err.includes("unknown command"), `exit ${r.code}`);
+// remote-claude runs @typetorch/dev-server's bin with the same arguments (a fake one here) and returns its exit code.
+{
+	const game = mkdtempSync(join(tmpdir(), "tt-smoke-rc-"));
+	try {
+		const pkgDir = join(game, "node_modules", "@typetorch", "dev-server");
+		mkdirSync(join(pkgDir, "dist"), { recursive: true });
+		writeFileSync(join(pkgDir, "package.json"), JSON.stringify({ name: "@typetorch/dev-server", bin: { "typetorch-dev-server": "dist/index.js" } }));
+		writeFileSync(join(pkgDir, "dist", "index.js"), "console.log(JSON.stringify(process.argv.slice(2))); process.exit(7);\n");
+		// (The env file exists: Node itself exits 9 with "<file>: not found" for an --env-file argument naming a missing file,
+		// even after the script name.)
+		writeFileSync(join(game, "a b.env"), "");
+		const args = ["--users", "1,2", "--env-file", "a b.env", "--help"];
+		r = node([bin, "remote-claude", ...args], { cwd: game });
+		check("remote-claude: runs the installed dev-server with the same arguments", r.code === 7 && r.out.trim() === JSON.stringify(["remote-claude", ...args]), `exit ${r.code}: ${r.out.trim()}`);
+		r = node([bin, "remote-claude", "--users", "1"], { cwd: game, env: { ...process.env, TYPETORCH_DEV_SERVER: join(game, "missing.js") } });
+		check("remote-claude: not installed -> a clear error, exit 1", r.code === 1 && r.err.includes("@typetorch/dev-server is not installed"), `exit ${r.code}`);
+	} finally {
+		rmSync(game, { recursive: true, force: true });
+	}
+}
 
 // 2. runtime.ts as compiled.
 const rt = await import(pathToFileURL(join(root, "dist", "runtime.js")).href);

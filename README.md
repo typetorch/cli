@@ -173,10 +173,13 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch reject <id> [--reason]` / `typetorch proposals [--all]` | drop a proposal / list them |
 | `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n>]` | hot assets: export the instances marked `TypeTorchAsset` from the place's latest published version, upload new and changed ones, write `typetorch.assets.lock.json`; see "Hot assets" |
 | `typetorch assets status` / `typetorch assets list` | export + diff without uploading / the lockfile |
-| `typetorch doctor` | checks bun, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), and probes each key's scopes with harmless calls |
+| `typetorch remote-claude --users <ids> [...]` | runs `typetorch-dev-server remote-claude` ([`@typetorch/dev-server`](https://github.com/typetorch/dev-server)) with the same arguments in this terminal, and exits with its code: devs prompt Claude Code on this machine from the in-game DEV > Claude tab (dev-channel branches only). Found in `TYPETORCH_DEV_SERVER` (an entry), `node_modules/@typetorch/dev-server` in the game repo or a parent, next to this CLI (`npm i -g @typetorch/dev-server`; with npx: `npx -p @typetorch/cli -p @typetorch/dev-server typetorch remote-claude ...`), or a sibling `../dev-server` checkout; else a clear error. It gets the real environment (the dev-server reads the key, `--env-file` / `TYPETORCH_ENV_FILE` and `.env` itself) |
+| `typetorch doctor` | checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), and probes each key's scopes with harmless calls |
 
 Every command takes `--json` (one JSON document on stdout; human lines go to stderr), `--verbose`, `--config <path>`
-and `--env-file <path>`.
+and `--env-file <path>` (`remote-claude` passes everything to the dev-server). Under Node, an `--env-file` naming a
+missing file is reported by Node itself (`node: <file>: not found`, exit 9): Node checks that flag even after the
+script name.
 
 ### Identity
 
