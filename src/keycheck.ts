@@ -5,7 +5,8 @@
  *
  * The key asset's content and the place's attributes are read with one Luau Execution task (the assets key; scopes
  * universe.place.luau-execution-session:read + :write): it loads the key asset the way servers do. Without that, the
- * place falls back to the last kernel deploy recorded in the state dir.
+ * place falls back to the last kernel deploy recorded in the state dir. The same task reports
+ * ServerStorage.TypeTorchDev (kernel 0.3.1's Studio local payload): live servers ignore it, but it bloats the place.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -40,6 +41,8 @@ export interface KeyFacts {
 	asset?: { publicKeys: string[]; revokedKeys: string[]; children?: number } | { error: string };
 	/** The kernel's attributes in the place. */
 	place?: { keyAssetId?: number; fallbackPublicKey?: string; source: string } | { error: string; source: string };
+	/** ServerStorage.TypeTorchDev in the place (Luau Execution only; undefined when the task didn't run). */
+	devFolder?: { present: boolean; payload?: boolean; descendants?: number };
 }
 
 /** Keys are shown by fingerprint, like the kernel's dev menu (first 8 hex of the SHA-256 of the raw key). */
@@ -152,6 +155,17 @@ export function keyChecks(facts: KeyFacts): Check[] {
 				: { name: "place keys", status: "ok", detail: `${place.source}: KeyAssetId ${place.keyAssetId}, FallbackPublicKey ${short(place.fallbackPublicKey!)}` },
 		);
 	}
+	const dev = facts.devFolder;
+	if (dev?.present) {
+		const what = dev.payload ? `a local payload, ${dev.descendants ?? "?"} instances` : `${dev.descendants ?? "?"} instances`;
+		checks.push({
+			name: "place dev folder",
+			status: "warn",
+			detail: `the place holds ServerStorage.TypeTorchDev (${what}): live servers ignore it, but it bloats the place. Delete it in Studio, or republish with \`typetorch kernel deploy\``,
+		});
+	} else if (dev) {
+		checks.push({ name: "place dev folder", status: "ok", detail: "no ServerStorage.TypeTorchDev in the place" });
+	}
 	return checks;
 }
 
@@ -228,6 +242,9 @@ export async function gatherKeyFacts(input: {
 					source: "the place (Luau Execution)",
 				}
 			: { error: "no ServerScriptService.TypeTorchKernel in the place", source: "the place (Luau Execution)" };
+		facts.devFolder = isRecord(result.devFolder)
+			? { present: true, payload: result.devFolder.payload === true, descendants: Number(result.devFolder.descendants) || 0 }
+			: { present: false };
 		if (c.keyAssetId) {
 			facts.asset = isRecord(result.asset)
 				? { publicKeys: parseKeyList(result.asset.publicKeys), revokedKeys: parseKeyList(result.asset.revokedKeys), children: Number(result.asset.children) || 0 }

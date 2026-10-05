@@ -132,11 +132,16 @@ export async function publishRekey(oc: OpenCloud, universeId: number, t = Date.n
 
 /**
  * Luau for a Luau Execution task (doctor): reads the kernel's KeyAssetId / FallbackPublicKey / KernelVersion
- * attributes in the place, and loads the key asset the way servers do. Returns one table.
+ * attributes in the place, and loads the key asset the way servers do. Also reports ServerStorage.TypeTorchDev
+ * (`devFolder`: the Studio local payload of kernel 0.3.1, which a place shouldn't ship). Returns one table.
  */
 export function placeKeysScript(keyAssetId: number | undefined): string {
 	return `
 local result = {}
+local dev = game:GetService("ServerStorage"):FindFirstChild("TypeTorchDev")
+if dev then
+	result.devFolder = { payload = dev:FindFirstChild("Payload") ~= nil, descendants = #dev:GetDescendants() }
+end
 local slot = game:GetService("ServerScriptService"):FindFirstChild("TypeTorchKernel")
 if slot then
 	-- Asset ids go back as decimal strings, so no JSON encoder can turn them into 1.2e+14.

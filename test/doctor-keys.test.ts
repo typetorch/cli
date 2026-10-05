@@ -89,6 +89,14 @@ describe("doctor: signing checks", () => {
 		expect(place({ error: "Luau Execution failed", source: "place" }).status).toBe("warn");
 		expect(place(undefined).status).toBe("warn");
 	});
+	test("place dev folder: ServerStorage.TypeTorchDev in the place warns; absent is ok; not checked adds nothing", () => {
+		const { facts } = setup();
+		const dev = (d: KeyFacts["devFolder"]) => byName(keyChecks(facts({ devFolder: d })))["place dev folder"];
+		expect(dev({ present: true, payload: true, descendants: 120 })).toMatchObject({ status: "warn", detail: expect.stringContaining("a local payload, 120 instances") });
+		expect(dev({ present: true, payload: false, descendants: 0 }).detail).toContain("bloats the place");
+		expect(dev({ present: false })).toMatchObject({ status: "ok" });
+		expect(dev(undefined)).toBeUndefined();
+	});
 });
 
 describe("doctor: gathering", () => {
@@ -117,10 +125,39 @@ describe("doctor: gathering", () => {
 		expect(script).toContain("InsertService");
 		expect(script).toContain("local id = 555");
 		expect(script).toContain('string.format("%d", keyAssetId)');
+		expect(script).toContain('FindFirstChild("TypeTorchDev")');
 		expect(facts.place).toEqual({ keyAssetId: 555, fallbackPublicKey: fallback.publicKey, source: "the place (Luau Execution)" });
 		expect(facts.asset).toEqual({ publicKeys: [main.publicKey], revokedKeys: [], children: 0 });
+		expect(facts.devFolder).toEqual({ present: false });
 		expect(keyChecks(facts).every((c) => c.status === "ok")).toBe(true);
 		expect(requests[0]).toBe("GET /assets/v1/assets/555");
+	});
+	test("the same task reports ServerStorage.TypeTorchDev (Studio local payload) left in the place", async () => {
+		const { paths, config, main, fallback } = setup();
+		globalThis.fetch = (async (input: string | URL | Request) => {
+			const url = new URL(String(input));
+			const json = (body: unknown) => new Response(JSON.stringify(body), { status: 200 });
+			if (url.pathname === "/assets/v1/assets/555") return json({ moderationResult: { moderationState: "Approved" }, creationContext: { creator: { groupId: "3" } } });
+			if (url.pathname.endsWith("/luau-execution-session-tasks")) return json({ path: "universes/42/places/2/versions/7/luau-execution-session-tasks/t1", state: "QUEUED" });
+			if (url.pathname.endsWith("/luau-execution-session-tasks/t1")) {
+				return json({
+					state: "COMPLETE",
+					output: {
+						results: [
+							{
+								kernel: { keyAssetId: "555", fallbackPublicKey: fallback.publicKey },
+								asset: { publicKeys: main.publicKey, revokedKeys: "", children: 0 },
+								devFolder: { payload: true, descendants: 140 },
+							},
+						],
+					},
+				});
+			}
+			return new Response("{}", { status: 404 });
+		}) as typeof fetch;
+		const facts = await gatherKeyFacts({ config, paths, stateDir: mkdtempSync(join(tmpdir(), "tt-state-")), assets: new OpenCloud("test-api-key-not-real-0000") });
+		expect(facts.devFolder).toEqual({ present: true, payload: true, descendants: 140 });
+		expect(byName(keyChecks(facts))["place dev folder"]).toMatchObject({ status: "warn", detail: expect.stringContaining("TypeTorchDev") });
 	});
 	test("nothing set up: no network at all", async () => {
 		const { paths } = setup();

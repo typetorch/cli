@@ -163,7 +163,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch reject <id> [--reason]` / `typetorch proposals [--all]` | drop a proposal / list them |
 | `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n>]` | hot assets: export the instances marked `TypeTorchAsset` from the place's latest published version, upload new and changed ones, write `typetorch.assets.lock.json`; see "Hot assets" |
 | `typetorch assets status` / `typetorch assets list` | export + diff without uploading / the lockfile |
-| `typetorch doctor` | checks bun, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key), and probes each key's scopes with harmless calls |
+| `typetorch doctor` | checks bun, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), and probes each key's scopes with harmless calls |
 
 Every command takes `--json` (one JSON document on stdout; human lines go to stderr), `--verbose`, `--config <path>`
 and `--env-file <path>`.
