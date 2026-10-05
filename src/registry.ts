@@ -11,11 +11,11 @@
  *   POST  {base}/publish    <- { draftHash, message, deploymentStrategy: "Immediate" } -> { configVersion }
  * Scopes: universe:read (reads), universe:write (draft + publish). Values are limited to 10,000 characters.
  */
-import { isRecord, jsonEqual } from "./json";
-import { debug, warn } from "./log";
-import type { BuildSources, Channel } from "./naming";
-import { ApiError, type OpenCloud } from "./opencloud";
-import type { ProjectConfig, Role } from "./config";
+import { isRecord, jsonEqual } from "./json.ts";
+import { debug, warn } from "./log.ts";
+import type { BuildSources, Channel } from "./naming.ts";
+import { ApiError, type OpenCloud } from "./opencloud.ts";
+import type { ProjectConfig, Role } from "./config.ts";
 
 export const REGISTRY_KEY = "TypeTorch";
 export const REPOSITORY = "InExperienceConfig";

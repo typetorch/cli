@@ -8,17 +8,17 @@
  * A prod-channel branch only takes prod-channel artifacts, even with --force ("rebuild for prod"). The arguments may
  * also be given as `promote <artifact> <branch>` when the second one is a known branch and the first one isn't.
  */
-import { flagBool, UsageError, type ParsedArgs } from "../args";
-import { matchDeployment, type UploadRecord } from "../deployments";
-import { gitInfo } from "../git";
-import { Stopwatch } from "../log";
-import { branchChannel, branchNameError, strictest } from "../naming";
-import { assertNoForeignDraft } from "../registry";
-import type { ProposalArtifact } from "../proposals";
-import { releaseExisting } from "./approve";
-import type { Project } from "../config";
-import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback, type History } from "./common";
-import { checkChannelGuard, checkPromoteChannel } from "./deploy";
+import { flagBool, UsageError, type ParsedArgs } from "../args.ts";
+import { matchDeployment, type UploadRecord } from "../deployments.ts";
+import { gitInfo } from "../git.ts";
+import { Stopwatch } from "../log.ts";
+import { branchChannel, branchNameError, strictest } from "../naming.ts";
+import { assertNoForeignDraft } from "../registry.ts";
+import type { ProposalArtifact } from "../proposals.ts";
+import { releaseExisting } from "./approve.ts";
+import type { Project } from "../config.ts";
+import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback, type History } from "./common.ts";
+import { checkChannelGuard, checkPromoteChannel } from "./deploy.ts";
 
 export const promoteFlags = {
 	force: "boolean",

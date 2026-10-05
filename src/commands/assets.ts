@@ -13,7 +13,7 @@
  * list) and universe.place.luau-execution-session:read + :write (the export and resolve tasks). A refused call stops
  * the command with the scope it needs.
  */
-import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args";
+import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
 import {
 	appendAssetLog,
 	ASSETS_LOCK_FILE,
@@ -39,14 +39,14 @@ import {
 	type ExportResult,
 	type HotAssetUpload,
 	type ResolveItem,
-} from "../assets";
-import type { Project } from "../config";
-import { bold, captureJson, debug, dim, emitJson, formatBytes, formatSeconds, info, isJson, seconds, Stopwatch, table, warn } from "../log";
-import { branchChannel, branchNameError } from "../naming";
-import { ApiError, type OpenCloud } from "../opencloud";
-import { ASSETS_SYNC_LOCK, withStateLock } from "../state";
-import { KEY_FILE_FLAGS, openCloud, project, projectStateDir } from "./common";
-import { deployCommand } from "./deploy";
+} from "../assets.ts";
+import type { Project } from "../config.ts";
+import { bold, captureJson, debug, dim, emitJson, formatBytes, formatSeconds, info, isJson, seconds, Stopwatch, table, warn } from "../log.ts";
+import { branchChannel, branchNameError } from "../naming.ts";
+import { ApiError, type OpenCloud } from "../opencloud.ts";
+import { ASSETS_SYNC_LOCK, withStateLock } from "../state.ts";
+import { KEY_FILE_FLAGS, openCloud, project, projectStateDir } from "./common.ts";
+import { deployCommand } from "./deploy.ts";
 
 export const assetsFlags = {
 	"dry-run": "boolean",

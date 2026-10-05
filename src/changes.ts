@@ -9,9 +9,9 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { isRecord } from "./json";
-import { PACKAGES_MANIFEST, SOURCE_NAMES, type BuildSources } from "./naming";
-import { query } from "./proc";
+import { isRecord } from "./json.ts";
+import { PACKAGES_MANIFEST, SOURCE_NAMES, type BuildSources } from "./naming.ts";
+import { query } from "./proc.ts";
 
 export const MAX_PER_SOURCE = 5;
 export const MAX_CHANGE_LINES = 8;

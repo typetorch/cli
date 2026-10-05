@@ -1,9 +1,9 @@
 /** `typetorch config push`: copy typetorch.json's project settings into the registry value. */
-import { flagBool, UsageError, type ParsedArgs } from "../args";
-import { jsonEqual } from "../json";
-import { bold, emitJson, info, isJson } from "../log";
-import { applyProjectConfig, RegistryApi, writeRegistry, type RegistryValue } from "../registry";
-import { openCloud, project } from "./common";
+import { flagBool, UsageError, type ParsedArgs } from "../args.ts";
+import { jsonEqual } from "../json.ts";
+import { bold, emitJson, info, isJson } from "../log.ts";
+import { applyProjectConfig, RegistryApi, writeRegistry, type RegistryValue } from "../registry.ts";
+import { openCloud, project } from "./common.ts";
 
 export const configFlags = { "dry-run": "boolean", force: "boolean" } as const;
 

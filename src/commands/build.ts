@@ -1,12 +1,12 @@
 /** `typetorch build` and `typetorch upload`. */
-import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args";
-import { buildPayload, payloadBytes, PAYLOAD_FILE, readBuiltPayload, type PayloadMeta } from "../build";
-import { appendUpload } from "../deployments";
-import { gitInfo } from "../git";
-import { dim, emitJson, formatBytes, formatSeconds, formatTimings, info, isJson, Stopwatch } from "../log";
-import { branchNameError, formatSources } from "../naming";
-import { fixCensoredName, uploadPayload } from "../upload";
-import { channelFlag, openCloud, project, projectStateDir } from "./common";
+import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
+import { buildPayload, payloadBytes, PAYLOAD_FILE, readBuiltPayload, type PayloadMeta } from "../build.ts";
+import { appendUpload } from "../deployments.ts";
+import { gitInfo } from "../git.ts";
+import { dim, emitJson, formatBytes, formatSeconds, formatTimings, info, isJson, Stopwatch } from "../log.ts";
+import { branchNameError, formatSources } from "../naming.ts";
+import { fixCensoredName, uploadPayload } from "../upload.ts";
+import { channelFlag, openCloud, project, projectStateDir } from "./common.ts";
 
 export const buildFlags = { branch: "string", channel: "string", clean: "boolean" } as const;
 

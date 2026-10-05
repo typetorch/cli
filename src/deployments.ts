@@ -9,9 +9,9 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { table } from "./log";
-import { parseArtifactId, type BuildSources, type Channel } from "./naming";
-import type { RegistryDeployment, RegistryValue } from "./registry";
+import { table } from "./log.ts";
+import { parseArtifactId, type BuildSources, type Channel } from "./naming.ts";
+import type { RegistryDeployment, RegistryValue } from "./registry.ts";
 
 export const LOCAL_LOG = "deployments.jsonl";
 export const UPLOAD_LOG = "uploads.jsonl";

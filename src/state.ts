@@ -12,8 +12,9 @@
 import { closeSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
-import { expandPath, settings, type Settings } from "./env";
-import { debug } from "./log";
+import { expandPath, settings, type Settings } from "./env.ts";
+import { debug } from "./log.ts";
+import { sleep } from "./runtime.ts";
 
 export const STATE_DIR_VAR = "TYPETORCH_STATE_DIR";
 export const LOCK_FILE = "deploy.lock";
@@ -69,7 +70,7 @@ export async function withStateLock<T>(
 			if (Date.now() - started > waitMs) {
 				throw new LockError(`another ${options.file ? "run" : "deploy"} holds ${file} (${holder.slice(0, 200)}); wait for it, or delete the file if that run is gone`);
 			}
-			await Bun.sleep(250);
+			await sleep(250);
 		}
 	}
 	try {

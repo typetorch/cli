@@ -10,12 +10,12 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ProjectConfig } from "./config";
-import { parseKeyList, placeKeysScript } from "./keyasset";
-import { inspectKeyFile, type KeyFileInfo, type KeyRole } from "./keyfiles";
-import { isRecord } from "./json";
-import { keyFingerprint } from "./signing";
-import type { OpenCloud } from "./opencloud";
+import type { ProjectConfig } from "./config.ts";
+import { parseKeyList, placeKeysScript } from "./keyasset.ts";
+import { inspectKeyFile, type KeyFileInfo, type KeyRole } from "./keyfiles.ts";
+import { isRecord } from "./json.ts";
+import { keyFingerprint } from "./signing.ts";
+import type { OpenCloud } from "./opencloud.ts";
 
 export type Status = "ok" | "warn" | "fail";
 export interface Check {

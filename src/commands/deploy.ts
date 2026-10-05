@@ -6,17 +6,17 @@
  * is uploaded. A prod-channel deploy that will be published here loads both signing keys before the upload, so a
  * missing key fails before anything leaves the machine.
  */
-import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args";
-import { assertNoIdCollision, buildPayload, payloadBytes, readBuiltPayload, type PayloadMeta } from "../build";
-import { appendUpload } from "../deployments";
-import { gitInfo } from "../git";
-import { bold, dim, emitJson, formatBytes, formatSeconds, formatTimings, info, isJson, Stopwatch, warn } from "../log";
-import { branchChannel, branchNameError, formatSources, strictest, type Channel } from "../naming";
-import { DEPLOY_TOPIC } from "../opencloud";
-import { assertNoForeignDraft, tryReadRegistry, type RegistrySnapshot } from "../registry";
-import { assetNaming, fixCensoredName, uploadPayload } from "../upload";
-import { finishRelease, modeFor, reportProposal } from "./approve";
-import { describeBuild } from "./build";
+import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
+import { assertNoIdCollision, buildPayload, payloadBytes, readBuiltPayload, type PayloadMeta } from "../build.ts";
+import { appendUpload } from "../deployments.ts";
+import { gitInfo } from "../git.ts";
+import { bold, dim, emitJson, formatBytes, formatSeconds, formatTimings, info, isJson, Stopwatch, warn } from "../log.ts";
+import { branchChannel, branchNameError, formatSources, strictest, type Channel } from "../naming.ts";
+import { DEPLOY_TOPIC } from "../opencloud.ts";
+import { assertNoForeignDraft, tryReadRegistry, type RegistrySnapshot } from "../registry.ts";
+import { assetNaming, fixCensoredName, uploadPayload } from "../upload.ts";
+import { finishRelease, modeFor, reportProposal } from "./approve.ts";
+import { describeBuild } from "./build.ts";
 import {
 	channelFlag,
 	describeSigning,
@@ -30,8 +30,8 @@ import {
 	signingStatus,
 	warnRegistryFallback,
 	withLocal,
-} from "./common";
-import { makeEntry, messageFor, registryMessage } from "./release";
+} from "./common.ts";
+import { makeEntry, messageFor, registryMessage } from "./release.ts";
 
 export const deployFlags = {
 	branch: "string",

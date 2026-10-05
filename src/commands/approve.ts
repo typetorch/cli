@@ -20,15 +20,15 @@
  * itself is enforced by the CLI only; for dev-channel branches (unsigned) anything holding the Open Cloud deploy key can
  * still publish a message (S-C2 stays open for dev servers by design).
  */
-import { flagBool, flagString, UsageError, type ParsedArgs } from "../args";
-import { approvalRequired, type ApprovalPolicy, type Project } from "../config";
-import type { LiveHead } from "../deployments";
-import { settings } from "../env";
-import { gitInfo } from "../git";
-import { interaction, NotInteractiveError, type Interaction } from "../interact";
-import { bold, dim, emitJson, formatTimings, info, isJson, red, Stopwatch, table, yellow } from "../log";
-import { branchChannel, formatSources, strictest, type Channel } from "../naming";
-import { DEPLOY_TOPIC, type OpenCloud } from "../opencloud";
+import { flagBool, flagString, UsageError, type ParsedArgs } from "../args.ts";
+import { approvalRequired, type ApprovalPolicy, type Project } from "../config.ts";
+import type { LiveHead } from "../deployments.ts";
+import { settings } from "../env.ts";
+import { gitInfo } from "../git.ts";
+import { interaction, NotInteractiveError, type Interaction } from "../interact.ts";
+import { bold, dim, emitJson, formatTimings, info, isJson, red, Stopwatch, table, yellow } from "../log.ts";
+import { branchChannel, formatSources, strictest, type Channel } from "../naming.ts";
+import { DEPLOY_TOPIC, type OpenCloud } from "../opencloud.ts";
 import {
 	age,
 	appendProposal,
@@ -41,10 +41,10 @@ import {
 	type ProposalArtifact,
 	type ProposalKind,
 	type ProposalState,
-} from "../proposals";
-import type { RegistryApi } from "../registry";
-import type { KeyRole } from "../keyfiles";
-import type { DualSigner } from "../signing";
+} from "../proposals.ts";
+import type { RegistryApi } from "../registry.ts";
+import type { KeyRole } from "../keyfiles.ts";
+import type { DualSigner } from "../signing.ts";
 import {
 	describeSigning,
 	openCloud,
@@ -57,9 +57,9 @@ import {
 	signingStatus,
 	warnRegistryFallback,
 	type History,
-} from "./common";
-import { checkChannelGuard, checkPromoteChannel } from "./deploy";
-import { makeEntry, messageFor, registryMessage, release, type ReleaseResult } from "./release";
+} from "./common.ts";
+import { checkChannelGuard, checkPromoteChannel } from "./deploy.ts";
+import { makeEntry, messageFor, registryMessage, release, type ReleaseResult } from "./release.ts";
 
 export const PROPOSED_BY_VAR = "TYPETORCH_PROPOSED_BY";
 

@@ -22,9 +22,9 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { isRecord } from "./json";
-import type { OpenCloud } from "./opencloud";
-import { readRbxm, setRootAttributes, writeSingleInstanceRbxm } from "./rbxm";
+import { isRecord } from "./json.ts";
+import type { OpenCloud } from "./opencloud.ts";
+import { readRbxm, setRootAttributes, writeSingleInstanceRbxm } from "./rbxm.ts";
 
 export const ASSETS_LOCK_FILE = "typetorch.assets.lock.json";
 /** Upload log in the state dir. */

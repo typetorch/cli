@@ -1,24 +1,28 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * typetorch: build, upload and hot-swap roblox-ts game code on live Roblox servers.
  * Run inside a game repo (a folder with typetorch.json). See README.md.
+ * Runs under Node (the npm package: dist/index.js) and Bun (development: `bun src/index.ts`).
  */
-import pkg from "../package.json" with { type: "json" };
-import { flagBool, flagString, parseArgs, UsageError, type FlagSpec, type ParsedArgs } from "./args";
-import { assetsCommand, assetsFlags } from "./commands/assets";
-import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands/build";
-import { configCommand, configFlags } from "./commands/config";
-import { deployCommand, deployFlags } from "./commands/deploy";
-import { doctorCommand, doctorFlags } from "./commands/doctor";
-import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history";
-import { approveCommand, approveFlags, proposalsCommand, proposalsFlags, rejectCommand, rejectFlags } from "./commands/approve";
-import { kernelCommand, kernelFlags } from "./commands/kernel";
-import { keysCommand, keysFlags } from "./commands/keys";
-import { pinCommand, pinFlags } from "./commands/pin";
-import { promoteCommand, promoteFlags } from "./commands/promote";
-import { rollbackCommand, rollbackFlags } from "./commands/rollback";
-import { redact, Settings, useSettings } from "./env";
-import { red, setOutputMode } from "./log";
+import { readFileSync } from "node:fs";
+import { flagBool, flagString, parseArgs, UsageError, type FlagSpec, type ParsedArgs } from "./args.ts";
+import { assetsCommand, assetsFlags } from "./commands/assets.ts";
+import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands/build.ts";
+import { configCommand, configFlags } from "./commands/config.ts";
+import { deployCommand, deployFlags } from "./commands/deploy.ts";
+import { doctorCommand, doctorFlags } from "./commands/doctor.ts";
+import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history.ts";
+import { approveCommand, approveFlags, proposalsCommand, proposalsFlags, rejectCommand, rejectFlags } from "./commands/approve.ts";
+import { kernelCommand, kernelFlags } from "./commands/kernel.ts";
+import { keysCommand, keysFlags } from "./commands/keys.ts";
+import { pinCommand, pinFlags } from "./commands/pin.ts";
+import { promoteCommand, promoteFlags } from "./commands/promote.ts";
+import { rollbackCommand, rollbackFlags } from "./commands/rollback.ts";
+import { redact, Settings, useSettings } from "./env.ts";
+import { red, setOutputMode } from "./log.ts";
+
+/** package.json sits one level above both src/ (Bun) and dist/ (Node). */
+const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
 
 interface Command {
 	flags: FlagSpec;

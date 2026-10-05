@@ -21,18 +21,18 @@
  *                           servers booting. Goes through the approval policy like any prod publish.
  */
 import { existsSync, renameSync, rmSync } from "node:fs";
-import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args";
-import { updateProjectConfig, type Project } from "../config";
-import { registerSecret } from "../env";
-import { gitInfo } from "../git";
-import { interaction, NotInteractiveError, type Interaction } from "../interact";
-import { contentFromConfig, createKeyAsset, mergeKeys, publishRekey, REKEY_TOPIC, updateKeyAsset, type KeyAssetContent } from "../keyasset";
-import { assertOutsideRepos, KeyFileError, keyFilePaths, newKeyFile, readKeyFile, writeKeyFile, type KeyRole } from "../keyfiles";
-import { bold, dim, emitJson, info, isJson, Stopwatch, warn } from "../log";
-import { branchChannel, strictest } from "../naming";
-import type { OpenCloud } from "../opencloud";
-import { finishRelease, modeFor, type ReleaseRequest } from "./approve";
-import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common";
+import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
+import { updateProjectConfig, type Project } from "../config.ts";
+import { registerSecret } from "../env.ts";
+import { gitInfo } from "../git.ts";
+import { interaction, NotInteractiveError, type Interaction } from "../interact.ts";
+import { contentFromConfig, createKeyAsset, mergeKeys, publishRekey, REKEY_TOPIC, updateKeyAsset, type KeyAssetContent } from "../keyasset.ts";
+import { assertOutsideRepos, KeyFileError, keyFilePaths, newKeyFile, readKeyFile, writeKeyFile, type KeyRole } from "../keyfiles.ts";
+import { bold, dim, emitJson, info, isJson, Stopwatch, warn } from "../log.ts";
+import { branchChannel, strictest } from "../naming.ts";
+import type { OpenCloud } from "../opencloud.ts";
+import { finishRelease, modeFor, type ReleaseRequest } from "./approve.ts";
+import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common.ts";
 
 export const keysFlags = {
 	fallback: "boolean",

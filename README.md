@@ -12,13 +12,23 @@ Part of TypeTorch: the kernel (`@typetorch/kernel`) is baked into the place and 
 
 ## Install
 
-Needs [Bun](https://bun.sh) 1.3+, git, Rojo 7.7.x and (for `kernel deploy`) Lune, through
-[Rokit](https://github.com/rojo-rbx/rokit) (pin `rojo-rbx/rojo@7.7.0-rc.1` in the game's `rokit.toml`).
+The CLI runs on **Node 20+** (npm, npx) or **Bun 1.3+**; you don't need both to run it.
 
 ```sh
+npm i -g @typetorch/cli        # then: typetorch <command>
+npx @typetorch/cli <command>   # no install
 bun add -d @typetorch/cli      # in the game repo, then: bunx typetorch <command>
 bun src/index.ts <command>     # from a checkout of this repo
 ```
+
+What the commands call:
+- **git**, and **Rojo 7.7.x** (plus **Lune** for `kernel deploy`) through [Rokit](https://github.com/rojo-rbx/rokit):
+  pin `rojo-rbx/rojo@7.7.0-rc.1` in the game's `rokit.toml`.
+- **Bun** for `typetorch build` / `deploy` / `upload`: the game repo is a Bun project and the build runs
+  `bun run build` (or `bun run rbxtsc`) in it. Commands that don't build (`approve`, `promote`, `rollback`,
+  `deployments`, `keys`, `pin`, `assets status`, `doctor`) don't need it.
+- **zstd** for hot assets (`assets sync` / `status`, which read Roblox-serialized exports): Bun, or Node 22.15+.
+  `typetorch doctor` reports the runtime, Bun and zstd.
 
 ### `typetorch` on PATH (from a checkout)
 
@@ -335,9 +345,19 @@ bun test                    # unit tests
 bun run typecheck
 cd test-fixture && bun install && cd ..
 bun test/fixture.e2e.ts     # builds test-fixture/ in a temp git repo; deploy/rollback/promote/kernel only as --dry-run, no keys
+bun run build               # tsc -p tsconfig.build.json: src/*.ts -> dist/*.js (ESM for Node 20+; no Bun API in src)
+bun run smoke               # node scripts/smoke.mjs: the compiled bin and runtime under plain Node
+bun run smoke:pack          # + npm pack: file list, a scan for keys/local paths/user names, npx <tarball> --help
 ```
 
-`bun run compile` builds a single binary (`dist/typetorch`).
+The sources stay TypeScript (`bun src/index.ts` runs them directly). Bun-specific APIs are kept out of `src/`: child
+processes, PATH lookup, Windows `.cmd` scripts (Node won't spawn them directly: an npm shim runs its JS target with
+node; any other `.cmd` goes through cmd.exe with every argument quoted and escaped, and arguments with a double quote
+or a line break are refused), sleep and zstd live in `src/runtime.ts`, on Node's own modules. The build compiles with
+`types: ["node"]`, so a Bun global in `src/` doesn't compile. `prepublishOnly` runs the build, `bun test` and the
+pack smoke test; publishing is done by hand (`npm publish`, 2FA).
+
+`bun run compile` builds a single binary (`release/typetorch`).
 
 ## License
 

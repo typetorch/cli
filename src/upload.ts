@@ -1,9 +1,9 @@
 /** Uploading a payload as a NEW Model asset, named from its git identity, and gating on moderation. */
-import type { PayloadMeta } from "./build";
-import type { ProjectConfig } from "./config";
-import { seconds, warn } from "./log";
-import { assetDescription, assetDisplayName, branchChannel, looksCensored } from "./naming";
-import type { OpenCloud } from "./opencloud";
+import type { PayloadMeta } from "./build.ts";
+import type { ProjectConfig } from "./config.ts";
+import { seconds, warn } from "./log.ts";
+import { assetDescription, assetDisplayName, branchChannel, looksCensored } from "./naming.ts";
+import type { OpenCloud } from "./opencloud.ts";
 
 /** The asset's display name and its minimal, filter-safe description (the notes live in the payload's Notes attribute). */
 export function assetNaming(config: ProjectConfig, meta: PayloadMeta, branch: string) {

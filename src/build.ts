@@ -8,12 +8,12 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
-import type { Project } from "./config";
-import { debugMacrosFor, prodTsconfig, PROD_TSCONFIG, readTsconfig, scriptEndsWithRbxtsc, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "./debug-macros";
-import { settings } from "./env";
-import { gitInfo, isGeneratedPath, porcelainPaths, type GitInfo } from "./git";
-import { isRecord, parseJsonc } from "./json";
-import { debug, Stopwatch, warn } from "./log";
+import type { Project } from "./config.ts";
+import { debugMacrosFor, prodTsconfig, PROD_TSCONFIG, readTsconfig, scriptEndsWithRbxtsc, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "./debug-macros.ts";
+import { settings } from "./env.ts";
+import { gitInfo, isGeneratedPath, porcelainPaths, type GitInfo } from "./git.ts";
+import { isRecord, parseJsonc } from "./json.ts";
+import { debug, Stopwatch, warn } from "./log.ts";
 import {
 	artifactId as makeArtifactId,
 	branchChannel,
@@ -26,13 +26,13 @@ import {
 	type Channel,
 	type EarlierArtifact,
 	PACKAGES_MANIFEST,
-} from "./naming";
-import { query, run } from "./proc";
-import { ASSETS_PAYLOAD_ATTRIBUTE, ASSETS_PAYLOAD_FOLDER, assetsAttribute, readAssetsLock } from "./assets";
-import { checkPayloadContents } from "./rbxm";
-import { payloadNotes, sourceChanges } from "./changes";
-import { liveHeads, readLocalLog } from "./deployments";
-import { stateDir } from "./state";
+} from "./naming.ts";
+import { query, run } from "./proc.ts";
+import { ASSETS_PAYLOAD_ATTRIBUTE, ASSETS_PAYLOAD_FOLDER, assetsAttribute, readAssetsLock } from "./assets.ts";
+import { checkPayloadContents } from "./rbxm.ts";
+import { payloadNotes, sourceChanges } from "./changes.ts";
+import { liveHeads, readLocalLog } from "./deployments.ts";
+import { stateDir } from "./state.ts";
 
 export const KERNEL_API = 1;
 export const BUILD_FILE = "src/shared/build.ts";

@@ -2,9 +2,11 @@
  * Child processes. Output is captured and shown only on failure (or with --verbose), to keep the CLI concise.
  * Every child gets an explicit minimal environment (env.ts `childEnv`): no API keys, nothing loaded
  * from a .env file. `extra` adds the few variables a step needs (never a secret).
+ * node:child_process through runtime.ts (PATH lookup, Windows .cmd scripts), so the same code runs under Bun and Node.
  */
-import { childEnv } from "./env";
-import { debug, isVerbose } from "./log";
+import { childEnv } from "./env.ts";
+import { debug, isVerbose } from "./log.ts";
+import { captureAsync, captureSync } from "./runtime.ts";
 
 export interface RunResult {
 	exitCode: number;
@@ -27,23 +29,7 @@ export class CommandError extends Error {
 /** Runs a command and captures its output. Never throws for a non-zero exit; a missing binary gives exit 127. */
 export async function capture(cmd: string[], cwd: string, extra?: Record<string, string>): Promise<RunResult> {
 	debug(`$ ${cmd.join(" ")}  (in ${cwd})`);
-	let proc;
-	try {
-		proc = Bun.spawn(cmd, {
-			cwd,
-			stdout: "pipe",
-			stderr: "pipe",
-			stdin: "ignore",
-			env: childEnv(extra),
-		});
-	} catch (error) {
-		return { exitCode: 127, stdout: "", stderr: String((error as Error).message ?? error) };
-	}
-	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(proc.stdout).text(),
-		new Response(proc.stderr).text(),
-		proc.exited,
-	]);
+	const { exitCode, stdout, stderr } = await captureAsync(cmd, { cwd, env: childEnv(extra) });
 	if (isVerbose()) {
 		if (stdout.trim()) debug(stdout.trimEnd());
 		if (stderr.trim()) debug(stderr.trimEnd());
@@ -61,10 +47,9 @@ export async function run(cmd: string[], cwd: string, extra?: Record<string, str
 /** Synchronous variant for quick queries (git). Returns trimmed stdout, or undefined on failure. */
 export function query(cmd: string[], cwd: string, trim = true): string | undefined {
 	try {
-		const result = Bun.spawnSync(cmd, { cwd, stdout: "pipe", stderr: "pipe", stdin: "ignore", env: childEnv() });
+		const result = captureSync(cmd, { cwd, env: childEnv() });
 		if (result.exitCode !== 0) return undefined;
-		const text = result.stdout.toString();
-		return trim ? text.trim() : text;
+		return trim ? result.stdout.trim() : result.stdout;
 	} catch {
 		return undefined;
 	}

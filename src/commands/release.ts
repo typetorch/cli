@@ -11,15 +11,15 @@
  * state dir's log (re-read under the lock). When the registry is readable but the write fails, the release ABORTS
  * before the message: a deployment missing from a registry others read would let them reuse its seq.
  */
-import type { Project } from "../config";
-import { appendLocalLog, liveHeads, mergeDeployments, nextSeqFrom, readLocalLog, type LocalDeployment } from "../deployments";
-import { formatSeconds, info, type Stopwatch } from "../log";
-import type { BuildSources, Channel } from "../naming";
-import { DEPLOY_TOPIC, deployMessage, encodeDeployMessage, type DeployMessage, type OpenCloud } from "../opencloud";
-import type { DualSigner } from "../signing";
-import { recordDeployment, RegistryConflictError, writeRegistry, type RegistryApi, type RegistryDeployment } from "../registry";
-import { withStateLock } from "../state";
-import type { History } from "./common";
+import type { Project } from "../config.ts";
+import { appendLocalLog, liveHeads, mergeDeployments, nextSeqFrom, readLocalLog, type LocalDeployment } from "../deployments.ts";
+import { formatSeconds, info, type Stopwatch } from "../log.ts";
+import type { BuildSources, Channel } from "../naming.ts";
+import { DEPLOY_TOPIC, deployMessage, encodeDeployMessage, type DeployMessage, type OpenCloud } from "../opencloud.ts";
+import type { DualSigner } from "../signing.ts";
+import { recordDeployment, RegistryConflictError, writeRegistry, type RegistryApi, type RegistryDeployment } from "../registry.ts";
+import { withStateLock } from "../state.ts";
+import type { History } from "./common.ts";
 
 export interface ReleaseArtifact {
 	artifactId: string;

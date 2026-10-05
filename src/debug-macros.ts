@@ -18,8 +18,8 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { isRecord, parseJsonc } from "./json";
-import type { Channel } from "./naming";
+import { isRecord, parseJsonc } from "./json.ts";
+import type { Channel } from "./naming.ts";
 
 export const DEBUG_TRANSFORM = "rbxts-transform-debug";
 export const STRIP_TRANSFORMER_FILE = ".typetorch/strip-debug-macros.cjs";

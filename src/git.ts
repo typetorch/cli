@@ -1,5 +1,5 @@
 /** Git identity of the working tree: the same values `$git()` compiles in, plus the dirty flag it lacks. */
-import { query } from "./proc";
+import { query } from "./proc.ts";
 
 export interface GitInfo {
 	/** First 7 hex digits of HEAD (same as `$git("Commit")`); "" before the first commit or outside a repo. */

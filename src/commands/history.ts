@@ -1,9 +1,9 @@
 /** `typetorch deployments` and `typetorch branch ls`: registry (when readable) + the local log. */
-import { flagInt, flagString, UsageError, type ParsedArgs } from "../args";
-import { formatDeploymentsTable, unpublishedUploads } from "../deployments";
-import { dim, emitJson, info, isJson, table } from "../log";
-import { branchChannel } from "../naming";
-import { openCloud, project, readHistory, registryApi } from "./common";
+import { flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
+import { formatDeploymentsTable, unpublishedUploads } from "../deployments.ts";
+import { dim, emitJson, info, isJson, table } from "../log.ts";
+import { branchChannel } from "../naming.ts";
+import { openCloud, project, readHistory, registryApi } from "./common.ts";
 
 export const deploymentsFlags = { branch: "string", limit: "string" } as const;
 

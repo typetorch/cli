@@ -10,18 +10,19 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type ParsedArgs, flagString } from "../args";
-import { CONFIG_FILE, findProjectRoot, loadProject, type Project } from "../config";
-import { JOB_KEY_VARS, JOB_SCOPES, settings, type KeyJob } from "../env";
-import { gitInfo } from "../git";
-import { emitJson, green, info, isJson, red, yellow } from "../log";
-import { OpenCloud } from "../opencloud";
-import { capture } from "../proc";
-import { rojoBinary } from "../build";
-import { REPOSITORY } from "../registry";
-import { stateDir } from "../state";
-import { gatherKeyFacts, keyChecks, type Check, type Status } from "../keycheck";
-import { KEY_FILE_FLAGS, signingKeyPaths } from "./common";
+import { type ParsedArgs, flagString } from "../args.ts";
+import { CONFIG_FILE, findProjectRoot, loadProject, type Project } from "../config.ts";
+import { JOB_KEY_VARS, JOB_SCOPES, settings, type KeyJob } from "../env.ts";
+import { gitInfo } from "../git.ts";
+import { emitJson, green, info, isJson, red, yellow } from "../log.ts";
+import { OpenCloud } from "../opencloud.ts";
+import { capture } from "../proc.ts";
+import { hasZstd, isBun, runtimeName } from "../runtime.ts";
+import { rojoBinary } from "../build.ts";
+import { REPOSITORY } from "../registry.ts";
+import { stateDir } from "../state.ts";
+import { gatherKeyFacts, keyChecks, type Check, type Status } from "../keycheck.ts";
+import { KEY_FILE_FLAGS, signingKeyPaths } from "./common.ts";
 
 export const doctorFlags = { ...KEY_FILE_FLAGS } as const;
 
@@ -49,7 +50,9 @@ export async function doctorCommand(args: ParsedArgs) {
 	const checks: Check[] = [];
 	const cwd = process.cwd();
 
-	checks.push({ name: "bun", status: "ok", detail: Bun.version });
+	// The runtime running this CLI (Bun or Node), and zstd (Roblox-serialized hot-asset exports need it).
+	checks.push({ name: "runtime", status: "ok", detail: runtimeName() });
+	if (!hasZstd()) checks.push({ name: "zstd", status: "warn", detail: `${runtimeName()} has no zstd: \`typetorch assets sync/status\` need Node 22.15+ (or Bun)` });
 
 	// Project
 	let proj: Project | undefined;
@@ -71,6 +74,11 @@ export async function doctorCommand(args: ParsedArgs) {
 		}
 	}
 	const base = proj?.root ?? cwd;
+
+	// Bun: game repos are Bun projects, and `typetorch build` runs `bun run build` (or `bun run rbxtsc`) in them.
+	const bunVersion = isBun ? { exitCode: 0, stdout: process.versions.bun ?? "" } : await capture(["bun", "--version"], base);
+	if (bunVersion.exitCode === 0) checks.push({ name: "bun", status: "ok", detail: bunVersion.stdout.trim() });
+	else checks.push({ name: "bun", status: proj ? "fail" : "warn", detail: "not found on PATH: `typetorch build` runs `bun run build` in the game repo (install Bun: https://bun.sh)" });
 
 	// git
 	const gitVersion = await capture(["git", "--version"], base);

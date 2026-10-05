@@ -23,9 +23,9 @@
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { isRecord, setJsonFields } from "./json";
-import { branchNameError, isChannel, type Channel } from "./naming";
-import { isTestVectorKey, publicKeyError, publicKeyListProblems } from "./signing";
+import { isRecord, setJsonFields } from "./json.ts";
+import { branchNameError, isChannel, type Channel } from "./naming.ts";
+import { isTestVectorKey, publicKeyError, publicKeyListProblems } from "./signing.ts";
 
 export const CONFIG_FILE = "typetorch.json";
 export const ROLES = ["owner", "admin", "dev"] as const;

@@ -7,10 +7,10 @@
  * add a version (PATCH /assets/v1/assets/{id}, spike S1b) and then publish the rekey hint (TypeTorch/rekey).
  * Public keys only: nothing here is secret.
  */
-import type { ProjectConfig } from "./config";
-import { readRbxm, writeSingleInstanceRbxm } from "./rbxm";
-import { encodeRekeyMessage, REKEY_TOPIC, type OpenCloud } from "./opencloud";
-import { publicKeyError } from "./signing";
+import type { ProjectConfig } from "./config.ts";
+import { readRbxm, writeSingleInstanceRbxm } from "./rbxm.ts";
+import { encodeRekeyMessage, REKEY_TOPIC, type OpenCloud } from "./opencloud.ts";
+import { publicKeyError } from "./signing.ts";
 
 export const KEY_ASSET_ROOT = "TypeTorchKeys";
 export const KEY_ASSET_NAME = "TypeTorch keys";

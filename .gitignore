@@ -2,6 +2,7 @@
 node_modules/
 .typetorch/
 dist/
+release/
 *.tsbuildinfo
 
 # secrets

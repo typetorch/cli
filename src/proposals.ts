@@ -15,8 +15,8 @@
 import { randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import type { RegistryDeployment } from "./registry";
-import type { BuildSources, Channel } from "./naming";
+import type { RegistryDeployment } from "./registry.ts";
+import type { BuildSources, Channel } from "./naming.ts";
 
 export const PROPOSALS_LOG = "proposals.jsonl";
 export const PROPOSAL_TTL_MS = 24 * 60 * 60 * 1000;

@@ -3,8 +3,11 @@
  * parent: the INST, PROP (Name only) and PRNT chunks. Chunks are LZ4-block or zstd compressed (or stored).
  * Used to check that a payload holds only ModuleScripts (security audit S-L4); nothing else is decoded.
  *
+ * zstd needs Node 22.15+ under Node (runtime.ts); Roblox-serialized exports (hot assets) use it.
+ *
  * Format: https://dom.rojo.space/binary.html
  */
+import { zstdCompress, zstdDecompress, ZstdUnavailableError } from "./runtime.ts";
 
 export interface RbxmInstance {
 	referent: number;
@@ -115,7 +118,13 @@ function startsWith(bytes: Uint8Array, prefix: number[]): boolean {
 function chunkData(compressed: Uint8Array, compressedLength: number, length: number): Uint8Array {
 	if (compressedLength === 0) return compressed;
 	if (startsWith(compressed, ZSTD_MAGIC)) {
-		const out = new Uint8Array(Bun.zstdDecompressSync(compressed));
+		let out: Uint8Array;
+		try {
+			out = zstdDecompress(compressed, length);
+		} catch (error) {
+			if (error instanceof ZstdUnavailableError) throw new RbxmError(`this .rbxm has zstd chunks: ${error.message}`);
+			throw new RbxmError(`zstd chunk is invalid: ${(error as Error).message}`);
+		}
 		if (out.length !== length) throw new RbxmError(`zstd chunk is ${out.length} bytes, expected ${length}`);
 		return out;
 	}
@@ -337,7 +346,7 @@ function encodeChunk(name: string, data: Uint8Array, compression: ChunkCompressi
 	const header = new Uint8Array(16);
 	header.set(textBytes(name).subarray(0, 4), 0);
 	const view = new DataView(header.buffer);
-	const stored = compression === "lz4" ? lz4LiteralBlock(data) : compression === "zstd" ? new Uint8Array(Bun.zstdCompressSync(data)) : data;
+	const stored = compression === "lz4" ? lz4LiteralBlock(data) : compression === "zstd" ? zstdCompress(data) : data;
 	view.setUint32(4, compression === "none" ? 0 : stored.length, true);
 	view.setUint32(8, data.length, true);
 	return concatBytes([header, stored]);

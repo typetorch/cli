@@ -4,15 +4,15 @@
  * the live head. Like every release it follows the approval policy (approve.ts): a person approves it, or it becomes a
  * proposal for `typetorch approve`. A prod-channel branch's message is signed with both keys when it is published.
  */
-import { flagBool, flagString, UsageError, type ParsedArgs } from "../args";
-import { matchDeployment, previousDifferent } from "../deployments";
-import { gitInfo } from "../git";
-import { Stopwatch } from "../log";
-import { branchChannel, branchFromGit, branchNameError, strictest } from "../naming";
-import { assertNoForeignDraft } from "../registry";
-import { releaseExisting } from "./approve";
-import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common";
-import { checkChannelGuard } from "./deploy";
+import { flagBool, flagString, UsageError, type ParsedArgs } from "../args.ts";
+import { matchDeployment, previousDifferent } from "../deployments.ts";
+import { gitInfo } from "../git.ts";
+import { Stopwatch } from "../log.ts";
+import { branchChannel, branchFromGit, branchNameError, strictest } from "../naming.ts";
+import { assertNoForeignDraft } from "../registry.ts";
+import { releaseExisting } from "./approve.ts";
+import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common.ts";
+import { checkChannelGuard } from "./deploy.ts";
 
 export const rollbackFlags = {
 	branch: "string",

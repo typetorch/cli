@@ -16,16 +16,16 @@
  */
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { flagBool, flagString, UsageError, type ParsedArgs } from "../args";
-import type { Project } from "../config";
-import { matchDeployment, type UploadRecord } from "../deployments";
-import { gitInfo } from "../git";
-import { interaction, NotInteractiveError, type Interaction } from "../interact";
-import { bold, emitJson, info, isJson, yellow } from "../log";
-import { branchChannel, branchNameError, strictest, type Channel } from "../naming";
-import { encodePinMessage, PIN_TOPIC, pinMessage, type OpenCloud, type PinMessage } from "../opencloud";
-import { JOB_ID_PATTERN, type DualSigner, type PinFields } from "../signing";
-import { modeFor } from "./approve";
+import { flagBool, flagString, UsageError, type ParsedArgs } from "../args.ts";
+import type { Project } from "../config.ts";
+import { matchDeployment, type UploadRecord } from "../deployments.ts";
+import { gitInfo } from "../git.ts";
+import { interaction, NotInteractiveError, type Interaction } from "../interact.ts";
+import { bold, emitJson, info, isJson, yellow } from "../log.ts";
+import { branchChannel, branchNameError, strictest, type Channel } from "../naming.ts";
+import { encodePinMessage, PIN_TOPIC, pinMessage, type OpenCloud, type PinMessage } from "../opencloud.ts";
+import { JOB_ID_PATTERN, type DualSigner, type PinFields } from "../signing.ts";
+import { modeFor } from "./approve.ts";
 import {
 	describeSigning,
 	KEY_FILE_FLAGS,
@@ -39,8 +39,8 @@ import {
 	signingStatus,
 	warnRegistryFallback,
 	type History,
-} from "./common";
-import { SIGNATURE_PLACEHOLDER } from "./release";
+} from "./common.ts";
+import { SIGNATURE_PLACEHOLDER } from "./release.ts";
 
 export const pinFlags = {
 	branch: "string",

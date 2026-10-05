@@ -3,10 +3,11 @@
  * publish and place publishing. The configs API (the interim registry) is in registry.ts.
  * The API key goes only into the `x-api-key` header; it is never logged.
  */
-import { debug } from "./log";
-import { redact } from "./env";
-import type { Channel } from "./naming";
-import { RESIGN, signDual, signPinDual, type DualSigner, type PinFields } from "./signing";
+import { debug } from "./log.ts";
+import { sleep } from "./runtime.ts";
+import { redact } from "./env.ts";
+import type { Channel } from "./naming.ts";
+import { RESIGN, signDual, signPinDual, type DualSigner, type PinFields } from "./signing.ts";
 
 export const API = "https://apis.roblox.com";
 
@@ -95,14 +96,14 @@ export class OpenCloud {
 				} catch {}
 				debug(`${method} ${path} -> ${response.status} (${Math.round(performance.now() - started)} ms)`);
 				if (retry && attempt < attempts && (response.status === 429 || response.status >= 500)) {
-					await Bun.sleep(500 * 2 ** (attempt - 1));
+					await sleep(500 * 2 ** (attempt - 1));
 					continue;
 				}
 				return { status: response.status, ok: response.ok, body: parsed, text, headers: response.headers };
 			} catch (error) {
 				lastError = error;
 				debug(`${method} ${path} failed: ${error}`);
-				if (attempt < attempts) await Bun.sleep(500 * 2 ** (attempt - 1));
+				if (attempt < attempts) await sleep(500 * 2 ** (attempt - 1));
 			}
 		}
 		throw new Error(redact(`${method} ${path} failed: ${(lastError as Error)?.message ?? lastError}`));
@@ -137,7 +138,7 @@ export class OpenCloud {
 				creationContext: { creator },
 			}),
 		);
-		form.append("fileContent", new Blob([input.bytes], { type: "model/x-rbxm" }), input.fileName);
+		form.append("fileContent", new Blob([input.bytes as Uint8Array<ArrayBuffer>], { type: "model/x-rbxm" }), input.fileName);
 		const created = await this.call("POST", "/assets/v1/assets", { body: form, timeoutMs: 300_000 });
 		const operationId = created?.operationId ?? String(created?.path ?? "").split("/").pop();
 		if (!operationId) throw new Error(`asset create returned no operation: ${JSON.stringify(created)}`);
@@ -151,7 +152,7 @@ export class OpenCloud {
 	async updateModelAsset(input: { assetId: number; bytes: Uint8Array; fileName: string }): Promise<string> {
 		const form = new FormData();
 		form.append("request", JSON.stringify({ assetId: input.assetId }));
-		form.append("fileContent", new Blob([input.bytes], { type: "model/x-rbxm" }), input.fileName);
+		form.append("fileContent", new Blob([input.bytes as Uint8Array<ArrayBuffer>], { type: "model/x-rbxm" }), input.fileName);
 		const patched = await this.call("PATCH", `/assets/v1/assets/${input.assetId}`, { body: form, timeoutMs: 300_000 });
 		const operationId = patched?.operationId ?? String(patched?.path ?? "").split("/").pop();
 		if (!operationId) throw new Error(`asset update returned no operation: ${JSON.stringify(patched)}`);
@@ -168,7 +169,7 @@ export class OpenCloud {
 			if ((performance.now() - started) / 1000 > timeoutSeconds) {
 				throw new Error(`asset operation ${operationId} not done after ${timeoutSeconds} s`);
 			}
-			await Bun.sleep(delay);
+			await sleep(delay);
 			delay = Math.min(delay * 1.5, 5000);
 		}
 	}
@@ -182,7 +183,7 @@ export class OpenCloud {
 			const state: string | undefined = asset?.moderationResult?.moderationState;
 			if (state && state !== "Reviewing") return { state, timedOut: false };
 			if ((performance.now() - started) / 1000 > timeoutSeconds) return { state, timedOut: true };
-			await Bun.sleep(delay);
+			await sleep(delay);
 			delay = Math.min(delay * 1.5, 15_000);
 		}
 	}
@@ -221,7 +222,7 @@ export class OpenCloud {
 		const started = performance.now();
 		while (current?.state === "QUEUED" || current?.state === "PROCESSING") {
 			if ((performance.now() - started) / 1000 > timeoutSeconds + 60) throw new Error(`Luau Execution task ${task?.path} still ${current.state}`);
-			await Bun.sleep(1500);
+			await sleep(1500);
 			current = await this.call("GET", `/cloud/v2/${task.path}`);
 		}
 		return {
@@ -252,7 +253,7 @@ export class OpenCloud {
 			} catch (error) {
 				last = String((error as Error)?.message ?? error);
 			}
-			if (attempt < 3) await Bun.sleep(500 * 2 ** (attempt - 1));
+			if (attempt < 3) await sleep(500 * 2 ** (attempt - 1));
 		}
 		throw new Error(redact(`downloading the task's binary output from ${url.hostname} failed: ${last}`));
 	}

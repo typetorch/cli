@@ -1,6 +1,6 @@
 /** Helpers shared by the commands. */
-import { flagString, UsageError, type ParsedArgs } from "../args";
-import { loadProject, type Project } from "../config";
+import { flagString, UsageError, type ParsedArgs } from "../args.ts";
+import { loadProject, type Project } from "../config.ts";
 import {
 	liveHeads,
 	mergeDeployments,
@@ -10,15 +10,15 @@ import {
 	type LiveHead,
 	type LocalDeployment,
 	type UploadRecord,
-} from "../deployments";
-import { settings, type KeyJob } from "../env";
-import { debug, warn } from "../log";
-import { isChannel, type Channel } from "../naming";
-import { OpenCloud } from "../opencloud";
-import { REGISTRY_FALLBACK_NOTE, RegistryApi, tryReadRegistry, type RegistrySnapshot } from "../registry";
-import { stateDir } from "../state";
-import { keyFilePaths, loadSigner, type KeyRole } from "../keyfiles";
-import { keyFingerprint, type DualSigner } from "../signing";
+} from "../deployments.ts";
+import { settings, type KeyJob } from "../env.ts";
+import { debug, warn } from "../log.ts";
+import { isChannel, type Channel } from "../naming.ts";
+import { OpenCloud } from "../opencloud.ts";
+import { REGISTRY_FALLBACK_NOTE, RegistryApi, tryReadRegistry, type RegistrySnapshot } from "../registry.ts";
+import { stateDir } from "../state.ts";
+import { keyFilePaths, loadSigner, type KeyRole } from "../keyfiles.ts";
+import { keyFingerprint, type DualSigner } from "../signing.ts";
 
 export function project(args: ParsedArgs): Project {
 	const loaded = loadProject(flagString(args, "config"));

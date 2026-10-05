@@ -25,16 +25,16 @@
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
-import { flagBool, flagString, UsageError, type ParsedArgs } from "../args";
-import { luneBinary, OUT_DIR, rojoBinary } from "../build";
-import type { Project } from "../config";
-import { gitInfo } from "../git";
-import { isRecord, parseJsonc } from "../json";
-import { inspectKeyFile } from "../keyfiles";
-import { bold, dim, emitJson, formatBytes, formatSeconds, info, isJson, red, Stopwatch, warn } from "../log";
-import { capture, query, run } from "../proc";
-import { branchChannel, strictest } from "../naming";
-import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, readHistory, registryApi, signingKeyPaths, warnRegistryFallback, type History } from "./common";
+import { flagBool, flagString, UsageError, type ParsedArgs } from "../args.ts";
+import { luneBinary, OUT_DIR, rojoBinary } from "../build.ts";
+import type { Project } from "../config.ts";
+import { gitInfo } from "../git.ts";
+import { isRecord, parseJsonc } from "../json.ts";
+import { inspectKeyFile } from "../keyfiles.ts";
+import { bold, dim, emitJson, formatBytes, formatSeconds, info, isJson, red, Stopwatch, warn } from "../log.ts";
+import { capture, query, run } from "../proc.ts";
+import { branchChannel, strictest } from "../naming.ts";
+import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, readHistory, registryApi, signingKeyPaths, warnRegistryFallback, type History } from "./common.ts";
 
 export const kernelFlags = {
 	kernel: "string",

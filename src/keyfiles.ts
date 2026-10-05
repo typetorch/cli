@@ -17,13 +17,13 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
-import type { Project } from "./config";
-import { expandPath, FALLBACK_KEY_FILE_VAR, KEY_FILE_VAR, registerSecret, settings } from "./env";
-import { isRecord } from "./json";
-import { query } from "./proc";
-import { generateSigningKey, isTestVectorKey, parseSigningKey, type DualSigner, type SigningKey } from "./signing";
+import type { Project } from "./config.ts";
+import { expandPath, FALLBACK_KEY_FILE_VAR, KEY_FILE_VAR, registerSecret, settings } from "./env.ts";
+import { isRecord } from "./json.ts";
+import { query } from "./proc.ts";
+import { generateSigningKey, isTestVectorKey, parseSigningKey, type DualSigner, type SigningKey } from "./signing.ts";
 
-export { FALLBACK_KEY_FILE_VAR, KEY_FILE_VAR, KEY_PATH_VARS } from "./env";
+export { FALLBACK_KEY_FILE_VAR, KEY_FILE_VAR, KEY_PATH_VARS } from "./env.ts";
 export const KEY_FILE_KIND = "typetorch-signing-key";
 
 export type KeyRole = "main" | "fallback";
