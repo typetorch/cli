@@ -7,6 +7,7 @@
  *   configs read GET the InExperienceConfig repository       200/404 = ok, 401/403 = missing universe:read
  *   configs write not probed (needs universe:write; a probe would have to touch the draft)
  *   place publish POST an EMPTY body                         400 = scope ok (body rejected), 403 = missing
+ *   place download GET the place's Asset Delivery location    200 = legacy-asset:manage ok (kernel deploy patches), 403 = missing
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -45,6 +46,16 @@ async function probe(
 }
 
 const short = (text: string) => text.replace(/\s+/g, " ").slice(0, 160);
+
+/** The Asset Delivery probe (kernel deploy downloads the place to patch it): 200 = legacy-asset:manage present. */
+export function placeDownloadProbe(status: number, text: string): [Status, string] {
+	if (status === 200) return ["ok", "legacy-asset:manage (the place file can be downloaded for `kernel deploy`)"];
+	if (status === 401 || status === 403) {
+		return ["warn", `missing legacy-asset:manage: \`typetorch kernel deploy\` can't download the place to patch it (use --place-file, or add the scope) (${status})`];
+	}
+	// Never echo a 2xx body: it holds a presigned URL.
+	return ["warn", `unexpected ${status}${status >= 300 ? ` ${short(text)}` : ""}`];
+}
 
 export async function doctorCommand(args: ParsedArgs) {
 	const checks: Check[] = [];
@@ -214,6 +225,12 @@ export async function doctorCommand(args: ParsedArgs) {
 							: status >= 500
 								? ["ok", `universe.place:write probably present (an empty body answered ${status}, not 403)`]
 								: ["warn", `unexpected ${status} ${short(text)}`],
+			),
+			!placeKey ? skipped("scope place download", "place") : probe(
+				"scope place download",
+				// Read-only: answers a presigned location for the place file (not fetched, never printed).
+				() => client(placeKey).request("GET", `/asset-delivery-api/v1/assetId/${placeId}`, { retry: false }),
+				(status, text) => placeDownloadProbe(status, text),
 			),
 		]);
 		checks.push(...probes);

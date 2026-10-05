@@ -16,8 +16,8 @@
  *                         universe.place.luau-execution-session:read + :write
  *   OPENCLOUD_DEPLOY_KEY  deploy messages and the ConfigService registry
  *                         universe-messaging-service:publish, universe:read (+ universe:write to write the registry)
- *   OPENCLOUD_PLACE_KEY   kernel deploy (place publish; manual only)  universe.place:write (+ asset:read to record the
- *                         place version before publishing)
+ *   OPENCLOUD_PLACE_KEY   kernel deploy / restore (manual only)      universe.place:write (publish), asset:read (place
+ *                         versions), legacy-asset:manage (download the place to patch it; Asset Delivery API)
  *   shared fallback: TYPETORCH_API_KEY, OPENCLOUD_API_KEY or ROBLOX_API_KEY
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -38,7 +38,7 @@ export const JOB_KEY_VARS: Record<KeyJob, string> = {
 export const JOB_SCOPES: Record<KeyJob, string> = {
 	assets: "asset:read, asset:write (+ universe.place.luau-execution-session:read/write for assets sync/status and doctor's place check)",
 	deploy: "universe-messaging-service:publish, universe:read (+ universe:write for the registry)",
-	place: "universe.place:write (+ asset:read to record the place version)",
+	place: "universe.place:write, asset:read, legacy-asset:manage (kernel deploy downloads the place to patch it)",
 };
 
 export const ENV_FILE_VAR = "TYPETORCH_ENV_FILE";
