@@ -21,6 +21,9 @@ bun add -d @typetorch/cli      # in the game repo, then: bunx typetorch <command
 bun src/index.ts <command>     # from a checkout of this repo
 ```
 
+The [template](https://github.com/typetorch/template) already has `@typetorch/cli` (and `@typetorch/dev-server`) in its
+devDependencies and the script `"typetorch": "typetorch"`: after `bun install`, `bun run typetorch <command>` runs it.
+
 What the commands call:
 - **git**, and **Rojo 7.7.x** (plus **Lune** for `kernel deploy`) through [Rokit](https://github.com/rojo-rbx/rokit):
   pin `rojo-rbx/rojo@7.7.0-rc.1` in the game's `rokit.toml`.
@@ -195,10 +198,10 @@ script name.
 - **Branch:** `--branch`, else `typetorch.json` `branches[gitBranch]`, else the git branch lowercased with `/` → `-`.
 - **Channel:** `--channel`, else `channels[branch]`, else `prod` for `defaultBranch`, else `dev`. A prod-channel branch
   refuses a dev-channel or dirty artifact unless `--force`.
-- **Sources:** the game commit (`template`) and the framework and kernel commits from `.typetorch/packages/manifest.json`
-  (the template's `scripts/packages.ts` writes it when it packs the local packages), else `v<version>` of the installed
-  package. `<commit>*` means a dirty checkout. Stamped as payload attributes and as `SOURCES` in build.ts, logged, and
-  put on the registry head.
+- **Sources:** the game commit (`template`), and for the framework and kernel `v<version>` of the installed npm
+  package, or, with the template's optional local override (`bun run packages`, which packs sibling checkouts and
+  writes `.typetorch/packages/manifest.json`), the checkouts' commits. `<commit>*` means a dirty checkout. Stamped as
+  payload attributes and as `SOURCES` in build.ts, logged, and put on the registry head.
 - **Payload root attributes:** `ArtifactId`, `KernelApi` (1), `Channel`, `Commit`, `BuiltAt` (unix seconds),
   `SourceTemplate`, `SourceFramework`, `SourceKernel`, `Notes`, and `Assets` (also on the payload's `Server` folder;
   see "Hot assets").
