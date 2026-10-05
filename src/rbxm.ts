@@ -65,7 +65,7 @@ export function lz4Block(input: Uint8Array, size: number): Uint8Array {
 	return out;
 }
 
-class Reader {
+export class Reader {
 	offset = 0;
 	private readonly view: DataView;
 	constructor(readonly bytes: Uint8Array) {
@@ -115,7 +115,7 @@ function startsWith(bytes: Uint8Array, prefix: number[]): boolean {
 	return prefix.every((b, i) => bytes[i] === b);
 }
 
-function chunkData(compressed: Uint8Array, compressedLength: number, length: number): Uint8Array {
+export function chunkData(compressed: Uint8Array, compressedLength: number, length: number): Uint8Array {
 	if (compressedLength === 0) return compressed;
 	if (startsWith(compressed, ZSTD_MAGIC)) {
 		let out: Uint8Array;
@@ -162,6 +162,34 @@ export function readAttributes(blob: Uint8Array): Record<string, string | number
 
 /** Every instance in a binary model, in INST order. */
 export function readRbxm(bytes: Uint8Array): RbxmInstance[] {
+	return readRbxmDetailed(bytes).instances;
+}
+
+/** One class of a binary file: its instance count and every property chunk (name -> type id). */
+export interface RbxmClassInventory {
+	instances: number;
+	props: Map<string, number>;
+}
+
+/** What a binary model or place holds besides the instance tree: chunk counts, META entries, shared strings, classes. */
+export interface RbxmInventory {
+	/** Chunk name -> how many (INST, PROP, PRNT, META, SSTR, SIGN, END...). */
+	chunks: Record<string, number>;
+	/** The META chunk's key/value pairs (Roblox writes ExplicitAutoJoints = "true"). */
+	meta: Record<string, string>;
+	/** Entries in the SSTR (shared strings) chunk. */
+	sharedStrings: number;
+	/** Class name -> instances and property chunks. */
+	classes: Map<string, RbxmClassInventory>;
+}
+
+/**
+ * readRbxm plus the inventory of the file (kernel patch verification: which classes have which property chunks, so
+ * a property that a re-serialization dropped shows up). Decodes only INST, PROP Name/AttributesSerialize, PRNT, META
+ * and the SSTR count; other property values are not decoded.
+ */
+export function readRbxmDetailed(bytes: Uint8Array): { instances: RbxmInstance[]; inventory: RbxmInventory } {
+	const inventory: RbxmInventory = { chunks: {}, meta: {}, sharedStrings: 0, classes: new Map() };
 	const header = new Reader(bytes);
 	if (new TextDecoder().decode(header.take(8)) !== MAGIC || !startsWith(header.take(6), SIGNATURE)) {
 		throw new RbxmError("not a binary Roblox model (.rbxm)");
@@ -181,6 +209,7 @@ export function readRbxm(bytes: Uint8Array): RbxmInstance[] {
 		header.u32(); // reserved
 		const data = chunkData(header.take(compressedLength === 0 ? length : compressedLength), compressedLength, length);
 		const chunk = new Reader(data);
+		inventory.chunks[name] = (inventory.chunks[name] ?? 0) + 1;
 		if (name === "INST") {
 			const classId = chunk.u32();
 			const className = chunk.string();
@@ -188,16 +217,29 @@ export function readRbxm(bytes: Uint8Array): RbxmInstance[] {
 			const count = chunk.u32();
 			const referents = chunk.referents(count);
 			classes.set(classId, { className, referents });
+			const known = inventory.classes.get(className);
+			if (known) known.instances += count;
+			else inventory.classes.set(className, { instances: count, props: new Map() });
 			for (const referent of referents) {
 				const instance: RbxmInstance = { referent, className, name: "", parent: -1 };
 				byReferent.set(referent, instance);
 				order.push(instance);
 			}
+		} else if (name === "META") {
+			const count = chunk.u32();
+			for (let i = 0; i < count; i++) {
+				const key = chunk.string();
+				inventory.meta[key] = chunk.string();
+			}
+		} else if (name === "SSTR") {
+			chunk.u32(); // version
+			inventory.sharedStrings += chunk.u32();
 		} else if (name === "PROP") {
 			const classId = chunk.u32();
 			const propName = chunk.string();
 			const type = chunk.u8();
 			const owner = classes.get(classId);
+			if (owner) inventory.classes.get(owner.className)?.props.set(propName, type);
 			if ((propName === "Name" || propName === "AttributesSerialize") && type === 0x01 && owner) {
 				for (const referent of owner.referents) {
 					const instance = byReferent.get(referent);
@@ -223,7 +265,7 @@ export function readRbxm(bytes: Uint8Array): RbxmInstance[] {
 			break;
 		}
 	}
-	return order;
+	return { instances: order, inventory };
 }
 
 // Writing ------------------------------------------------------------------------------------------------------------
@@ -248,7 +290,7 @@ export function lz4LiteralBlock(data: Uint8Array): Uint8Array {
 	return block;
 }
 
-class Writer {
+export class Writer {
 	private parts: number[] = [];
 	u8(value: number) {
 		this.parts.push(value & 0xff);
@@ -321,7 +363,7 @@ export interface RbxmWriteInstance {
 
 const textBytes = (text: string) => new TextEncoder().encode(text);
 
-function concatBytes(parts: Uint8Array[]): Uint8Array {
+export function concatBytes(parts: Uint8Array[]): Uint8Array {
 	let size = 0;
 	for (const part of parts) size += part.length;
 	const out = new Uint8Array(size);
@@ -333,7 +375,7 @@ function concatBytes(parts: Uint8Array[]): Uint8Array {
 	return out;
 }
 
-function u32Bytes(value: number): Uint8Array {
+export function u32Bytes(value: number): Uint8Array {
 	const out = new Uint8Array(4);
 	new DataView(out.buffer).setUint32(0, value >>> 0, true);
 	return out;
@@ -342,7 +384,7 @@ function u32Bytes(value: number): Uint8Array {
 export type ChunkCompression = "lz4" | "zstd" | "none";
 
 /** A chunk with its 16-byte header; "lz4" stores one literal-only LZ4 block. */
-function encodeChunk(name: string, data: Uint8Array, compression: ChunkCompression): Uint8Array {
+export function encodeChunk(name: string, data: Uint8Array, compression: ChunkCompression): Uint8Array {
 	const header = new Uint8Array(16);
 	header.set(textBytes(name).subarray(0, 4), 0);
 	const view = new DataView(header.buffer);
@@ -431,7 +473,7 @@ export function writeSingleInstanceRbxm(input: { className: string; name: string
 
 // Editing ------------------------------------------------------------------------------------------------------------
 
-interface RawChunk {
+export interface RawChunk {
 	name: string;
 	/** Byte range of the chunk (header + payload) in the file. */
 	start: number;
@@ -441,7 +483,7 @@ interface RawChunk {
 	payload: Uint8Array;
 }
 
-function rawChunks(bytes: Uint8Array): { chunks: RawChunk[]; tail: number } {
+export function rawChunks(bytes: Uint8Array): { chunks: RawChunk[]; tail: number } {
 	const header = new Reader(bytes);
 	if (new TextDecoder().decode(header.take(8)) !== MAGIC || !startsWith(header.take(6), SIGNATURE)) {
 		throw new RbxmError("not a binary Roblox model (.rbxm)");
