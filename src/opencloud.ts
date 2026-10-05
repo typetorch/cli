@@ -328,6 +328,35 @@ export class OpenCloud {
 
 	// Places ---------------------------------------------------------------------------------------------------------
 
+	/**
+	 * Downloads a place file (Open Cloud Asset Delivery, spike S12): `GET /asset-delivery-api/v1/assetId/{placeId}`
+	 * (or `/version/{n}`) answers `{location}`, a presigned CDN URL fetched WITHOUT the key. Needs the
+	 * `legacy-asset:manage` scope (asset:read is not enough: 403 "Forbidden" without it). The URL is never logged.
+	 */
+	async downloadPlace(placeId: number, version?: number): Promise<{ bytes: Uint8Array; seconds: number }> {
+		const started = performance.now();
+		const path = `/asset-delivery-api/v1/assetId/${placeId}${version !== undefined ? `/version/${version}` : ""}`;
+		const body = await this.call("GET", path);
+		const location: unknown = body?.location;
+		if (typeof location !== "string") throw new Error(`${path} returned no location: ${JSON.stringify(body)?.slice(0, 300)}`);
+		const url = new URL(location);
+		if (url.protocol !== "https:") throw new Error(`refusing a place download location that isn't https (${url.protocol}//${url.hostname})`);
+		let last = "";
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			try {
+				const response = await fetch(url, { signal: AbortSignal.timeout(300_000) });
+				debug(`GET place file from ${url.hostname} -> ${response.status}`);
+				if (response.ok) return { bytes: new Uint8Array(await response.arrayBuffer()), seconds: (performance.now() - started) / 1000 };
+				last = `${response.status} ${(await response.text()).slice(0, 200)}`;
+				if (response.status !== 429 && response.status < 500) break;
+			} catch (error) {
+				last = String((error as Error)?.message ?? error);
+			}
+			if (attempt < 3) await sleep(500 * 2 ** (attempt - 1));
+		}
+		throw new Error(redact(`downloading the place file from ${url.hostname} failed: ${last}`));
+	}
+
 	/** Publishes a place file (.rbxl) as the new live version. Returns the response ({ versionNumber }). */
 	async publishPlace(universeId: number, placeId: number, bytes: Uint8Array): Promise<any> {
 		return this.call("POST", `/universes/v1/${universeId}/places/${placeId}/versions?versionType=Published`, {

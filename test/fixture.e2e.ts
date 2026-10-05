@@ -278,16 +278,66 @@ writeFileSync(
 	join(kernel, "place.project.json"),
 	JSON.stringify({ name: "P", tree: { $className: "DataModel", ServerScriptService: { $className: "ServerScriptService", TypeTorchKernel: { $className: "Folder", Kernel: { $path: "src/server/Kernel.server.luau" } } } } }),
 );
+// A small game place (Lune), standing in for the downloaded place: a map part and a game script, no kernel.
+writeFileSync(
+	join(kernel, "make-game.luau"),
+	`local roblox = require("@lune/roblox")
+local fs = require("@lune/fs")
+local game = roblox.Instance.new("DataModel")
+local part = roblox.Instance.new("Part")
+part.Name = "Map"
+part.Parent = game:GetService("Workspace")
+local main = roblox.Instance.new("Script")
+main.Name = "GameMain"
+main.Source = "print('game')"
+main.Parent = game:GetService("ServerScriptService")
+fs.writeFile("game.rbxl", roblox.serializePlace(game))
+`,
+);
+const made = Bun.spawnSync(["lune", "run", "make-game.luau"], { cwd: kernel, stdout: "pipe", stderr: "pipe", env: cleanEnv });
+check("Lune makes the stand-in game place", made.exitCode === 0, made.stderr.toString());
+const gamePlace = join(kernel, "game.rbxl");
 r = tt(["kernel", "deploy", "--kernel", kernel, "--dry-run", "--json"]);
-check("kernel deploy --dry-run: check, version, hash, build; patch mode not built yet", r.code === 0 && r.json?.kernel?.version === "9.9.9" && /^[0-9a-f]{64}$/.test(r.json?.kernel?.hash) && r.json?.mode === "patch (not implemented)", r.stderr || r.json);
-check("kernel deploy stamps BootstrapHeads (the prod-channel heads known here) and reports the missing keys", typeof r.json?.bootstrapHeads === "object" && /BootstrapHeads/.test(r.stderr) && /no "keyAssetId"/.test(r.stderr), r.stderr || r.json);
+check("kernel deploy (patch) without a place key: refused after the build, naming the scopes", r.code === 1 && /no Open Cloud API key for place/.test(r.stderr) && /legacy-asset:manage/.test(r.stderr), r.stderr);
 check("the check ran (lune)", /files, 0 failed/.test(r.stderr), r.stderr);
+r = tt(["kernel", "deploy", "--kernel", kernel, "--place-file", gamePlace, "--dry-run", "--json"]);
+check(
+	"kernel deploy --place-file --dry-run: patched, verified twice, written; a first install is flagged",
+	r.code === 0 && r.json?.mode === "patch" && r.json?.engine === "splice" && r.json?.firstInstall === true && r.json?.verification?.ok === true &&
+		r.json?.kernel?.version === "9.9.9" && /^[0-9a-f]{64}$/.test(r.json?.kernel?.hash) && existsSync(join(dir, r.json?.output?.path ?? "missing")) &&
+		r.json?.report?.slots?.[0]?.slot === "ServerScriptService.TypeTorchKernel" && r.json?.report?.slots?.[0]?.after === 2 && /--install/.test(r.stderr),
+	r.stderr || r.json,
+);
+check("kernel deploy stamps BootstrapHeads (the prod-channel heads known here) and reports the missing keys", typeof r.json?.bootstrapHeads === "object" && /BootstrapHeads/.test(r.stderr) && /no "keyAssetId"/.test(r.stderr), r.stderr || r.json);
+const patchedPlace = join(dir, r.json?.output?.path ?? "missing");
+const patchedInstances = existsSync(patchedPlace) ? readRbxm(new Uint8Array(readFileSync(patchedPlace))) : [];
+check(
+	"the patched place keeps the game and gains the stamped kernel",
+	["Map", "GameMain", "TypeTorchKernel", "Kernel"].every((name) => patchedInstances.some((i) => i.name === name)) &&
+		patchedInstances.find((i) => i.name === "TypeTorchKernel")?.attributes?.KernelVersion === "9.9.9",
+	patchedInstances.map((i) => i.name),
+);
+r = tt(["kernel", "deploy", "--kernel", kernel, "--place-file", gamePlace]);
+check("a first install without --install is refused before anything is published", r.code === 2 && /no TypeTorch kernel yet/.test(r.stderr) && /--install/.test(r.stderr), r.stderr);
+r = tt(["kernel", "deploy", "--kernel", kernel, "--place-file", gamePlace, "--install"]);
+check("...and with --install, a kernel without trust roots is refused", r.code === 1 && /can't verify prod deploys/.test(r.stderr), r.stderr);
+r = tt(["kernel", "deploy", "--kernel", kernel, "--place-file", patchedPlace, "--dry-run", "--json"]);
+check(
+	"patching the patched place again: same slots, no first install, still verified",
+	r.code === 0 && r.json?.firstInstall === false && r.json?.verification?.ok === true && r.json?.oldKernel?.version === "9.9.9" &&
+		r.json?.report?.slots?.[0]?.scripts?.same === 1,
+	r.stderr || r.json,
+);
+r = tt(["kernel", "restore", patchedPlace, "--dry-run"]);
+check("kernel restore --dry-run shows the file and publishes nothing (no key needed)", r.code === 0 && /kernel 9\.9\.9/.test(r.stdout + r.stderr) && /dry run: nothing published/.test(r.stdout), r.stdout + r.stderr);
+r = tt(["kernel", "restore", patchedPlace]);
+check("kernel restore without a place key is refused", r.code === 1 && /no Open Cloud API key for place/.test(r.stderr), r.stderr);
 r = tt(["kernel", "deploy", "--kernel", kernel, "--replace-place", "--dry-run", "--json"]);
 check("--replace-place --dry-run warns that it wipes Studio content", r.code === 0 && r.json?.mode === "replace-place" && /WIPES|wiped/i.test(r.stderr), r.stderr || r.json);
 r = tt(["kernel", "deploy", "--kernel", kernel, "--replace-place"]);
 check("--replace-place without --yes refuses", r.code === 2 && /without --yes/.test(r.stderr), r.stderr);
-r = tt(["kernel", "deploy", "--kernel", kernel]);
-check("without --replace-place nothing can be published yet", r.code === 2 && /not implemented/.test(r.stderr), r.stderr);
+r = tt(["kernel", "deploy", "--kernel", kernel, "--replace-place", "--install"]);
+check("--replace-place takes no patch flags", r.code === 2 && /--install belongs to patch mode/.test(r.stderr), r.stderr);
 writeFileSync(join(kernel, "src", "server", "Broken.luau"), "local x = = 1\n");
 r = tt(["kernel", "deploy", "--kernel", kernel, "--dry-run"]);
 check("a Luau syntax error stops the kernel deploy first", r.code === 1 && /kernel check failed/.test(r.stderr), r.stderr);
