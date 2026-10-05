@@ -78,6 +78,14 @@ describe("remote-claude: running it", () => {
 		expect(result.exitCode).toBe(7);
 	});
 
+	test("typetorch dev is the same command", () => {
+		const repo = join(root, "game-dev-alias");
+		fakeDevServer(join(repo, "node_modules", "@typetorch", "dev-server"));
+		const result = Bun.spawnSync(["bun", CLI, "dev", "--users", "1"], { cwd: repo, stdout: "pipe", stderr: "pipe" });
+		expect(JSON.parse(result.stdout.toString())).toEqual(["remote-claude", "--users", "1"]);
+		expect(result.exitCode).toBe(7);
+	});
+
 	test("not installed: a clear error, exit 1", () => {
 		const result = Bun.spawnSync(["bun", CLI, "remote-claude", "--users", "1"], {
 			cwd: root,

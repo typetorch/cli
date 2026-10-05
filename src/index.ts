@@ -19,6 +19,7 @@ import { pinCommand, pinFlags } from "./commands/pin.ts";
 import { promoteCommand, promoteFlags } from "./commands/promote.ts";
 import { REMOTE_CLAUDE_USAGE, remoteClaudeCommand } from "./commands/remote-claude.ts";
 import { rollbackCommand, rollbackFlags } from "./commands/rollback.ts";
+import { UPDATE_USAGE, updateCommandRun, updateFlags } from "./commands/update.ts";
 import { redact, Settings, useSettings } from "./env.ts";
 import { red, setOutputMode } from "./log.ts";
 
@@ -250,6 +251,19 @@ typetorch assets list
 		raw: (argv) => remoteClaudeCommand(argv),
 		summary: "prompt Claude Code on this machine from the in-game DEV > Claude tab (runs @typetorch/dev-server)",
 		usage: REMOTE_CLAUDE_USAGE,
+	},
+	dev: {
+		flags: {},
+		run: async () => {},
+		raw: (argv) => remoteClaudeCommand(argv),
+		summary: "same as remote-claude",
+		usage: REMOTE_CLAUDE_USAGE.replace("typetorch remote-claude --users", "typetorch dev (= remote-claude) --users"),
+	},
+	update: {
+		flags: updateFlags,
+		run: updateCommandRun,
+		summary: "update this CLI to the newest version on npm (the way it was installed)",
+		usage: UPDATE_USAGE,
 	},
 	doctor: {
 		flags: doctorFlags,
