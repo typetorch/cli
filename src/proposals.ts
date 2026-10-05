@@ -15,6 +15,7 @@
 import { randomBytes } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { TestSummary } from "./cloudtest.ts";
 import type { RegistryDeployment } from "./registry.ts";
 import type { BuildSources, Channel } from "./naming.ts";
 
@@ -61,6 +62,10 @@ export interface Proposal {
 	force: boolean;
 	/** The branch head when proposed. */
 	from?: { artifactId: string; assetId: number; seq: number };
+	/** The pre-publish gate when proposed (passed, or skipped with a reason); approve runs it when this is missing. */
+	test?: TestSummary;
+	/** Dev-channel rollout % for the message (`--rollout`); `typetorch approve --rollout` overrides it. */
+	rollout?: number;
 	universeId?: number;
 	project?: string;
 }

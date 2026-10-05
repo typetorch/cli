@@ -18,6 +18,8 @@ import type { ProposalArtifact } from "../proposals.ts";
 import { releaseExisting } from "./approve.ts";
 import type { Project } from "../config.ts";
 import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback, type History } from "./common.ts";
+import { WAIT_FLAGS } from "./fleet.ts";
+import { GATE_FLAGS } from "./test.ts";
 import { checkChannelGuard, checkPromoteChannel } from "./deploy.ts";
 
 export const promoteFlags = {
@@ -27,6 +29,9 @@ export const promoteFlags = {
 	message: "string",
 	propose: "boolean",
 	"proposed-by": "string",
+	rollout: "string",
+	...GATE_FLAGS,
+	...WAIT_FLAGS,
 	...KEY_FILE_FLAGS,
 } as const;
 

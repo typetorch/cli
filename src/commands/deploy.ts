@@ -15,7 +15,12 @@ import { branchChannel, branchNameError, formatSources, strictest, type Channel 
 import { DEPLOY_TOPIC } from "../opencloud.ts";
 import { assertNoForeignDraft, tryReadRegistry, type RegistrySnapshot } from "../registry.ts";
 import { assetNaming, fixCensoredName, uploadPayload } from "../upload.ts";
-import { finishRelease, modeFor, reportProposal } from "./approve.ts";
+import { finishRelease, modeFor, reportProposal, waitAfterRelease } from "./approve.ts";
+import { gatePolicy, skipReason } from "../cloudtest.ts";
+import { checkRollout, parseRollout } from "../rollout.ts";
+import { waitSeconds, WAIT_FLAGS } from "./fleet.ts";
+import { describeTest, GATE_FLAGS, gateRelease } from "./test.ts";
+import { widenCommand } from "./widen.ts";
 import { describeBuild } from "./build.ts";
 import {
 	channelFlag,
@@ -44,6 +49,10 @@ export const deployFlags = {
 	"moderation-timeout": "string",
 	propose: "boolean",
 	"proposed-by": "string",
+	rollout: "string",
+	widen: "string",
+	...GATE_FLAGS,
+	...WAIT_FLAGS,
 	...KEY_FILE_FLAGS,
 } as const;
 
@@ -85,7 +94,11 @@ export function checkChannelGuard(input: {
 }
 
 export async function deployCommand(args: ParsedArgs) {
+	if (flagString(args, "widen") !== undefined) return widenCommand(args);
 	const proj = project(args);
+	const rollout = parseRollout(flagString(args, "rollout"));
+	const skipTest = skipReason(flagString(args, "skip-test"));
+	const testFlag = flagBool(args, "test");
 	const dryRun = flagBool(args, "dry-run");
 	const force = flagBool(args, "force");
 	const noRegistry = flagBool(args, "no-registry");
@@ -149,6 +162,8 @@ export async function deployCommand(args: ParsedArgs) {
 
 	const targetChannel = strictest(branchChannel(proj.config, branch), snapshot?.value.channels[branch]);
 	checkChannelGuard({ branch, branchChannel: targetChannel, artifactChannel: meta.channel, dirty: meta.dirty, force });
+	checkRollout(branch, targetChannel, rollout);
+	const wait = waitSeconds(args, targetChannel);
 
 	const { displayName, description } = assetNaming(proj.config, meta, branch);
 	const changes = meta.notes?.changes ?? [];
@@ -170,8 +185,9 @@ export async function deployCommand(args: ParsedArgs) {
 	if (dryRun) {
 		const ending = modeFor(proj, args, targetChannel).mode.kind;
 		const entry = makeEntry({ action: "deploy", branch, artifact: { ...artifact, assetId: 0 }, by }, snapshot?.value, history.local);
-		const data = messageFor(entry, undefined, { placeholders: targetChannel === "prod" });
+		const data = messageFor(entry, undefined, { placeholders: targetChannel === "prod", rollout });
 		const signing = signingStatus(proj, targetChannel, keyPaths);
+		const test = gatePolicy({ kind: "deploy", branchChannel: targetChannel, test: testFlag, skipTest });
 		const plan = {
 			dryRun: true,
 			artifactId: meta.artifactId,
@@ -184,6 +200,8 @@ export async function deployCommand(args: ParsedArgs) {
 			notes: { message: message ?? "", changes },
 			assets: meta.assets ?? null,
 			approval: { policy: proj.config.approval, ending },
+			test,
+			wait: wait ?? null,
 			signing,
 			registry: snapshot
 				? { readable: true, configVersion: snapshot.configVersion, exists: snapshot.exists, message: registryMessage("deploy", branch, meta.artifactId, note) }
@@ -197,6 +215,9 @@ export async function deployCommand(args: ParsedArgs) {
 		if (isJson()) return emitJson(plan);
 		info(bold(`dry run: would deploy ${meta.artifactId} to ${branch} (branch channel ${targetChannel}) as #${entry.seq}`));
 		info(`  approval     policy "${proj.config.approval}": ${ending}`);
+		info(`  test         ${describeTest(undefined, test)}`);
+		info(`  wait         ${wait !== undefined ? `up to ${wait} s for the servers' reports` : "no (--wait)"}`);
+		if (rollout !== undefined) info(`  rollout      ${rollout}% of the servers (typetorch deploy --widen <pct> later)`);
 		info(`  signing      ${describeSigning(signing)}`);
 		info(`  asset name   ${displayName}`);
 		info(`  description  ${description.split("\n").join(dim(" | "))}`);
@@ -248,6 +269,23 @@ export async function deployCommand(args: ParsedArgs) {
 	watch.set("upload", upload.uploadSeconds);
 	watch.set("moderation", upload.moderationSeconds);
 
+	// The pre-publish gate: on the approved upload, before the proposal or the message (always for prod-channel).
+	const test = await watch.stage("test", () =>
+		gateRelease({
+			proj,
+			kind: "deploy",
+			branch,
+			branchChannel: targetChannel,
+			artifact: { artifactId: meta.artifactId, assetId: upload.assetId },
+			test: testFlag,
+			skipTest,
+			via: "deploy",
+			by,
+			retryHint: `The upload is approved and recorded: after a fix, deploy again (or once it passes: typetorch test --cloud ${upload.assetId}, then typetorch promote ${branch} ${upload.assetId})`,
+		}),
+	);
+	if (!test) delete watch.timings.test;
+
 	const outcome = await finishRelease({
 		proj,
 		mode: decided.mode,
@@ -262,6 +300,8 @@ export async function deployCommand(args: ParsedArgs) {
 			force,
 			by,
 			from: history.heads.get(branch),
+			...(test ? { test } : {}),
+			...(rollout !== undefined ? { rollout } : {}),
 		},
 		oc: deployer!,
 		api: snapshot ? api : undefined,
@@ -284,11 +324,14 @@ export async function deployCommand(args: ParsedArgs) {
 	}
 	const { result } = outcome;
 	const timings = watch.total();
-	if (isJson()) {
-		return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, assetName: name.name, timings });
+	if (!isJson()) {
+		info(
+			bold(`deployed #${result.entry.seq} ${branch}@${meta.commit || "uncommitted"}${meta.dirty ? "*" : ""} -> ${meta.artifactId} (asset ${upload.assetId})${rollout ? ` to ${rollout}% of servers` : ""} in ${formatSeconds(timings.total)}`),
+		);
+		info(dim(`  ${formatTimings(timings)}`));
 	}
-	info(
-		bold(`deployed #${result.entry.seq} ${branch}@${meta.commit || "uncommitted"}${meta.dirty ? "*" : ""} -> ${meta.artifactId} (asset ${upload.assetId}) in ${formatSeconds(timings.total)}`),
-	);
-	info(dim(`  ${formatTimings(timings)}`));
+	const fleet = await waitAfterRelease(proj, result, wait, deployer);
+	if (isJson()) {
+		return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, assetName: name.name, timings, ...(fleet ? { fleet } : {}) });
+	}
 }

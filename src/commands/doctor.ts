@@ -7,6 +7,9 @@
  *   configs read GET the InExperienceConfig repository       200/404 = ok, 401/403 = missing universe:read
  *   configs write not probed (needs universe:write; a probe would have to touch the draft)
  *   place publish POST an EMPTY body                         400 = scope ok (body rejected), 403 = missing
+ *   memory store  list TypeTorchServers (1 item)              200/404 = ok, 401/403 = missing (servers, report, --wait)
+ *   luau exec     GET a task that doesn't exist               404 = :read ok, 401/403 = missing (test --cloud; :write
+ *                                                             is checked by the first task)
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -16,6 +19,7 @@ import { JOB_KEY_VARS, JOB_SCOPES, settings, type KeyJob } from "../env.ts";
 import { gitInfo } from "../git.ts";
 import { emitJson, green, info, isJson, red, yellow } from "../log.ts";
 import { OpenCloud } from "../opencloud.ts";
+import { FLEET_SCOPE, SERVERS_MAP } from "../fleet.ts";
 import { capture } from "../proc.ts";
 import { hasZstd, isBun, runtimeName } from "../runtime.ts";
 import { rojoBinary } from "../build.ts";
@@ -182,6 +186,30 @@ export async function doctorCommand(args: ParsedArgs) {
 						? ["ok", "universe-messaging-service:publish (published to TypeTorch/doctor)"]
 						: scopeMissing(status)
 							? ["fail", `missing universe-messaging-service:publish (${status} ${short(text)})`]
+							: ["warn", `unexpected ${status} ${short(text)}`],
+			),
+			!deployKey ? skipped("scope memory store", "deploy") : probe(
+				"scope memory store",
+				() => client(deployKey).request("GET", `/cloud/v2/universes/${universeId}/memory-store/sorted-maps/${SERVERS_MAP}/items?maxPageSize=1`),
+				(status, text) =>
+					status === 200 || status === 404
+						? ["ok", `${FLEET_SCOPE} (typetorch servers, report, deploy --wait)`]
+						: scopeMissing(status)
+							? ["warn", `missing ${FLEET_SCOPE} on the deploy key: typetorch servers, report and deploy --wait can't read the fleet (${status} ${short(text)})`]
+							: ["warn", `unexpected ${status} ${short(text)}`],
+			),
+			!assetsKey ? skipped("scope luau execution", "assets") : probe(
+				"scope luau execution",
+				() =>
+					client(assetsKey).request(
+						"GET",
+						`/cloud/v2/universes/${universeId}/places/${placeId}/versions/1/luau-execution-sessions/00000000-0000-0000-0000-000000000000/tasks/00000000-0000-0000-0000-000000000000`,
+					),
+				(status, text) =>
+					status === 404
+						? ["ok", "universe.place.luau-execution-session:read (typetorch test --cloud; :write is checked by the first task)"]
+						: scopeMissing(status)
+							? ["fail", `missing universe.place.luau-execution-session:read/:write on the assets key: the cloud test (always on for prod deploys) can't run (${status} ${short(text)})`]
 							: ["warn", `unexpected ${status} ${short(text)}`],
 			),
 			!deployKey ? skipped("scope configs read", "deploy") : probe(

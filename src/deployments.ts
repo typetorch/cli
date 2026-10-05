@@ -9,6 +9,7 @@
  */
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import type { TestSummary } from "./cloudtest.ts";
 import { table } from "./log.ts";
 import { parseArtifactId, type BuildSources, type Channel } from "./naming.ts";
 import type { RegistryDeployment, RegistryValue } from "./registry.ts";
@@ -33,6 +34,10 @@ export interface LocalDeployment extends RegistryDeployment {
 	proposalId?: string;
 	/** Who prepared it: "cli", "dev-server/claude", "agent", "ci"... */
 	proposedBy?: string;
+	/** The pre-publish gate (`typetorch test --cloud`): passed, or skipped with the reason. */
+	test?: TestSummary;
+	/** Dev-channel rollout % sent as the message's `ro` (`--rollout`); widened later with `deploy --widen`. */
+	rollout?: number;
 	/**
 	 * "published": the deploy message went out. "registry-only": the registry was written but the message failed (the
 	 * seq is used; servers still pick the head up from the registry).

@@ -4,10 +4,11 @@
  *   --flag            boolean
  *   --name value      string
  *   --name=value      string
+ *   --name [n]        optional: true alone, or the next argument when it is a whole number (`--wait`, `--wait 60`)
  *   --                everything after is positional
  */
 
-export type FlagType = "boolean" | "string";
+export type FlagType = "boolean" | "string" | "optional";
 export type FlagSpec = Record<string, FlagType>;
 
 export interface ParsedArgs {
@@ -56,6 +57,11 @@ export function parseArgs(argv: string[], spec: FlagSpec): ParsedArgs {
 			if (type === "boolean") {
 				if (value !== undefined) throw new UsageError(`--${name} takes no value`);
 				flags[name] = true;
+				continue;
+			}
+			if (type === "optional") {
+				if (value === undefined && /^\d+$/.test(argv[i + 1] ?? "")) value = argv[++i];
+				flags[name] = value ?? true;
 				continue;
 			}
 			if (value === undefined) {

@@ -49,6 +49,8 @@ export interface ReleaseInput {
 	branchChannel: Channel;
 	/** Both signing keys; required for a prod-channel branch, never used for a dev-channel one. */
 	signer?: DualSigner;
+	/** Dev-channel only: the message's `ro` (1-99). Not written to the registry head (see rollout.ts). */
+	rollout?: number;
 	/** Extra fields for the local log line. */
 	extra?: Partial<LocalDeployment>;
 }
@@ -101,7 +103,7 @@ export const SIGNATURE_PLACEHOLDER = "<signature: 88 base64 characters, made whe
  * The deploy message for an entry, signed with both keys when `signer` is given; its t/r/sig/sigF are copied onto the
  * entry so the registry head carries them. `placeholders` (dry runs) puts signature-sized stand-ins in instead.
  */
-export function messageFor(entry: RegistryDeployment, signer?: DualSigner, options: { placeholders?: boolean } = {}): DeployMessage {
+export function messageFor(entry: RegistryDeployment, signer?: DualSigner, options: { placeholders?: boolean; rollout?: number } = {}): DeployMessage {
 	const message = deployMessage(
 		{
 			b: entry.branch,
@@ -112,6 +114,7 @@ export function messageFor(entry: RegistryDeployment, signer?: DualSigner, optio
 			ch: entry.channel,
 			rollback: entry.action === "rollback",
 			resign: entry.action === "resign",
+			...(options.rollout !== undefined ? { rollout: options.rollout } : {}),
 		},
 		signer,
 	);
@@ -157,7 +160,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 					{ message: registryMessage(input.action, input.branch, input.artifact.artifactId, input.note), force: input.force, dryRun: false },
 					(current) => {
 						entry = makeEntry(input, current, local);
-						message = messageFor(entry, signer);
+						message = messageFor(entry, signer, { rollout: input.rollout });
 						return recordDeployment(current, entry);
 					},
 				);
@@ -180,7 +183,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 		}
 		if (!entry || !message) {
 			entry = makeEntry(input, history.snapshot?.value, local);
-			message = messageFor(entry, signer);
+			message = messageFor(entry, signer, { rollout: input.rollout });
 		}
 
 		const localEntry: LocalDeployment = {
@@ -191,6 +194,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 			message: input.note,
 			registry,
 			configVersion,
+			...(input.rollout !== undefined ? { rollout: input.rollout } : {}),
 			...input.extra,
 		};
 		const text = encodeDeployMessage(message);

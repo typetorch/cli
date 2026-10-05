@@ -333,6 +333,12 @@ export interface DeployMessage {
 	t: number;
 	/** 1 for rollbacks; "resign" for a head re-signed after `keys rotate` (same artifact, new seq, no swap). */
 	r?: 1 | typeof RESIGN;
+	/**
+	 * Dev-channel only (kernel 0.2.3): rollout %, 1-99. Servers whose djb2(JobId) % 100 is below it swap, the others
+	 * keep their artifact; new servers boot the head. Re-sending the same seq with another `ro` widens it. Not in the
+	 * signed string, so prod servers ignore it (the CLI refuses it for prod-channel branches).
+	 */
+	ro?: number;
 	/** Prod only: base64 Ed25519 signature by the main key. */
 	sig?: string;
 	/** Prod only: base64 Ed25519 signature by the fallback key. */
@@ -341,7 +347,7 @@ export interface DeployMessage {
 
 /** Builds a deploy message; signed with both keys when a signer is given (prod-channel branches only). */
 export function deployMessage(
-	input: Omit<DeployMessage, "t" | "r" | "sig" | "sigF"> & { rollback?: boolean; resign?: boolean; t?: number },
+	input: Omit<DeployMessage, "t" | "r" | "ro" | "sig" | "sigF"> & { rollback?: boolean; resign?: boolean; t?: number; rollout?: number },
 	signer?: DualSigner,
 ): DeployMessage {
 	const message: DeployMessage = {
@@ -355,6 +361,12 @@ export function deployMessage(
 	};
 	if (input.rollback) message.r = 1;
 	else if (input.resign) message.r = RESIGN;
+	if (input.rollout !== undefined) {
+		// `ro` isn't covered by the signature (tt1): a signed message never carries it.
+		if (signer) throw new Error("a rollout % can't go on a signed (prod-channel) deploy message: prod servers ignore it");
+		if (!Number.isInteger(input.rollout) || input.rollout < 1 || input.rollout > 99) throw new Error(`rollout must be a whole percent from 1 to 99, got ${input.rollout}`);
+		message.ro = input.rollout;
+	}
 	if (signer) Object.assign(message, signDual(signer, message));
 	return message;
 }

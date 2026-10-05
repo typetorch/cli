@@ -571,7 +571,8 @@ describe("prod-only signing in releases", () => {
 	});
 	test("approve: a prod proposal is signed at publish; missing keys fail before the y/N", async () => {
 		const { dir, proj, oc, published, trust } = signedProject();
-		const p = propose(proj, request(), { name: "agent", explicit: false });
+		// (the cloud test is recorded as skipped: this test is about signing; test/cloudtest.test.ts covers the gate)
+		const p = propose(proj, { ...request(), test: { skipped: "signing test", at: new Date().toISOString() } }, { name: "agent", explicit: false });
 		const early = scriptedInteraction({ answers: ["y"] });
 		await expect(approveProposal(proj, { proposal: p, status: "pending" }, { io: early, oc, noRegistry: true, keyPaths: paths(keyDir()) })).rejects.toThrow(SigningSetupError);
 		expect(early.asked).toEqual([]);

@@ -59,7 +59,11 @@ import {
 	type History,
 } from "./common.ts";
 import { checkChannelGuard, checkPromoteChannel } from "./deploy.ts";
+import { waitSeconds, waitForFleet, WAIT_FLAGS, type WaitResult } from "./fleet.ts";
 import { makeEntry, messageFor, registryMessage, release, type ReleaseResult } from "./release.ts";
+import { describeTest, GATE_FLAGS, gateRelease, type TestDeps } from "./test.ts";
+import { gatePolicy, skipReason, type TestSummary } from "../cloudtest.ts";
+import { checkRollout, parseRollout } from "../rollout.ts";
 
 export const PROPOSED_BY_VAR = "TYPETORCH_PROPOSED_BY";
 
@@ -118,6 +122,8 @@ export function describeProposal(state: ProposalState, head: LiveHead | undefine
 	if (p.kind === "resign") lines.push("  resign     re-signs the live head with the current keys (same artifact, new seq, no swap)");
 	else if (head && head.assetId === a.assetId) lines.push(yellow("  note       this artifact is already live on the branch"));
 	if (p.force) lines.push(yellow("  FORCED     proposed with --force (channel guard overridden)"));
+	if (p.kind !== "resign") lines.push(`  test       ${describeTest(p.test)}`);
+	if (p.rollout !== undefined) lines.push(`  rollout    ${p.rollout}% of the branch's servers (typetorch deploy --widen <pct> later)`);
 	if (p.branchChannel === "prod") {
 		lines.push(yellow("  PROD       this goes to a prod-channel branch: public servers"));
 		lines.push("  signing    sig (main key) + sigF (fallback key), made when published");
@@ -133,7 +139,21 @@ export function describeProposal(state: ProposalState, head: LiveHead | undefine
 export async function approveProposal(
 	proj: Project,
 	state: ProposalState,
-	options: { io?: Interaction; noRegistry?: boolean; approver?: string; oc?: OpenCloud; keyPaths?: Record<KeyRole, string>; signer?: DualSigner } = {},
+	options: {
+		io?: Interaction;
+		noRegistry?: boolean;
+		approver?: string;
+		oc?: OpenCloud;
+		keyPaths?: Record<KeyRole, string>;
+		signer?: DualSigner;
+		/** --test: run the gate again even when the proposal passed it. */
+		test?: boolean;
+		/** --skip-test "<reason>" (checked). */
+		skipTest?: string;
+		/** --rollout: overrides the proposal's. */
+		rollout?: number;
+		gate?: TestDeps;
+	} = {},
 ): Promise<ReleaseResult | undefined> {
 	const io = options.io ?? interaction();
 	if (!io.interactive) throw new NotInteractiveError("approving needs a person at an interactive terminal (stdin is not a TTY)");
@@ -159,8 +179,36 @@ export async function approveProposal(
 		checkChannelGuard({ branch: p.branch, branchChannel: targetChannel, artifactChannel: p.artifact.channel, dirty: p.artifact.dirty, force: p.force });
 		if (head && head.assetId === p.artifact.assetId) throw new Error(`${p.artifact.artifactId} is already live on ${p.branch}; reject the proposal (typetorch reject ${p.id})`);
 	}
+	const rollout = options.rollout ?? p.rollout;
+	checkRollout(p.branch, targetChannel, rollout);
 	// Prod-channel: both keys, loaded before the y/N so a missing or mismatched key fails before anyone says yes.
 	const signer = targetChannel === "prod" ? (options.signer ?? signerFor(proj, targetChannel, options.keyPaths ?? signingKeyPaths(proj))) : undefined;
+	// The pre-publish gate, before the y/N: a proposal that passed it (or whose proposer skipped it with a reason, shown
+	// above) is approved as it is; one without (older proposals, promotes) runs it now when the policy says so.
+	let test: TestSummary | undefined = p.test;
+	const passed = p.test !== undefined && "ok" in p.test && p.test.ok;
+	const skipped = p.test !== undefined && "skipped" in p.test;
+	if (p.kind !== "resign" && (options.test || options.skipTest !== undefined || (!passed && !skipped))) {
+		try {
+			test =
+				(await gateRelease({
+					proj,
+					kind: p.kind,
+					branch: p.branch,
+					branchChannel: targetChannel,
+					artifact: p.artifact,
+					test: options.test ?? false,
+					skipTest: options.skipTest,
+					via: "approve",
+					by: options.approver ?? gitInfo(proj.root).userName,
+					deps: options.gate,
+					retryHint: `The proposal stays pending (typetorch approve ${p.id} after a fix, or typetorch reject ${p.id})`,
+				})) ?? p.test;
+		} catch (error) {
+			appendProposalEvent(dir, { event: "failed", id: p.id, error: (error as Error).message.split("\n")[0].slice(0, 300) });
+			throw error;
+		}
+	}
 
 	if (!(await io.confirm(`Publish this ${p.kind} to ${p.branch}?`))) {
 		info(`not published; proposal ${p.id} stays pending (typetorch approve ${p.id} / typetorch reject ${p.id})`);
@@ -189,7 +237,9 @@ export async function approveProposal(
 				...(p.changes ? { changes: p.changes } : {}),
 				proposalId: p.id,
 				proposedBy: p.proposedBy,
+				...(test ? { test } : {}),
 			},
+			rollout,
 		});
 	} catch (error) {
 		appendProposalEvent(dir, { event: "failed", id: p.id, by: approver, error: (error as Error).message.slice(0, 300) });
@@ -209,6 +259,10 @@ export interface ReleaseRequest {
 	force: boolean;
 	by: string;
 	from?: LiveHead;
+	/** The pre-publish gate's result (or skip), recorded on the proposal and the deploy log. */
+	test?: TestSummary;
+	/** Dev-channel rollout % (`--rollout`). */
+	rollout?: number;
 }
 
 /** Writes a proposal for a request (nothing is published). */
@@ -224,6 +278,8 @@ export function propose(proj: Project, request: ReleaseRequest, proposer: Propos
 		by: request.by,
 		force: request.force,
 		...(request.from ? { from: { artifactId: request.from.artifactId, assetId: request.from.assetId, seq: request.from.seq } } : {}),
+		...(request.test ? { test: request.test } : {}),
+		...(request.rollout !== undefined ? { rollout: request.rollout } : {}),
 		universeId: proj.config.universeId,
 		project: proj.config.project,
 	});
@@ -294,7 +350,8 @@ export async function finishRelease(input: {
 		watch: input.watch,
 		branchChannel: request.branchChannel,
 		signer,
-		extra: { ...(request.changes ? { changes: request.changes } : {}), proposedBy: input.proposer.name, ...input.extra },
+		rollout: request.rollout,
+		extra: { ...(request.changes ? { changes: request.changes } : {}), proposedBy: input.proposer.name, ...(request.test ? { test: request.test } : {}), ...input.extra },
 	});
 	return { kind: "published", result };
 }
@@ -324,11 +381,17 @@ export async function releaseExisting(input: {
 	const note = flagString(args, "message");
 	const head = history.heads.get(branch);
 	const keyPaths = signingKeyPaths(proj, args);
+	const rollout = parseRollout(flagString(args, "rollout"));
+	checkRollout(branch, input.branchChannel, rollout);
+	const skipTest = skipReason(flagString(args, "skip-test"));
+	const testFlag = flagBool(args, "test");
+	const wait = waitSeconds(args, input.branchChannel);
 	if (input.dryRun) {
 		const ending = modeFor(proj, args, input.branchChannel).mode.kind;
 		const entry = makeEntry({ action: kind, branch, artifact: input.artifact, by: input.by }, history.snapshot?.value, history.local);
-		const data = messageFor(entry, undefined, { placeholders: input.branchChannel === "prod" });
+		const data = messageFor(entry, undefined, { placeholders: input.branchChannel === "prod", rollout });
 		const signing = signingStatus(proj, input.branchChannel, keyPaths);
+		const test = gatePolicy({ kind, branchChannel: input.branchChannel, test: testFlag, skipTest });
 		const plan = {
 			dryRun: true,
 			branch,
@@ -336,6 +399,8 @@ export async function releaseExisting(input: {
 			to: input.artifact,
 			seq: entry.seq,
 			approval: { policy: proj.config.approval, ending },
+			test,
+			wait: wait ?? null,
 			signing,
 			registry: history.snapshot
 				? { readable: true, message: registryMessage(kind, branch, input.artifact.artifactId, note) }
@@ -345,6 +410,8 @@ export async function releaseExisting(input: {
 		if (isJson()) return emitJson(plan);
 		info(bold(`dry run: would ${kind === "rollback" ? "roll back" : "promote"} ${input.summary} as #${entry.seq}`));
 		info(`  approval  policy "${proj.config.approval}": ${ending}`);
+		info(`  test      ${describeTest(undefined, test)}`);
+		info(`  wait      ${wait !== undefined ? `up to ${wait} s for the servers' reports` : "no (--wait)"}`);
 		info(`  signing   ${describeSigning(signing)}`);
 		info(`  registry  ${history.snapshot ? `would publish "${plan.registry.message}"` : `not used (${history.unavailable})`}`);
 		info(`  message   ${DEPLOY_TOPIC} ${JSON.stringify(data)}`);
@@ -352,11 +419,13 @@ export async function releaseExisting(input: {
 	}
 	const { mode, proposer } = modeFor(proj, args, input.branchChannel);
 	if (mode.kind !== "propose") info(`${kind === "rollback" ? "rolling back" : "promoting"} ${input.summary}`);
+	// The pre-publish gate, before anything is proposed or published (prod promotes: always; rollbacks: --test).
+	const test = await gateRelease({ proj, kind, branch, branchChannel: input.branchChannel, artifact: input.artifact, test: testFlag, skipTest, via: kind, by: input.by });
 	const outcome = await finishRelease({
 		proj,
 		mode,
 		proposer,
-		request: { kind, branch, branchChannel: input.branchChannel, artifact: input.artifact, message: note, changes: input.changes, force: input.force, by: input.by, from: head },
+		request: { kind, branch, branchChannel: input.branchChannel, artifact: input.artifact, message: note, changes: input.changes, force: input.force, by: input.by, from: head, test, rollout },
 		oc: input.oc,
 		api: input.api,
 		history,
@@ -373,14 +442,31 @@ export async function releaseExisting(input: {
 	}
 	const { result } = outcome;
 	const timings = input.watch.total();
-	if (isJson()) return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, timings });
-	info(bold(`${kind === "rollback" ? "rolled back" : "promoted"} #${result.entry.seq} ${input.summary} in ${timings.total.toFixed(2)} s`));
-	info(dim(`  ${formatTimings(timings)}`));
+	if (!isJson()) {
+		info(bold(`${kind === "rollback" ? "rolled back" : "promoted"} #${result.entry.seq} ${input.summary} in ${timings.total.toFixed(2)} s`));
+		info(dim(`  ${formatTimings(timings)}`));
+	}
+	const fleet = await waitAfterRelease(proj, result, wait, input.oc);
+	if (isJson()) return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, timings, ...(fleet ? { fleet } : {}) });
+}
+
+/** `--wait` after a published release: the servers' reports for its seq (see fleet.ts). */
+export async function waitAfterRelease(proj: Project, result: ReleaseResult, seconds: number | undefined, oc?: OpenCloud): Promise<WaitResult | undefined> {
+	if (seconds === undefined) return undefined;
+	return waitForFleet({
+		oc: oc ?? openCloud("deploy")!,
+		universeId: proj.config.universeId,
+		branch: result.entry.branch,
+		seq: result.entry.seq,
+		artifactId: result.entry.artifactId,
+		fromArtifactId: result.entry.fromArtifactId,
+		seconds,
+	});
 }
 
 // Commands ---------------------------------------------------------------------------------------------------------
 
-export const approveFlags = { "no-registry": "boolean", "key-file": "string", "fallback-key-file": "string" } as const;
+export const approveFlags = { "no-registry": "boolean", "key-file": "string", "fallback-key-file": "string", rollout: "string", ...GATE_FLAGS, ...WAIT_FLAGS } as const;
 
 export async function approveCommand(args: ParsedArgs) {
 	const io = interaction();
@@ -412,11 +498,24 @@ export async function approveCommand(args: ParsedArgs) {
 			if (!state) throw new UsageError(`no pending proposal "${answer}"`);
 		}
 	}
-	const result = await approveProposal(proj, state, { io, noRegistry: flagBool(args, "no-registry"), keyPaths: signingKeyPaths(proj, args) });
+	const rollout = parseRollout(flagString(args, "rollout"));
+	const skipTest = skipReason(flagString(args, "skip-test"));
+	const wait = waitSeconds(args, state.proposal.branchChannel);
+	const result = await approveProposal(proj, state, {
+		io,
+		noRegistry: flagBool(args, "no-registry"),
+		keyPaths: signingKeyPaths(proj, args),
+		test: flagBool(args, "test"),
+		skipTest,
+		rollout,
+	});
 	if (!result) return;
-	if (isJson()) return emitJson({ proposal: state.proposal.id, deployment: result.entry, message: result.message, registry: result.registry });
-	info(bold(`approved ${state.proposal.id}: #${result.entry.seq} ${state.proposal.branch} -> ${result.entry.artifactId} (asset ${result.entry.assetId})`));
-	if (result.entry.timings) info(dim(`  ${formatTimings(result.entry.timings)}`));
+	if (!isJson()) {
+		info(bold(`approved ${state.proposal.id}: #${result.entry.seq} ${state.proposal.branch} -> ${result.entry.artifactId} (asset ${result.entry.assetId})${result.entry.rollout ? ` to ${result.entry.rollout}% of servers` : ""}`));
+		if (result.entry.timings) info(dim(`  ${formatTimings(result.entry.timings)}`));
+	}
+	const fleet = await waitAfterRelease(proj, result, wait);
+	if (isJson()) return emitJson({ proposal: state.proposal.id, deployment: result.entry, message: result.message, registry: result.registry, ...(fleet ? { fleet } : {}) });
 }
 
 export const rejectFlags = { reason: "string" } as const;

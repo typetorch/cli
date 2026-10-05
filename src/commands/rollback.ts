@@ -12,6 +12,8 @@ import { branchChannel, branchFromGit, branchNameError, strictest } from "../nam
 import { assertNoForeignDraft } from "../registry.ts";
 import { releaseExisting } from "./approve.ts";
 import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common.ts";
+import { WAIT_FLAGS } from "./fleet.ts";
+import { GATE_FLAGS } from "./test.ts";
 import { checkChannelGuard } from "./deploy.ts";
 
 export const rollbackFlags = {
@@ -23,6 +25,8 @@ export const rollbackFlags = {
 	message: "string",
 	propose: "boolean",
 	"proposed-by": "string",
+	...GATE_FLAGS,
+	...WAIT_FLAGS,
 	...KEY_FILE_FLAGS,
 } as const;
 

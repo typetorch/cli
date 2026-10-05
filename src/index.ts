@@ -11,6 +11,9 @@ import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands
 import { configCommand, configFlags } from "./commands/config.ts";
 import { deployCommand, deployFlags } from "./commands/deploy.ts";
 import { doctorCommand, doctorFlags } from "./commands/doctor.ts";
+import { REPORT_USAGE, reportCommand, reportFlags, SERVERS_USAGE, serversCommand, serversFlags, WAIT_USAGE } from "./commands/fleet.ts";
+import { GATE_USAGE, TEST_USAGE, testCommand, testFlags } from "./commands/test.ts";
+import { ROLLOUT_USAGE, WIDEN_USAGE } from "./rollout.ts";
 import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history.ts";
 import { approveCommand, approveFlags, proposalsCommand, proposalsFlags, rejectCommand, rejectFlags } from "./commands/approve.ts";
 import { kernelCommand, kernelFlags } from "./commands/kernel.ts";
@@ -80,7 +83,11 @@ const COMMANDS: Record<string, Command> = {
                  other unpublished changes
   --no-registry  skip the ConfigService registry (servers persist the head from the deploy message anyway)
   Prod-channel branches: the message is signed with both keys (sig + sigF) when it is published; the key files are
-  checked before the upload. Dev-channel messages are unsigned. See \`typetorch keys\`.`,
+  checked before the upload. Dev-channel messages are unsigned. See \`typetorch keys\`.
+${GATE_USAGE}
+${WAIT_USAGE}
+${ROLLOUT_USAGE}
+${WIDEN_USAGE}`,
 	},
 	promote: {
 		flags: promoteFlags,
@@ -97,7 +104,10 @@ const COMMANDS: Record<string, Command> = {
   after the upload (y/N). Anyone else (an agent, the dev-server, --propose) only writes a proposal:
   approve it with \`typetorch approve <id>\`.
   --propose            write a proposal even when you could approve now
-  --proposed-by <who>  who prepares it: cli, agent, dev-server/claude... (default: cli at a terminal, else agent)`,
+  --proposed-by <who>  who prepares it: cli, agent, dev-server/claude... (default: cli at a terminal, else agent)
+${GATE_USAGE}
+${WAIT_USAGE}
+${ROLLOUT_USAGE}`,
 	},
 	rollback: {
 		flags: rollbackFlags,
@@ -112,7 +122,10 @@ const COMMANDS: Record<string, Command> = {
   after the upload (y/N). Anyone else (an agent, the dev-server, --propose) only writes a proposal:
   approve it with \`typetorch approve <id>\`.
   --propose            write a proposal even when you could approve now
-  --proposed-by <who>  who prepares it: cli, agent, dev-server/claude... (default: cli at a terminal, else agent)`,
+  --proposed-by <who>  who prepares it: cli, agent, dev-server/claude... (default: cli at a terminal, else agent)
+  The cloud test is off for rollbacks (an earlier build); --test runs it.
+${GATE_USAGE}
+${WAIT_USAGE}`,
 	},
 	deployments: {
 		flags: deploymentsFlags,
@@ -159,7 +172,29 @@ const COMMANDS: Record<string, Command> = {
 
   Lists pending proposals (newest first), shows the one you pick (branch, artifact, notes, sources, size, proposer,
   age), asks y/N, then publishes it like a deploy (signed with both keys on a prod-channel branch). Refuses when
-  stdin isn't an interactive terminal.`,
+  stdin isn't an interactive terminal. A prod deploy or promote proposal without a passed (or skipped) cloud test
+  runs it before the y/N. --rollout overrides the proposal's.
+${GATE_USAGE}
+${WAIT_USAGE}
+${ROLLOUT_USAGE}`,
+	},
+	test: {
+		flags: testFlags,
+		run: (args) => testCommand(args),
+		summary: "test --cloud: boot an uploaded payload headless in the place, stop it, report errors (the pre-publish gate)",
+		usage: TEST_USAGE,
+	},
+	servers: {
+		flags: serversFlags,
+		run: (args) => serversCommand(args),
+		summary: "live servers from the kernel's heartbeats: branch, artifact, seq, health, players",
+		usage: SERVERS_USAGE,
+	},
+	report: {
+		flags: reportFlags,
+		run: (args) => reportCommand(args),
+		summary: "what the servers reported for a deploy: swapped/failed/rolled_back, errors, servers left behind",
+		usage: REPORT_USAGE,
 	},
 	pin: {
 		flags: pinFlags,
