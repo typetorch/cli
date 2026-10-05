@@ -85,8 +85,8 @@ scripts, git) get an allowlisted environment without any key. Keys are never pri
 | Variable | Used for | Scopes |
 |---|---|---|
 | `OPENCLOUD_ASSETS_KEY` | payload uploads and moderation (`deploy`, `upload`); the cloud test (`test --cloud`, the prod gate); hot assets (`assets sync`, `assets status`); doctor's place check | `asset:read` (also on the place), `asset:write`; `universe.place.luau-execution-session:read` + `:write` for the cloud test, hot assets and doctor |
-| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the registry (`deploy`, `rollback`, `promote`, `config push`, `deployments`); the fleet (`servers`, `report`, `--wait`) | `universe-messaging-service:publish`, `universe:read` (+ `universe:write` to write the registry); `memory-store.sorted-map:read` for the fleet |
-| `OPENCLOUD_PLACE_KEY` | `kernel deploy`, `kernel restore` (manual only) | `universe.place:write` (publish), `asset:read` (place versions), `legacy-asset:manage` (download the place to patch it; Asset Delivery API) |
+| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the shared seq (`deploy`, `rollback`, `promote`, `keys resign`); the registry (`config push`, `deployments`); the fleet (`servers`, `report`, `--wait`) | `universe-messaging-service:publish`; `universe-datastores.objects:read` (+ `:create` and `:update` to claim seqs; see "The shared seq"); `memory-store.sorted-map:read` for the fleet. The registry needs `universe:read`, which **can't be granted to API keys today** (OAuth only), so it is skipped |
+| `OPENCLOUD_PLACE_KEY` | `kernel deploy`, `kernel restore` (manual only) | `universe.place:write` (publish), `asset:read` (place versions). Downloading the place needs `legacy-asset:manage`, which **can't be granted to API keys today**: pass `--place-file` (a copy downloaded in Studio) |
 | `TYPETORCH_API_KEY`, `OPENCLOUD_API_KEY` or `ROBLOX_API_KEY` | any job without its own key | all of the above |
 
 Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_CHILD_ENV=NAME,NAME` (extra
@@ -165,7 +165,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 |---|---|
 | `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs rbxtsc (`bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first |
 | `typetorch upload [--no-build]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
-| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--no-registry] [--require-registry] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: registry, deploy message, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
+| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--no-registry] [--require-shared-seq] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: registry, deploy message, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
 | `typetorch deploy --widen <1-100> [--branch]` | re-send the branch's live deploy (same seq) to more servers; dev-channel branches only (see "Rollouts") |
 | `typetorch promote <branch> <artifactId\|assetId\|#seq\|commit> [--force] [--dry-run] [--test] [--skip-test <reason>] [--wait [s]] [--rollout <1-99>]` | point a branch at an already uploaded, approved payload (from the deployments or `uploads.jsonl`) with a new seq; no rebuild. A prod-channel branch only takes prod-channel artifacts, even with `--force` ("rebuild for prod"). `promote <artifact> <branch>` works too when only the second is a known branch |
 | `typetorch rollback [--branch] [--to <commit\|artifactId\|assetId\|#seq>] [--force] [--dry-run] [--test] [--wait [s]]` | point the branch at an earlier, already approved asset (no build or upload) and tell its servers; no cloud test unless `--test` (it is an earlier build) |
@@ -279,9 +279,27 @@ Cloud configs API (read the draft and the published config, PATCH the draft, pub
 anyway). The value keeps each branch's head (with the message's `t`, `r`, `sig` and `sigF`, so a kernel can verify a
 prod head like the message) and the last 25 deployments, under the 10,000-character value limit.
 
-**The registry is optional.** When it can't be read (no `universe:read`), `deploy`, `rollback` and `promote` warn once
-and continue with the message; the next seq is one above the highest in the registry (if readable) and the state dir's
-log. **When it can be read but not written, the deploy aborts** before the message (pass `--no-registry` to skip it).
+**The registry is optional, and with an API key it is never readable today:** its read scope, `universe:read`, can't
+be granted to API keys (OAuth only; with `universe:write` alone the GET still answers 403), and the CLI never writes a
+registry it can't read. `deploy`, `rollback` and `promote` then warn once and continue with the message; game servers
+keep the head from it. **When it can be read but not written, the deploy aborts** before the message (pass
+`--no-registry` to skip it).
+
+### The shared seq
+
+Every machine (your PC, CI, the remote-claude dev-server) must take deploy numbers from one sequence: servers order
+heads by seq and ignore one at or below the seq they applied. The next seq is the highest of:
+- the state dir's `deployments.jsonl` (this machine);
+- the registry, when readable (not with an API key today, see above);
+- the game's DataStore `TypeTorch` (Open Cloud DataStores, the deploy key with `universe-datastores.objects:read`):
+  the kernel's `heads` and `deployments` records (every live server records each deploy message it hears, so they lag
+  only while no server runs) and `seq`, the CLI's own counter;
+
+plus one. When the key also has `universe-datastores.objects:create` and `:update`, the seq is **claimed** with one
+atomic increment of `seq` (by enough to clear every source), so two machines deploying at once never share a number,
+whether servers run or not. The deployment line records where it came from (`seqSource`: `counter`, `read` or `local`).
+Without the read scope a deploy warns and uses this machine's log only; `--require-shared-seq` (CI) stops before the
+upload instead.
 
 ### Hot assets
 
@@ -413,8 +431,9 @@ signed A/B pins: `typetorch pin <artifact> --branch prod --pct <1-99>`). The reg
 `action.yml` in this repo is a composite action: it installs Bun and the game's `rokit.toml` tools, runs
 `bun install`, then `typetorch build`, `test --cloud`, or `deploy` (the `command` input).
 
-- **Dev-channel branches deploy**, with `--require-registry`: CI has no deployment log to take the next seq from (a dev
-  server ignores a seq below the one it applied), so the key needs `universe:read` + `universe:write`. They publish only
+- **Dev-channel branches deploy**, with `--require-shared-seq`: CI has no deployment log to take the next seq from (a
+  dev server ignores a seq below the one it applied), so the key needs `universe-datastores.objects:read`, plus
+  `:create` and `:update` to claim seqs atomically (see "The shared seq"). They publish only
   when typetorch.json `approval` lets a non-person publish (`"prod"` or `"none"`); with `"all"` they become proposals.
   Inputs `test: "true"` (the cloud test) and `wait: <seconds>`.
 - **Prod-channel branches are never published from CI** (prod is signed with the owner's key files): the action builds,
@@ -454,8 +473,9 @@ when the repo secret `OPENCLOUD_API_KEY` exists.
    - picks the base: the place's newest version, which must be published (newer unpublished saves are refused and
      listed; `--base published` patches the last publish and leaves them in version history, `--base latest` ships
      them, `--base <n>` takes that version);
-   - downloads it (Open Cloud Asset Delivery, `legacy-asset:manage`) and backs it up to
-     `.typetorch/place-backups/<placeId>-v<n>.rbxl`; or `--place-file <file>` (Studio: File > Download a Copy);
+   - takes `--place-file <file> --base <version>` (a copy downloaded in Studio: File > Download a Copy), or downloads
+     it (Open Cloud Asset Delivery, whose scope `legacy-asset:manage` **can't be granted to API keys today**; Roblox
+     says `universe.place:read` is coming), and backs it up to `.typetorch/place-backups/<placeId>-v<n>.rbxl`;
    - replaces only the **kernel slots** (the `TypeTorch*` children of services in the kernel's `place.project.json`:
      `ServerScriptService.TypeTorchKernel`, `ReplicatedStorage.TypeTorchKernelShared`,
      `ReplicatedFirst.TypeTorchKernelClient`; every copy of each) and applies the service settings that project

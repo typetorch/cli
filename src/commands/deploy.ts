@@ -18,6 +18,7 @@ import { assetNaming, fixCensoredName, uploadPayload } from "../upload.ts";
 import { finishRelease, modeFor, reportProposal, waitAfterRelease } from "./approve.ts";
 import { gatePolicy, skipReason } from "../cloudtest.ts";
 import { checkRollout, parseRollout } from "../rollout.ts";
+import { describeShared, DS_READ_SCOPE, DS_WRITE_SCOPES, readSharedSeq, type SharedSeq } from "../seqstore.ts";
 import { waitSeconds, WAIT_FLAGS } from "./fleet.ts";
 import { describeTest, GATE_FLAGS, gateRelease } from "./test.ts";
 import { widenCommand } from "./widen.ts";
@@ -46,6 +47,8 @@ export const deployFlags = {
 	message: "string",
 	force: "boolean",
 	"no-registry": "boolean",
+	"require-shared-seq": "boolean",
+	/** Deprecated alias of --require-shared-seq (0.7.0 before the DataStore seq source). */
 	"require-registry": "boolean",
 	"moderation-timeout": "string",
 	propose: "boolean",
@@ -121,6 +124,8 @@ export async function deployCommand(args: ParsedArgs) {
 	const registryRead: Promise<{ snapshot?: RegistrySnapshot; unavailable?: string; error?: unknown }> = api
 		? tryReadRegistry(api).catch((error) => ({ error }))
 		: Promise.resolve({ unavailable: noRegistry ? "--no-registry" : "no API key (dry run)" });
+	// The shared seq sources (seqstore.ts: the kernel's DataStore heads and the CLI's counter), read while we build too.
+	const sharedRead: Promise<SharedSeq | undefined> = deployer ? readSharedSeq(deployer, proj.config.universeId) : Promise.resolve(undefined);
 	const readRegistryOrThrow = async () => {
 		const read = await registryRead;
 		if (read.error) {
@@ -156,10 +161,15 @@ export async function deployCommand(args: ParsedArgs) {
 	const read = await readRegistryOrThrow();
 	const snapshot = read.snapshot;
 	// CI: a machine without the deployment log must not guess a seq (servers ignore a seq below the one they applied).
-	if (!snapshot && flagBool(args, "require-registry")) {
-		throw new Error(`--require-registry: the registry isn't readable (${read.unavailable ?? "unknown"}); without it this machine can't know the next seq. Give the deploy key universe:read and universe:write`);
+	const shared = await sharedRead;
+	const requireShared = flagBool(args, "require-shared-seq") || flagBool(args, "require-registry");
+	if (flagBool(args, "require-registry")) warn("--require-registry is now --require-shared-seq (the registry or the DataStore seq)");
+	if (requireShared && !snapshot && !shared?.readable) {
+		throw new Error(
+			`--require-shared-seq: no shared seq source is readable, so this machine can't know the next seq (servers ignore a seq at or below the one they applied). Give the deploy key ${DS_READ_SCOPE} (and ${DS_WRITE_SCOPES} to claim seqs atomically). DataStore: ${shared?.error ?? "no deploy key"}; registry: ${read.unavailable ?? "unknown"}`,
+		);
 	}
-	if (!snapshot && api) warnRegistryFallback(read.unavailable ?? "unknown");
+	if (!snapshot && api && !shared?.readable) warnRegistryFallback(read.unavailable ?? "unknown");
 	if (snapshot) assertNoForeignDraft(snapshot, force);
 	const history = withLocal(proj, snapshot, read.unavailable);
 	// Two payloads with the same id but other bytes (a hash6 collision) must not both go out.
@@ -189,7 +199,7 @@ export async function deployCommand(args: ParsedArgs) {
 	const keyPaths = signingKeyPaths(proj, args);
 	if (dryRun) {
 		const ending = modeFor(proj, args, targetChannel).mode.kind;
-		const entry = makeEntry({ action: "deploy", branch, artifact: { ...artifact, assetId: 0 }, by }, snapshot?.value, history.local);
+		const entry = makeEntry({ action: "deploy", branch, artifact: { ...artifact, assetId: 0 }, by }, snapshot?.value, history.local, (shared?.highest ?? 0) + 1);
 		const data = messageFor(entry, undefined, { placeholders: targetChannel === "prod", rollout });
 		const signing = signingStatus(proj, targetChannel, keyPaths);
 		const test = gatePolicy({ kind: "deploy", branchChannel: targetChannel, test: testFlag, skipTest });
@@ -212,6 +222,7 @@ export async function deployCommand(args: ParsedArgs) {
 				? { readable: true, configVersion: snapshot.configVersion, exists: snapshot.exists, message: registryMessage("deploy", branch, meta.artifactId, note) }
 				: { readable: false, reason: read.unavailable },
 			seq: entry.seq,
+			sharedSeq: shared ?? null,
 			from: entry.fromArtifactId ? { artifactId: entry.fromArtifactId, assetId: entry.fromAssetId } : undefined,
 			message: { topic: DEPLOY_TOPIC, data },
 			stateDir: history.stateDir,
@@ -233,6 +244,7 @@ export async function deployCommand(args: ParsedArgs) {
 		info(
 			`  registry     ${snapshot ? `readable (config v${snapshot.configVersion ?? "?"}${snapshot.exists ? "" : ", no TypeTorch key yet"}); would publish "${plan.registry.message}"` : `not used (${read.unavailable})`}`,
 		);
+		info(`  seq          #${entry.seq} (at least; claimed when published). Shared: ${describeShared(shared)}`);
 		if (entry.fromArtifactId) info(`  replaces     ${entry.fromArtifactId} (asset ${entry.fromAssetId})`);
 		info(`  message      ${DEPLOY_TOPIC} ${JSON.stringify({ ...data, a: "<assetId>" })}`);
 		info(dim(`  ${formatTimings(watch.total())}`));

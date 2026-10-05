@@ -17,7 +17,8 @@ import { isRecord } from "./json.ts";
 import { keyFingerprint } from "./signing.ts";
 import type { OpenCloud } from "./opencloud.ts";
 
-export type Status = "ok" | "warn" | "fail";
+/** "info": a fact, not a problem (e.g. a scope Roblox doesn't grant to API keys yet). */
+export type Status = "ok" | "info" | "warn" | "fail";
 export interface Check {
 	name: string;
 	status: Status;

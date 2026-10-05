@@ -16,7 +16,8 @@
  *      signed (plans/03 "Bootstrap heads").
  *   4. Publish, in one of two modes:
  *      - PATCH (default, `--patch`; plans/13 "Kernel deploy = patch, not replace", spike S12): download the place's
- *        current version (Open Cloud Asset Delivery, scope legacy-asset:manage; or `--place-file`), save it to
+ *        current version (`--place-file`, a copy downloaded in Studio; or Open Cloud Asset Delivery, whose scope
+ *        legacy-asset:manage can't be granted to API keys today), save it to
  *        `.typetorch/place-backups/<placeId>-v<n>.rbxl`, replace ONLY the kernel slots (the TypeTorch* children of
  *        services in the kernel's place.project.json) and the service settings it declares, keep everything else byte
  *        for byte (placepatch.ts), verify twice (the CLI's binary reader and Lune), write
@@ -273,7 +274,7 @@ function displayPath(root: string, path: string): string {
 
 /** Scope hints for the place key's jobs in patch mode. */
 const DOWNLOAD_SCOPE_HINT =
-	"downloading the place needs the legacy-asset:manage scope on the place key (OPENCLOUD_PLACE_KEY or the shared key; Creator Hub > Open Cloud > API Keys > add Legacy Asset > manage). Or download the place yourself (Studio: File > Download a Copy) and pass --place-file <file> --base <version>";
+	"downloading the place needs the legacy-asset:manage scope, which can't be granted to API keys today (Roblox says universe.place:read is coming). Download a copy in Studio (File > Download a Copy) and pass --place-file <file> --base <version>";
 
 export async function kernelCommand(args: ParsedArgs) {
 	const sub = args.positionals[0];

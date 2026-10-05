@@ -10,6 +10,9 @@
  *   PATCH {base}/draft      <- { draftHash?, entries: { key: value } }  -> { draftHash }   (null value deletes)
  *   POST  {base}/publish    <- { draftHash, message, deploymentStrategy: "Immediate" } -> { configVersion }
  * Scopes: universe:read (reads), universe:write (draft + publish). Values are limited to 10,000 characters.
+ * universe:read can't be granted to API keys today (OAuth only; with universe:write the GET still answers 403), so with
+ * an API key the registry is never readable, and the CLI never writes a registry it can't read: deploys continue
+ * without it (servers keep heads from the deploy messages; the seq comes from seqstore.ts).
  */
 import { isRecord, jsonEqual } from "./json.ts";
 import { debug, warn } from "./log.ts";
@@ -276,7 +279,7 @@ function unavailable(error: unknown, universeId: number, scope: string): never {
 	if (error instanceof ApiError && isUnavailableStatus(error.status)) {
 		const text = error.text.replace(/\s+/g, " ").trim().slice(0, 300);
 		throw new RegistryUnavailableError(
-			`configs API ${error.method} ${error.status}${text ? ` ${text}` : ""}; the API key needs ${scope} for universe ${universeId}`,
+			`configs API ${error.method} ${error.status}${text ? ` ${text}` : ""}; it needs ${scope} for universe ${universeId}${scope.includes("universe:read") ? " (which can't be granted to API keys today, only to OAuth apps)" : ""}`,
 			error.status,
 		);
 	}

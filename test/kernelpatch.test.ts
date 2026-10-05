@@ -87,7 +87,7 @@ describe("kernelLayout and chooseBase", () => {
 		expect(placeFileName("102504202680447-v15-kernel-0.3.1.rbxl")).toEqual({ placeId: 102504202680447, version: 15 });
 		expect(placeFileName("102504202680447-vlocal-kernel-0.3.1.rbxl")).toBeUndefined();
 		expect(placeDownloadProbe(200, '{"location":"https://cdn.example/x?sig=secret"}')).toEqual(["ok", expect.stringContaining("legacy-asset:manage")]);
-		expect(placeDownloadProbe(403, "Forbidden")[0]).toBe("warn");
+		expect(placeDownloadProbe(403, "Forbidden")).toEqual(["info", expect.stringContaining("--place-file <file> --base <version>")]);
 		expect(placeDownloadProbe(204, "https://cdn.example/x?sig=secret")[1]).not.toContain("secret");
 	});
 });

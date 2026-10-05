@@ -38,6 +38,8 @@ export interface LocalDeployment extends RegistryDeployment {
 	test?: TestSummary;
 	/** Dev-channel rollout % sent as the message's `ro` (`--rollout`); widened later with `deploy --widen`. */
 	rollout?: number;
+	/** Where the seq came from (seqstore.ts): the DataStore counter, the shared sources read, or this machine only. */
+	seqSource?: "counter" | "read" | "local";
 	/**
 	 * "published": the deploy message went out. "registry-only": the registry was written but the message failed (the
 	 * seq is used; servers still pick the head up from the registry).

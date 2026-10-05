@@ -331,7 +331,8 @@ export class OpenCloud {
 	/**
 	 * Downloads a place file (Open Cloud Asset Delivery, spike S12): `GET /asset-delivery-api/v1/assetId/{placeId}`
 	 * (or `/version/{n}`) answers `{location}`, a presigned CDN URL fetched WITHOUT the key. Needs the
-	 * `legacy-asset:manage` scope (asset:read is not enough: 403 "Forbidden" without it). The URL is never logged.
+	 * `legacy-asset:manage` scope (asset:read is not enough: 403 "Forbidden" without it), which can't be granted to API
+	 * keys today; Roblox staff say universe.place:read is coming (devforum 4044027). The URL is never logged.
 	 */
 	async downloadPlace(placeId: number, version?: number): Promise<{ bytes: Uint8Array; seconds: number }> {
 		const started = performance.now();

@@ -17,6 +17,10 @@ import { fixCensoredName } from "../src/upload";
 
 const CLI = resolve(import.meta.dir, "..", "src", "index.ts");
 const requests: string[] = [];
+const seqClaims: number[] = [];
+let counter = 0;
+/** Non-zero: the DataStore answers this (a missing scope). */
+let dataStoreStatus = 0;
 const server = Bun.serve({
 	port: 0,
 	async fetch(req) {
@@ -37,6 +41,20 @@ const server = Bun.serve({
 			const body = JSON.parse(await req.text());
 			requests.push(`publish ${body.topic} ${JSON.parse(body.message).b}`);
 			return json({});
+		}
+		// The shared seq (seqstore.ts): an empty DataStore, and an atomic counter.
+		if (url.pathname.startsWith("/cloud/v2/universes/42/data-stores/TypeTorch/entries/")) {
+			if (dataStoreStatus) {
+				requests.push("seq read refused");
+				return json({ code: 7, message: "The required scope <universe-datastores.objects:read> is missing." }, dataStoreStatus);
+			}
+			if (method === "POST" && url.pathname.endsWith("/seq:increment")) {
+				const { amount } = JSON.parse(await req.text());
+				counter += amount;
+				seqClaims.push(counter);
+				return json({ id: "seq", value: counter });
+			}
+			if (method === "GET") return json({ code: 5, message: "NOT_FOUND" }, 404);
 		}
 		requests.push(`unexpected ${method} ${url.pathname}`);
 		return json({ message: "not faked" }, 404);
@@ -120,6 +138,35 @@ describe("non-interactive deploys never wait on stdin", () => {
 			expect({ code, output }).toMatchObject({ code: 0 });
 			expect(output).toContain("deployed #1 dev");
 			expect(requests).toEqual(["create", "publish TypeTorch/deploy dev", "name check"]);
+			expect(seqClaims).toEqual([1]); // the seq was claimed from the shared counter
+		},
+		45_000,
+	);
+	test(
+		"--require-shared-seq (and the old --require-registry) stop before the upload when no shared seq source answers",
+		async () => {
+			const root = game();
+			dataStoreStatus = 403;
+			try {
+				for (const flag of ["--require-shared-seq", "--require-registry"]) {
+					requests.length = 0;
+					const child = Bun.spawn(["bun", "--preload", join(root, "redirect.ts"), CLI, "deploy", "--branch", "dev", "--no-registry", "--no-build", flag], {
+						cwd: root,
+						stdin: "ignore",
+						stdout: "pipe",
+						stderr: "pipe",
+						env: childEnv(join(root, "home")),
+					});
+					const code = await child.exited;
+					const output = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text());
+					expect(code).toBe(1);
+					expect(output).toContain("--require-shared-seq: no shared seq source is readable");
+					expect(output).toContain("universe-datastores.objects:read");
+					expect(requests.filter((r) => r !== "seq read refused")).toEqual([]); // nothing uploaded
+				}
+			} finally {
+				dataStoreStatus = 0;
+			}
 		},
 		45_000,
 	);

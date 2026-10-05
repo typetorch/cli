@@ -4,13 +4,17 @@
  * and Open Cloud scopes, each probed with its job's key through harmless calls:
  *   assets       GET an operation that doesn't exist        404 = scope ok, 401/403 = missing
  *   messaging    publish to topic "TypeTorch/doctor"          200 = ok (no server listens to that topic)
- *   configs read GET the InExperienceConfig repository       200/404 = ok, 401/403 = missing universe:read
+ *   configs read GET the InExperienceConfig repository       200/404 = ok, 401/403 = info: universe:read can't be granted
+ *                                                             to API keys today (OAuth only), so the registry is skipped
  *   configs write not probed (needs universe:write; a probe would have to touch the draft)
+ *   datastore    GET DataStore TypeTorch entry "heads"         200/404 = ok, 401/403 = missing universe-datastores.objects:read
+ *                                                             (the shared seq; :create/:update are checked by a deploy)
  *   place publish POST an EMPTY body                         400 = scope ok (body rejected), 403 = missing
  *   memory store  list TypeTorchServers (1 item)              200/404 = ok, 401/403 = missing (servers, report, --wait)
  *   luau exec     GET a task that doesn't exist               404 = :read ok, 401/403 = missing (test --cloud; :write
  *                                                             is checked by the first task)
- *   place download GET the place's Asset Delivery location    200 = legacy-asset:manage ok (kernel deploy patches), 403 = missing
+ *   place download GET the place's Asset Delivery location    200 = ok, 403 = info: legacy-asset:manage can't be granted to
+ *                                                             API keys today; kernel deploy takes --place-file instead
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -26,6 +30,7 @@ import { capture } from "../proc.ts";
 import { hasZstd, isBun, runtimeName } from "../runtime.ts";
 import { rojoBinary } from "../build.ts";
 import { REPOSITORY } from "../registry.ts";
+import { DS_READ_SCOPE, DS_WRITE_SCOPES, HEADS_KEY, SEQ_DATASTORE } from "../seqstore.ts";
 import { stateDir } from "../state.ts";
 import { gatherKeyFacts, keyChecks, type Check, type Status } from "../keycheck.ts";
 import { KEY_FILE_FLAGS, signingKeyPaths } from "./common.ts";
@@ -33,7 +38,7 @@ import { KEY_FILE_FLAGS, signingKeyPaths } from "./common.ts";
 export const doctorFlags = { ...KEY_FILE_FLAGS } as const;
 
 function mark(status: Status): string {
-	return status === "ok" ? green("ok  ") : status === "warn" ? yellow("warn") : red("FAIL");
+	return status === "ok" ? green("ok  ") : status === "info" ? "info" : status === "warn" ? yellow("warn") : red("FAIL");
 }
 
 async function probe(
@@ -56,7 +61,10 @@ const short = (text: string) => text.replace(/\s+/g, " ").slice(0, 160);
 export function placeDownloadProbe(status: number, text: string): [Status, string] {
 	if (status === 200) return ["ok", "legacy-asset:manage (the place file can be downloaded for `kernel deploy`)"];
 	if (status === 401 || status === 403) {
-		return ["warn", `missing legacy-asset:manage: \`typetorch kernel deploy\` can't download the place to patch it (use --place-file, or add the scope) (${status})`];
+		return [
+			"info",
+			`no place download (${status}): it needs legacy-asset:manage, which can't be granted to API keys today. \`typetorch kernel deploy\` takes a copy instead: download one in Studio (File > Download a Copy) and pass --place-file <file> --base <version>`,
+		];
 	}
 	// Never echo a 2xx body: it holds a presigned URL.
 	return ["warn", `unexpected ${status}${status >= 300 ? ` ${short(text)}` : ""}`];
@@ -231,13 +239,23 @@ export async function doctorCommand(args: ParsedArgs) {
 					status === 200 || status === 404
 						? ["ok", `universe:read (${status === 404 ? "no published config yet" : "repository readable"})`]
 						: scopeMissing(status)
-							? ["warn", `missing universe:read: the registry is skipped, servers persist heads from deploy messages (${status} ${short(text)})`]
+							? ["info", `registry not readable (${status}): its read scope, universe:read, can't be granted to API keys today, so deploys skip the registry; servers keep heads from the deploy messages, and the seq comes from the DataStore (see scope datastore)`]
+							: ["warn", `unexpected ${status} ${short(text)}`],
+			),
+			!deployKey ? skipped("scope datastore", "deploy") : probe(
+				"scope datastore",
+				() => client(deployKey).request("GET", `/cloud/v2/universes/${universeId}/data-stores/${SEQ_DATASTORE}/entries/${HEADS_KEY}`),
+				(status, text) =>
+					status === 200 || status === 404
+						? ["ok", `${DS_READ_SCOPE} (the shared seq: the kernel's DataStore heads; ${DS_WRITE_SCOPES} for the seq counter are checked by the first deploy)`]
+						: scopeMissing(status)
+							? ["warn", `missing ${DS_READ_SCOPE} on the deploy key: other machines and CI can't share the seq, and CI deploys (--require-shared-seq) stop (${status} ${short(text)})`]
 							: ["warn", `unexpected ${status} ${short(text)}`],
 			),
 			Promise.resolve<Check>({
 				name: "scope configs write",
-				status: "warn",
-				detail: "not probed: registry writes need universe:write (checked by the first deploy; without it deploys skip the registry)",
+				status: "info",
+				detail: "not probed: registry writes need universe:write, and the CLI only writes a registry it can read (universe:read, OAuth only today)",
 			}),
 			!placeKey ? skipped("scope place publish", "place") : probe(
 				"scope place publish",

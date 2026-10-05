@@ -7,8 +7,10 @@
 #   typetorch approve --import ci-state
 #
 # Dev deploys publish only when typetorch.json "approval" lets a non-person publish ("prod" or "none"); with "all" (the
-# default) a dev deploy from CI becomes a proposal too. They need a readable registry (the deploy key with
-# universe:read + universe:write): CI has no deployment log of its own to take the next seq from.
+# default) a dev deploy from CI becomes a proposal too. They need a shared seq source, because CI has no deployment log
+# of its own: the game's DataStore (the deploy key with universe-datastores.objects:read, plus :create and :update to
+# claim seqs atomically). The ConfigService registry would also do, but its read scope (universe:read) can't be granted
+# to API keys today.
 #
 #   - uses: actions/checkout@v4
 #     with: { fetch-depth: 0 }          # the deploy notes list the commits since the branch's last deploy
@@ -44,7 +46,7 @@ inputs:
     required: false
     default: ""
   deploy-key:
-    description: Optional key for deploy messages, the registry and the fleet (OPENCLOUD_DEPLOY_KEY).
+    description: Optional key for deploy messages, the shared seq (DataStore) and the fleet (OPENCLOUD_DEPLOY_KEY).
     required: false
     default: ""
   message:
@@ -63,8 +65,8 @@ inputs:
     description: "What a prod-channel branch does: propose (default; build, upload, cloud test, proposal artifact) or skip."
     required: false
     default: propose
-  require-registry:
-    description: "true (default): stop before uploading when the registry isn't readable, so a dev deploy never guesses its seq."
+  require-shared-seq:
+    description: "true (default): stop before uploading when no shared seq source (the DataStore, or the registry) is readable, so a dev deploy never guesses its seq."
     required: false
     default: "true"
   cli-version:
@@ -172,7 +174,7 @@ runs:
         TT_MESSAGE: ${{ inputs.message }}
         TT_TEST: ${{ inputs.test }}
         TT_WAIT: ${{ inputs.wait }}
-        TT_REQUIRE_REGISTRY: ${{ inputs.require-registry }}
+        TT_REQUIRE_SHARED_SEQ: ${{ inputs.require-shared-seq }}
         TT_PROD: ${{ inputs.prod }}
       run: |
         set -euo pipefail
@@ -203,7 +205,7 @@ runs:
         else
           if [ "$TT_TEST" = "true" ]; then args+=(--test); fi
           if [ -n "$TT_WAIT" ]; then args+=(--wait "$TT_WAIT"); else args+=(--no-wait); fi
-          if [ "$TT_REQUIRE_REGISTRY" = "true" ]; then args+=(--require-registry); fi
+          if [ "$TT_REQUIRE_SHARED_SEQ" = "true" ]; then args+=(--require-shared-seq); fi
         fi
         status=0
         $TT_CLI "${args[@]}" > "$out" || status=$?

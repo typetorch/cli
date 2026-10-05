@@ -13,7 +13,8 @@
  */
 import type { Project } from "../config.ts";
 import { appendLocalLog, liveHeads, mergeDeployments, nextSeqFrom, readLocalLog, type LocalDeployment } from "../deployments.ts";
-import { formatSeconds, info, type Stopwatch } from "../log.ts";
+import { debug, formatSeconds, info, warn, type Stopwatch } from "../log.ts";
+import { nextSharedSeq, type SharedSeq } from "../seqstore.ts";
 import type { BuildSources, Channel } from "../naming.ts";
 import { DEPLOY_TOPIC, deployMessage, encodeDeployMessage, type DeployMessage, type OpenCloud } from "../opencloud.ts";
 import type { DualSigner } from "../signing.ts";
@@ -51,6 +52,8 @@ export interface ReleaseInput {
 	signer?: DualSigner;
 	/** Dev-channel only: the message's `ro` (1-99). Not written to the registry head (see rollout.ts). */
 	rollout?: number;
+	/** The shared seq sources, already read (deploy reads them while it builds); else read under the lock. */
+	sharedSeq?: SharedSeq;
 	/** Extra fields for the local log line. */
 	extra?: Partial<LocalDeployment>;
 }
@@ -72,11 +75,13 @@ export function makeEntry(
 	input: Pick<ReleaseInput, "action" | "branch" | "artifact" | "by">,
 	registryValue: Parameters<typeof nextSeqFrom>[0],
 	local: LocalDeployment[],
+	/** The shared seq (seqstore.ts) when known: the entry takes at least this. */
+	floor?: number,
 ): RegistryDeployment {
 	const heads = liveHeads(registryValue, mergeDeployments(registryValue?.deployments ?? [], local));
 	const previous = heads.get(input.branch);
 	const entry: RegistryDeployment = {
-		seq: nextSeqFrom(registryValue, local),
+		seq: Math.max(nextSeqFrom(registryValue, local), floor ?? 0),
 		at: new Date().toISOString(),
 		action: input.action,
 		branch: input.branch,
@@ -147,6 +152,12 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 	return withStateLock(history.stateDir, `${input.action} ${input.branch} ${input.artifact.artifactId}`, async () => {
 		// Re-read the log under the lock: another deploy from this machine may have appended since history was read.
 		const local = readLocalLog(history.stateDir, proj.config.universeId);
+		// The shared seq (seqstore.ts): claimed from the DataStore counter when the deploy key may, else the highest of the
+		// kernel's DataStore heads/deployments + 1, else this machine's log (with a warning).
+		const decided = await nextSharedSeq(oc, proj.config.universeId, nextSeqFrom(history.snapshot?.value, local), input.sharedSeq);
+		if (decided.how === "local" && decided.note) warn(`the shared seq isn't readable (${decided.note}); #${decided.seq} comes from this machine's log only`);
+		else if (decided.how === "read" && decided.note) debug(`seq #${decided.seq} from the DataStore sources; the counter wasn't claimed: ${decided.note}`);
+		const floor = decided.seq;
 		let entry: RegistryDeployment | undefined;
 		let message: DeployMessage | undefined;
 		let registry: ReleaseResult["registry"];
@@ -159,7 +170,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 					api,
 					{ message: registryMessage(input.action, input.branch, input.artifact.artifactId, input.note), force: input.force, dryRun: false },
 					(current) => {
-						entry = makeEntry(input, current, local);
+						entry = makeEntry(input, current, local, floor);
 						message = messageFor(entry, signer, { rollout: input.rollout });
 						return recordDeployment(current, entry);
 					},
@@ -182,7 +193,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 			registry = api ? "unavailable" : "skipped";
 		}
 		if (!entry || !message) {
-			entry = makeEntry(input, history.snapshot?.value, local);
+			entry = makeEntry(input, history.snapshot?.value, local, floor);
 			message = messageFor(entry, signer, { rollout: input.rollout });
 		}
 
@@ -195,6 +206,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 			registry,
 			configVersion,
 			...(input.rollout !== undefined ? { rollout: input.rollout } : {}),
+			seqSource: decided.how,
 			...input.extra,
 		};
 		const text = encodeDeployMessage(message);

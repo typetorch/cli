@@ -15,11 +15,14 @@
  *                         hot assets (assets sync/status), the cloud test (typetorch test --cloud, the
  *                         pre-publish gate) and doctor's place check, also
  *                         universe.place.luau-execution-session:read + :write
- *   OPENCLOUD_DEPLOY_KEY  deploy messages and the ConfigService registry
- *                         universe-messaging-service:publish, universe:read (+ universe:write to write the registry);
- *                         the fleet (servers, report, --wait): memory-store.sorted-map:read
+ *   OPENCLOUD_DEPLOY_KEY  deploy messages, the shared seq (seqstore.ts) and the ConfigService registry
+ *                         universe-messaging-service:publish; universe-datastores.objects:read (+ :create and :update
+ *                         to claim seqs atomically); the fleet (servers, report, --wait): memory-store.sorted-map:read.
+ *                         The registry's read scope, universe:read, can't be granted to API keys today (OAuth only),
+ *                         so deploys skip the registry
  *   OPENCLOUD_PLACE_KEY   kernel deploy / restore (manual only)      universe.place:write (publish), asset:read (place
- *                         versions), legacy-asset:manage (download the place to patch it; Asset Delivery API)
+ *                         versions). Downloading the place needs legacy-asset:manage, which can't be granted to API
+ *                         keys today: kernel deploy takes --place-file (a copy downloaded in Studio)
  *   shared fallback: TYPETORCH_API_KEY, OPENCLOUD_API_KEY or ROBLOX_API_KEY
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -39,8 +42,8 @@ export const JOB_KEY_VARS: Record<KeyJob, string> = {
 
 export const JOB_SCOPES: Record<KeyJob, string> = {
 	assets: "asset:read, asset:write (+ universe.place.luau-execution-session:read/write for test --cloud, assets sync/status and doctor's place check)",
-	deploy: "universe-messaging-service:publish, universe:read (+ universe:write for the registry, memory-store.sorted-map:read for servers/report/--wait)",
-	place: "universe.place:write, asset:read, legacy-asset:manage (kernel deploy downloads the place to patch it)",
+	deploy: "universe-messaging-service:publish, universe-datastores.objects:read (+ :create and :update to claim seqs), memory-store.sorted-map:read for servers/report/--wait",
+	place: "universe.place:write, asset:read (place downloads need legacy-asset:manage, which API keys can't get today: use --place-file)",
 };
 
 export const ENV_FILE_VAR = "TYPETORCH_ENV_FILE";

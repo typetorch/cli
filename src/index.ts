@@ -83,7 +83,8 @@ const COMMANDS: Record<string, Command> = {
   --force        allow a dev-channel or dirty artifact on a prod-channel branch, or publish a config draft that has
                  other unpublished changes
   --no-registry  skip the ConfigService registry (servers persist the head from the deploy message anyway)
-  --require-registry  stop before the upload when the registry isn't readable (CI: no local log to take a seq from)
+  --require-shared-seq  stop before the upload when no shared seq source is readable (CI: no local log to take a seq
+                 from): the DataStore (universe-datastores.objects:read) or the registry. --require-registry: old name
   Prod-channel branches: the message is signed with both keys (sig + sigF) when it is published; the key files are
   checked before the upload. Dev-channel messages are unsigned. See \`typetorch keys\`.
 ${GATE_USAGE}
@@ -148,7 +149,8 @@ ${WAIT_USAGE}`,
 		usage: `typetorch config push [--dry-run] [--force]
 
   Writes defaultBranch, channels, members, devBadgeId (and revoked) into the registry, keeping branches and
-  deployments. Needs the universe:read and universe:write scopes.`,
+  deployments. Needs universe:read and universe:write; universe:read can't be granted to API keys today (OAuth
+  only), so with an API key this fails until Roblox offers it.`,
 	},
 	kernel: {
 		flags: kernelFlags,
@@ -174,7 +176,9 @@ typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
   --engine lune   re-encode the whole place with Lune (rbx-dom) when the default splice engine refuses; rbx-dom migrates
                   some properties (Image -> ImageContent, ...) and drops a few, listed in the summary
   restore         publish a place file (a backup, or a dry run's patched file) as the new live version
-  Scopes (the place key): asset:read, legacy-asset:manage (download), universe.place:write (publish). Records go to
+  Scopes (the place key): asset:read, universe.place:write (publish). Downloading the place needs legacy-asset:manage,
+  which can't be granted to API keys today: download a copy in Studio (File > Download a Copy) and pass
+  --place-file <file> --base <version>. Records go to
   kernel-deploys.jsonl in the state dir. Kernel dir: --kernel, else typetorch.json "kernel", else
   node_modules/@typetorch/kernel, else ../kernel.`,
 	},
