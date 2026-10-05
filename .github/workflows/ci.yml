@@ -1,0 +1,43 @@
+# @typetorch/cli: typecheck, unit tests, the Node build and the smoke test (compiled bin under plain Node, npm pack
+# file list and content scan, offline npx). Runs on Node 20 (the minimum) and 22 (zstd for hot assets: 22.15+).
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: typecheck, tests, build, smoke (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install
+        run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Unit tests
+        run: bun test
+      - name: Build (tsc -> dist/)
+        run: bun run build
+      - name: Smoke test (compiled code under Node, npm pack, scan, npx --offline)
+        run: node scripts/smoke.mjs --pack

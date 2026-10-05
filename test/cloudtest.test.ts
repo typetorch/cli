@@ -288,3 +288,29 @@ describe("typetorch test", () => {
 		}
 	});
 });
+
+describe("CI hand-off", () => {
+	test("approve --import: pending proposals of a CI state dir, with their upload and test lines, once", async () => {
+		const { importProposals } = await import("../src/proposals");
+		const ci = project();
+		const ciDir = join(ci.root, ".typetorch");
+		const artifact = { artifactId: "12b63b9-3fa91c", assetId: 777, channel: "prod" as const, commit: "12b63b9", commitHash: "", dirty: false };
+		const pending = propose(ci, { kind: "deploy", branch: "prod", branchChannel: "prod", artifact, force: false, by: "ci", test: { ok: true, at: new Date().toISOString(), seconds: 10 } }, { name: "ci", explicit: true });
+		const done = propose(ci, { kind: "deploy", branch: "dev", branchChannel: "dev", artifact: { ...artifact, assetId: 888 }, force: false, by: "ci" }, { name: "ci", explicit: true });
+		const { appendProposalEvent } = await import("../src/proposals");
+		appendProposalEvent(ciDir, { event: "rejected", id: done.id });
+		appendUpload(ciDir, { artifactId: artifact.artifactId, assetId: 777, moderation: "Approved", branch: "prod", channel: "prod", commit: "12b63b9", commitHash: "", dirty: false, sha256: "x", universeId: 42 });
+		appendUpload(ciDir, { artifactId: "other", assetId: 999, moderation: "Approved", branch: "dev", channel: "dev", commit: "x", commitHash: "", dirty: false, sha256: "y", universeId: 42 });
+		appendTestRecord(ciDir, { universeId: 42, assetId: 777, branch: "prod", channel: "prod", ok: true, seconds: 10, problems: 0, warnings: 0, via: "deploy" });
+
+		const pc = project();
+		const pcDir = join(pc.root, ".typetorch");
+		expect(importProposals(pcDir, ciDir, { universeId: 42 })).toEqual([pending.id]);
+		expect(importProposals(pcDir, ciDir, { universeId: 42 })).toEqual([]); // once
+		expect(readProposals(pcDir).map((s) => s.proposal.id)).toEqual([pending.id]);
+		const { readUploads } = await import("../src/deployments");
+		expect(readUploads(pcDir).map((u) => u.assetId)).toEqual([777]);
+		expect(recentPass(readTestRecords(pcDir, 42), 777)).toBeDefined();
+		expect(() => importProposals(pcDir, join(pc.root, "nowhere"), { universeId: 42 })).toThrow(/no proposals.jsonl/);
+	});
+});

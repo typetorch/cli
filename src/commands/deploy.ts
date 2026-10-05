@@ -46,6 +46,7 @@ export const deployFlags = {
 	message: "string",
 	force: "boolean",
 	"no-registry": "boolean",
+	"require-registry": "boolean",
 	"moderation-timeout": "string",
 	propose: "boolean",
 	"proposed-by": "string",
@@ -154,6 +155,10 @@ export async function deployCommand(args: ParsedArgs) {
 
 	const read = await readRegistryOrThrow();
 	const snapshot = read.snapshot;
+	// CI: a machine without the deployment log must not guess a seq (servers ignore a seq below the one they applied).
+	if (!snapshot && flagBool(args, "require-registry")) {
+		throw new Error(`--require-registry: the registry isn't readable (${read.unavailable ?? "unknown"}); without it this machine can't know the next seq. Give the deploy key universe:read and universe:write`);
+	}
 	if (!snapshot && api) warnRegistryFallback(read.unavailable ?? "unknown");
 	if (snapshot) assertNoForeignDraft(snapshot, force);
 	const history = withLocal(proj, snapshot, read.unavailable);

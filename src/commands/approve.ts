@@ -34,6 +34,7 @@ import {
 	appendProposal,
 	appendProposalEvent,
 	findProposal,
+	importProposals,
 	pendingProposals,
 	PROPOSER_PATTERN,
 	readProposals,
@@ -466,7 +467,7 @@ export async function waitAfterRelease(proj: Project, result: ReleaseResult, sec
 
 // Commands ---------------------------------------------------------------------------------------------------------
 
-export const approveFlags = { "no-registry": "boolean", "key-file": "string", "fallback-key-file": "string", rollout: "string", ...GATE_FLAGS, ...WAIT_FLAGS } as const;
+export const approveFlags = { "no-registry": "boolean", "key-file": "string", "fallback-key-file": "string", rollout: "string", import: "string", ...GATE_FLAGS, ...WAIT_FLAGS } as const;
 
 export async function approveCommand(args: ParsedArgs) {
 	const io = interaction();
@@ -477,6 +478,11 @@ export async function approveCommand(args: ParsedArgs) {
 	}
 	const proj = project(args);
 	const dir = projectStateDir(proj);
+	const from = flagString(args, "import");
+	if (from !== undefined) {
+		const imported = importProposals(dir, from, { universeId: proj.config.universeId });
+		info(imported.length ? `imported ${imported.length} pending proposal(s) from ${from}: ${imported.join(", ")}` : `nothing new to import from ${from}`);
+	}
 	const all = readProposals(dir, { universeId: proj.config.universeId });
 	let state: ProposalState | undefined;
 	const wanted = args.positionals[0];

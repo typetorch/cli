@@ -184,3 +184,44 @@ export function age(fromIso: string, now = Date.now()): string {
 export function proposalAction(kind: ProposalKind): RegistryDeployment["action"] {
 	return kind;
 }
+
+/**
+ * `typetorch approve --import <dir>`: copies the pending proposals of another state dir (CI's, downloaded from the
+ * workflow artifact) into this one, with their upload and cloud-test records, so `approve` can publish them here
+ * (prod is signed only on the owner's PC). Proposals already known here are skipped. Returns the imported ids.
+ */
+export function importProposals(dir: string, from: string, options: { universeId: number; now?: number }): string[] {
+	if (!existsSync(proposalFile(from))) throw new Error(`no ${PROPOSALS_LOG} in ${from} (download the CI run's typetorch-state artifact there)`);
+	const known = new Set(readProposals(dir).map((s) => s.proposal.id));
+	const incoming = readProposals(from, options).filter((s) => s.status === "pending" && !known.has(s.proposal.id));
+	const imported: string[] = [];
+	const assets = new Set<number>();
+	for (const state of incoming) {
+		append(dir, state.proposal);
+		imported.push(state.proposal.id);
+		assets.add(state.proposal.artifact.assetId);
+	}
+	// The matching upload and test lines (promote and the 24 h test reuse look there), once each.
+	for (const name of ["uploads.jsonl", "tests.jsonl"]) {
+		const source = join(from, name);
+		if (!existsSync(source) || assets.size === 0) continue;
+		const target = join(dir, name);
+		const present = new Set(existsSync(target) ? readFileSync(target, "utf8").split(/\r?\n/).filter(Boolean) : []);
+		const lines = readFileSync(source, "utf8")
+			.split(/\r?\n/)
+			.filter((line) => {
+				if (!line.trim() || present.has(line)) return false;
+				try {
+					const entry = JSON.parse(line);
+					return assets.has(entry?.assetId) && (entry.universeId === undefined || entry.universeId === options.universeId);
+				} catch {
+					return false;
+				}
+			});
+		if (lines.length) {
+			mkdirSync(dir, { recursive: true });
+			appendFileSync(target, lines.join("\n") + "\n");
+		}
+	}
+	return imported;
+}

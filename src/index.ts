@@ -83,6 +83,7 @@ const COMMANDS: Record<string, Command> = {
   --force        allow a dev-channel or dirty artifact on a prod-channel branch, or publish a config draft that has
                  other unpublished changes
   --no-registry  skip the ConfigService registry (servers persist the head from the deploy message anyway)
+  --require-registry  stop before the upload when the registry isn't readable (CI: no local log to take a seq from)
   Prod-channel branches: the message is signed with both keys (sig + sigF) when it is published; the key files are
   checked before the upload. Dev-channel messages are unsigned. See \`typetorch keys\`.
 ${GATE_USAGE}
@@ -175,6 +176,8 @@ ${WAIT_USAGE}`,
   age), asks y/N, then publishes it like a deploy (signed with both keys on a prod-channel branch). Refuses when
   stdin isn't an interactive terminal. A prod deploy or promote proposal without a passed (or skipped) cloud test
   runs it before the y/N. --rollout overrides the proposal's.
+  --import <dir>       first copy the pending proposals of another state dir (a CI run's typetorch-state artifact)
+                       into this one, with their upload and test records: prod proposals made in CI are approved here
 ${GATE_USAGE}
 ${WAIT_USAGE}
 ${ROLLOUT_USAGE}`,
