@@ -38,6 +38,8 @@ export interface LocalDeployment extends RegistryDeployment {
 	test?: TestSummary;
 	/** Dev-channel rollout % sent as the message's `ro` (`--rollout`); widened later with `deploy --widen`. */
 	rollout?: number;
+	/** The payload's ProtocolHash attribute (protocol.ts), when it had one. */
+	protocolHash?: string;
 	/** Where the seq came from (seqstore.ts): the DataStore counter, the shared sources read, or this machine only. */
 	seqSource?: "counter" | "read" | "local";
 	/**
@@ -107,6 +109,8 @@ export interface UploadRecord {
 	universeId?: number;
 	project?: string;
 	by?: string;
+	/** The payload's ProtocolHash (protocol.ts). */
+	protocolHash?: string;
 }
 
 export function readUploads(dir: string, universeId?: number): UploadRecord[] {
@@ -174,6 +178,8 @@ export interface LiveHead {
 	by: string;
 	dirty?: boolean;
 	sources?: BuildSources;
+	/** The deployed payload's ProtocolHash, from the local log (protocol.ts). */
+	protocolHash?: string;
 }
 
 /** Each branch's live head: the highest (seq, time) among the registry heads and every known deployment. */
@@ -202,6 +208,7 @@ export function liveHeads(registry: RegistryValue | undefined, rows: RegistryDep
 			by: d.by,
 			dirty: d.dirty,
 			sources: d.sources,
+			...((d as LocalDeployment).protocolHash ? { protocolHash: (d as LocalDeployment).protocolHash } : {}),
 		});
 	}
 	return heads;

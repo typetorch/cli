@@ -216,8 +216,15 @@ the cursor comes back on exit and on Ctrl+C. Without a terminal (CI, agents, pip
   writes `.typetorch/packages/manifest.json`), the checkouts' commits. `<commit>*` means a dirty checkout. Stamped as
   payload attributes and as `SOURCES` in build.ts, logged, and put on the registry head.
 - **Payload root attributes:** `ArtifactId`, `KernelApi` (1), `Channel`, `Commit`, `BuiltAt` (unix seconds),
-  `SourceTemplate`, `SourceFramework`, `SourceKernel`, `Notes`, and `Assets` (also on the payload's `Server` folder;
-  see "Hot assets").
+  `SourceTemplate`, `SourceFramework`, `SourceKernel`, `Notes`, `ProtocolHash`, and `Assets` (also on the payload's
+  `Server` folder; see "Hot assets").
+- **`ProtocolHash`** (`p1-<16 hex>`; kernel 0.3.2 lets client events cross a hot swap when the old and new payloads
+  carry the same one): a hash of the arguments of every `createNetwork(...)` call in the compiled game (`out/`), which
+  @typetorch/transformer generates from the network interfaces (every leaf's path and argument guard, both
+  directions), canonicalized so comments, whitespace, file paths and the order of unions, literal lists and fields
+  don't count, plus the framework's net runtime (`out/net/runtime.luau`: a new wire format is a new protocol). No
+  `createNetwork` call, nothing stamped. `typetorch build` and `deploy` print `protocol unchanged since #N` or
+  `protocol changed since #N` against the branch's previous deploy (recorded as `protocolHash` in the logs).
 - **`Notes`** (what the dev menu shows): a JSON string, at most 4000 bytes,
   `{"v":1,"message":"…","changes":["template: …","framework: …"],"sources":{"template":"…","framework":"…","kernel":"…"},"built":"<ISO>","branch":"…"}`.
   `message` is the deploy's `--message` (remote-claude passes Claude's summary); `changes` are the game's commits since

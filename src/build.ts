@@ -33,6 +33,7 @@ import { checkPayloadContents } from "./rbxm.ts";
 import { payloadNotes, sourceChanges } from "./changes.ts";
 import { liveHeads, readLocalLog } from "./deployments.ts";
 import { stateDir } from "./state.ts";
+import { PROTOCOL_ATTRIBUTE, protocolHash, protocolStatus, type ProtocolStatus } from "./protocol.ts";
 
 export const KERNEL_API = 1;
 export const BUILD_FILE = "src/shared/build.ts";
@@ -75,6 +76,9 @@ export interface PayloadMeta {
 	notes?: { message?: string; changes: string[] };
 	/** Hot assets stamped as the Assets attribute (typetorch.assets.lock.json; count 0, no placeVersion without one). */
 	assets?: { count: number; placeVersion?: number };
+	/** The network protocol hash stamped as ProtocolHash (protocol.ts), and how it compares to the branch's previous deploy. */
+	protocolHash?: string;
+	protocol?: { status: ProtocolStatus; since?: number; networks: number; files: string[] };
 }
 
 export interface BuildTarget {
@@ -374,7 +378,8 @@ export interface BuildOptions {
 
 export interface NotesInput {
 	message?: string;
-	previous?: { commit?: string; commitHash?: string; sources?: Partial<BuildSources> };
+	/** The branch's live head (seq and protocolHash: the protocol comparison; LiveHead carries both). */
+	previous?: { commit?: string; commitHash?: string; sources?: Partial<BuildSources>; seq?: number; protocolHash?: string };
 }
 
 /**
@@ -479,6 +484,16 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 	});
 	const notes = payloadNotes({ message: notesInput.message, changes, sources, built: builtAt, branch: target.branch });
 
+	// 4b. The network protocol hash (kernel 0.3.2, P-N1): same hash as the running payload = client events pass a swap.
+	const protocol = protocolHash(root, layout.outDir);
+	if (protocol.unguarded) warn(`${protocol.unguarded} createNetwork() call(s) without generated guards (is @typetorch/transformer in the tsconfig plugins?)`);
+	if (protocol.raw) debug(`${protocol.raw} createNetwork call(s) hashed as text (not readable canonically)`);
+	const previous = notesInput.previous;
+	const previousProtocol = previous
+		? (previous.protocolHash ?? readLocalLog(stateDir(root), project.config.universeId).filter((d) => d.branch === target.branch && d.seq === previous.seq).at(-1)?.protocolHash)
+		: undefined;
+	const protocolState = protocolStatus(protocol.hash, previous ? { seq: previous.seq ?? 0, protocolHash: previousProtocol } : undefined);
+
 	// 5. rojo build, root stamped with the identity. The id's hash is the sha256 of the payload stamped with the id
 	// without its hash (`<commit7>[-dirty]`); the final payload is stamped with the full id.
 	const outDir = join(root, OUT_DIR);
@@ -497,6 +512,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		if (sources.framework) stamped.SourceFramework = sources.framework;
 		if (sources.kernel) stamped.SourceKernel = sources.kernel;
 		stamped.Notes = notes;
+		if (protocol.hash) stamped[PROTOCOL_ATTRIBUTE] = protocol.hash;
 		stamped[ASSETS_PAYLOAD_ATTRIBUTE] = assetsJson;
 		return stamped;
 	};
@@ -548,6 +564,8 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		modules: contents.modules,
 		notes: { ...(notesInput.message ? { message: notesInput.message } : {}), changes: JSON.parse(notes).changes },
 		assets: { count: Object.keys(assetsLock?.assets ?? {}).length, ...(assetsLock ? { placeVersion: assetsLock.placeVersion } : {}) },
+		...(protocol.hash ? { protocolHash: protocol.hash } : {}),
+		protocol: { status: protocolState, ...(previous?.seq !== undefined ? { since: previous.seq } : {}), networks: protocol.networks, files: protocol.files },
 	};
 	writeFileSync(join(root, PAYLOAD_META), JSON.stringify(meta, null, "\t") + "\n");
 	return { meta, timings: watch.total(), target };

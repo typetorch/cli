@@ -5,6 +5,7 @@ import { appendUpload } from "../deployments.ts";
 import { gitInfo } from "../git.ts";
 import { dim, emitJson, formatBytes, formatSeconds, formatTimings, info, isJson, Stopwatch } from "../log.ts";
 import { branchNameError, formatSources } from "../naming.ts";
+import { describeProtocol } from "../protocol.ts";
 import { fixCensoredName, uploadPayload } from "../upload.ts";
 import { channelFlag, openCloud, project, projectStateDir } from "./common.ts";
 
@@ -26,6 +27,7 @@ export async function buildCommand(args: ParsedArgs) {
 	info(`built ${describeBuild(meta)}`);
 	info(`  ${PAYLOAD_FILE}  ${formatBytes(meta.bytes)}  ${meta.modules ?? "?"} modules  sha256 ${meta.sha256.slice(0, 16)}…`);
 	if (meta.sources) info(`  sources  ${formatSources(meta.sources)}`);
+	info(`  protocol ${describeProtocol({ hash: meta.protocolHash, status: meta.protocol?.status, since: meta.protocol?.since })}`);
 	for (const line of meta.notes?.changes ?? []) info(`  change   ${line}`);
 	if (meta.debugMacros === false) info(dim("  prod channel: $print/$warn removed, $assert/$error without source paths"));
 	info(dim(`  ${formatTimings(timings)}`));

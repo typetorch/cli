@@ -84,6 +84,7 @@ export async function rollbackCommand(args: ParsedArgs) {
 			sources: target.sources,
 			sha256: target.sha256,
 			assetName: target.assetName,
+			...(target.protocolHash ? { protocolHash: target.protocolHash } : {}),
 		},
 		changes: [`rollback to #${target.seq} (${target.artifactId})`],
 		history,

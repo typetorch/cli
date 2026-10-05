@@ -235,6 +235,7 @@ export async function approveProposal(
 			signer,
 			extra: {
 				...(p.artifact.sha256 ? { sha256: p.artifact.sha256 } : {}),
+				...(p.artifact.protocolHash ? { protocolHash: p.artifact.protocolHash } : {}),
 				...(p.changes ? { changes: p.changes } : {}),
 				proposalId: p.id,
 				proposedBy: p.proposedBy,
@@ -433,7 +434,7 @@ export async function releaseExisting(input: {
 		watch: input.watch,
 		noRegistry: flagBool(args, "no-registry"),
 		assetName: input.artifact.assetName,
-		extra: input.artifact.sha256 ? { sha256: input.artifact.sha256 } : undefined,
+		extra: { ...(input.artifact.sha256 ? { sha256: input.artifact.sha256 } : {}), ...(input.artifact.protocolHash ? { protocolHash: input.artifact.protocolHash } : {}) },
 		keyPaths,
 	});
 	if (outcome.kind === "proposed") return reportProposal(outcome.proposal);

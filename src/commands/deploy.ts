@@ -17,6 +17,7 @@ import { assertNoForeignDraft, tryReadRegistry, type RegistrySnapshot } from "..
 import { assetNaming, fixCensoredName, uploadPayload } from "../upload.ts";
 import { finishRelease, modeFor, reportProposal, waitAfterRelease } from "./approve.ts";
 import { gatePolicy, skipReason } from "../cloudtest.ts";
+import { describeProtocol } from "../protocol.ts";
 import { checkRollout, parseRollout } from "../rollout.ts";
 import { describeShared, DS_READ_SCOPE, DS_WRITE_SCOPES, readSharedSeq, type SharedSeq } from "../seqstore.ts";
 import { waitSeconds, WAIT_FLAGS } from "./fleet.ts";
@@ -156,6 +157,7 @@ export async function deployCommand(args: ParsedArgs) {
 		info(`  build       ${formatSeconds(watch.timings.build)}  ${describeBuild(meta)}  ${formatBytes(meta.bytes)}`);
 	}
 	if (meta.sources) info(dim(`  sources     ${formatSources(meta.sources)}`));
+	if (meta.protocol) info(dim(`  protocol    ${describeProtocol({ hash: meta.protocolHash, status: meta.protocol.status, since: meta.protocol.since })}`));
 	const branch = branchFlag ?? meta.branch;
 
 	const read = await readRegistryOrThrow();
@@ -194,6 +196,7 @@ export async function deployCommand(args: ParsedArgs) {
 		bytes: meta.bytes,
 		builtAt: meta.builtAt,
 		assetName: displayName,
+		...(meta.protocolHash ? { protocolHash: meta.protocolHash } : {}),
 	};
 
 	const keyPaths = signingKeyPaths(proj, args);
@@ -278,6 +281,7 @@ export async function deployCommand(args: ParsedArgs) {
 				bytes: meta.bytes,
 				builtAt: meta.builtAt,
 				assetName: displayName,
+				...(meta.protocolHash ? { protocolHash: meta.protocolHash } : {}),
 				universeId: proj.config.universeId,
 				project: proj.config.project,
 				by,
@@ -326,7 +330,7 @@ export async function deployCommand(args: ParsedArgs) {
 		watch,
 		noRegistry,
 		assetName: displayName,
-		extra: { sha256: meta.sha256 },
+		extra: { sha256: meta.sha256, ...(meta.protocolHash ? { protocolHash: meta.protocolHash } : {}) },
 		keyPaths,
 		signer,
 	});

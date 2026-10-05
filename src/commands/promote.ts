@@ -75,6 +75,7 @@ function fromUpload(upload: UploadRecord): Candidate {
 		bytes: upload.bytes,
 		builtAt: upload.builtAt,
 		assetName: upload.assetName,
+		...(upload.protocolHash ? { protocolHash: upload.protocolHash } : {}),
 		changes: upload.changes,
 		moderation: upload.moderation,
 		from: "uploads",
@@ -136,6 +137,7 @@ export async function promoteCommand(args: ParsedArgs) {
 		...(target.bytes !== undefined ? { bytes: target.bytes } : {}),
 		...(target.builtAt ? { builtAt: target.builtAt } : {}),
 		...(target.assetName ? { assetName: target.assetName } : {}),
+		...(target.protocolHash ? { protocolHash: target.protocolHash } : {}),
 	};
 	const { from, changes } = target;
 	await releaseExisting({

@@ -38,6 +38,8 @@ export interface ProposalArtifact {
 	bytes?: number;
 	builtAt?: string;
 	assetName?: string;
+	/** The payload's ProtocolHash (protocol.ts). */
+	protocolHash?: string;
 }
 
 export interface Proposal {
