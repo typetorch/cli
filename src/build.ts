@@ -28,6 +28,7 @@ import {
 	PACKAGES_MANIFEST,
 } from "./naming";
 import { query, run } from "./proc";
+import { ASSETS_PAYLOAD_ATTRIBUTE, assetsAttribute, readAssetsLock } from "./assets";
 import { checkPayloadContents } from "./rbxm";
 import { payloadNotes, sourceChanges } from "./changes";
 import { liveHeads, readLocalLog } from "./deployments";
@@ -72,6 +73,8 @@ export interface PayloadMeta {
 	modules?: number;
 	/** What was stamped as the payload's Notes attribute (message + change lines). */
 	notes?: { message?: string; changes: string[] };
+	/** Hot assets stamped as the Assets attribute (from typetorch.assets.lock.json); absent without a lockfile. */
+	assets?: { count: number; placeVersion: number };
 }
 
 export interface BuildTarget {
@@ -394,6 +397,10 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 	const projectJson = readJsonc(defaultProjectPath);
 	for (const problem of checkPayloadTree(projectJson)) warn(`default.project.json: ${problem}`);
 	const layout = tsLayout(root);
+	// Hot assets (plans/13): the lockfile's asset map rides the payload as the Assets attribute (none without a
+	// lockfile). Read first, so an invalid lockfile stops the build before rbxtsc.
+	const assetsLock = readAssetsLock(root);
+	const assetsJson = assetsLock ? assetsAttribute(assetsLock) : undefined;
 
 	// 1. Clean state (S-M3): no stale or stray output, and no ignored file in a source dir, can reach a clean id.
 	if (options.clean) {
@@ -476,6 +483,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		if (sources.framework) stamped.SourceFramework = sources.framework;
 		if (sources.kernel) stamped.SourceKernel = sources.kernel;
 		stamped.Notes = notes;
+		if (assetsJson !== undefined) stamped[ASSETS_PAYLOAD_ATTRIBUTE] = assetsJson;
 		return stamped;
 	};
 	const rojoBuild = async (id: string): Promise<Uint8Array> => {
@@ -524,6 +532,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		debugMacros,
 		modules: contents.modules,
 		notes: { ...(notesInput.message ? { message: notesInput.message } : {}), changes: JSON.parse(notes).changes },
+		...(assetsLock ? { assets: { count: Object.keys(assetsLock.assets).length, placeVersion: assetsLock.placeVersion } } : {}),
 	};
 	writeFileSync(join(root, PAYLOAD_META), JSON.stringify(meta, null, "\t") + "\n");
 	return { meta, timings: watch.total(), target };

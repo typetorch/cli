@@ -36,6 +36,23 @@ export interface ApiResponse {
 	headers: Headers;
 }
 
+export interface LuauTaskResult {
+	state: string;
+	results: unknown[];
+	error?: unknown;
+	/** The task's resource path (it names the place version the task ran on). */
+	path?: string;
+	/** With `binaryOutput`: where the task's buffer can be downloaded (15 minutes). */
+	binaryOutputUri?: string;
+}
+
+export interface PlaceVersion {
+	version: number;
+	published: boolean;
+	/** Whether the API sent a `published` boolean at all for this version. */
+	hasPublishedField: boolean;
+}
+
 export interface RequestOptions {
 	headers?: Record<string, string>;
 	/** Sent as JSON with content-type application/json. */
@@ -183,12 +200,22 @@ export class OpenCloud {
 	// Luau Execution -------------------------------------------------------------------------------------------------
 
 	/**
-	 * Runs a Luau script in a headless server of the place's latest version (Open Cloud Luau Execution; scopes
+	 * Runs a Luau script in a headless server of the place (Open Cloud Luau Execution; scopes
 	 * universe.place.luau-execution-session:read + :write) and returns its return values. Spike S9.
+	 * `version`: run against that place version (`/versions/{n}/...`) instead of the latest one.
+	 * `binaryOutput`: `enableBinaryOutput`; the script then returns `{BinaryOutput = buffer, ReturnValues = {...}}`,
+	 * `results` are the ReturnValues and `binaryOutputUri` (valid 15 min) holds the buffer (`downloadBinaryOutput`).
 	 */
-	async runLuau(universeId: number, placeId: number, script: string, timeoutSeconds = 60): Promise<{ state: string; results: unknown[]; error?: unknown }> {
-		const task = await this.call("POST", `/cloud/v2/universes/${universeId}/places/${placeId}/luau-execution-session-tasks`, {
-			json: { script, timeout: `${timeoutSeconds}s` },
+	async runLuau(
+		universeId: number,
+		placeId: number,
+		script: string,
+		timeoutSeconds = 60,
+		options: { version?: number; binaryOutput?: boolean } = {},
+	): Promise<LuauTaskResult> {
+		const base = `/cloud/v2/universes/${universeId}/places/${placeId}${options.version !== undefined ? `/versions/${options.version}` : ""}`;
+		const task = await this.call("POST", `${base}/luau-execution-session-tasks`, {
+			json: { script, timeout: `${timeoutSeconds}s`, ...(options.binaryOutput ? { enableBinaryOutput: true } : {}) },
 		});
 		let current = task;
 		const started = performance.now();
@@ -197,7 +224,57 @@ export class OpenCloud {
 			await Bun.sleep(1500);
 			current = await this.call("GET", `/cloud/v2/${task.path}`);
 		}
-		return { state: String(current?.state), results: Array.isArray(current?.output?.results) ? current.output.results : [], error: current?.error };
+		return {
+			state: String(current?.state),
+			results: Array.isArray(current?.output?.results) ? current.output.results : [],
+			error: current?.error,
+			path: typeof (current?.path ?? task?.path) === "string" ? (current?.path ?? task?.path) : undefined,
+			...(typeof current?.binaryOutputUri === "string" ? { binaryOutputUri: current.binaryOutputUri } : {}),
+		};
+	}
+
+	/**
+	 * Downloads a task's binary output. The URI is presigned: the API key is sent only when it points at
+	 * apis.roblox.com, never to another host, and the URI (it carries a signature) is never logged.
+	 */
+	async downloadBinaryOutput(uri: string, timeoutMs = 300_000): Promise<Uint8Array> {
+		const url = new URL(uri);
+		if (url.protocol !== "https:") throw new Error(`refusing a binary output URI that isn't https (${url.protocol}//${url.hostname})`);
+		const headers: Record<string, string> = url.hostname === "apis.roblox.com" ? { "x-api-key": this.apiKey } : {};
+		let last = "";
+		for (let attempt = 1; attempt <= 3; attempt++) {
+			try {
+				const response = await fetch(url, { headers, signal: AbortSignal.timeout(timeoutMs) });
+				debug(`GET binary output from ${url.hostname} -> ${response.status}`);
+				if (response.ok) return new Uint8Array(await response.arrayBuffer());
+				last = `${response.status} ${(await response.text()).slice(0, 300)}`;
+				if (response.status !== 429 && response.status < 500) break;
+			} catch (error) {
+				last = String((error as Error)?.message ?? error);
+			}
+			if (attempt < 3) await Bun.sleep(500 * 2 ** (attempt - 1));
+		}
+		throw new Error(redact(`downloading the task's binary output from ${url.hostname} failed: ${last}`));
+	}
+
+	/**
+	 * A place's versions, newest first (Assets API; asset:read on the place), up to `maxPages` pages of 50.
+	 * `published` is the Assets API's flag ("only applies to place asset types"); JSON leaves false out.
+	 */
+	async placeVersions(placeId: number, maxPages = 3): Promise<PlaceVersion[]> {
+		const versions: PlaceVersion[] = [];
+		let pageToken: string | undefined;
+		for (let page = 0; page < maxPages; page++) {
+			const query = `maxPageSize=50${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`;
+			const body = await this.call("GET", `/assets/v1/assets/${placeId}/versions?${query}`);
+			for (const entry of Array.isArray(body?.assetVersions) ? body.assetVersions : []) {
+				const version = typeof entry?.path === "string" ? Number(entry.path.split("/").pop()) : Number.NaN;
+				if (Number.isSafeInteger(version)) versions.push({ version, published: entry.published === true, hasPublishedField: typeof entry.published === "boolean" });
+			}
+			pageToken = typeof body?.nextPageToken === "string" && body.nextPageToken ? body.nextPageToken : undefined;
+			if (!pageToken) break;
+		}
+		return versions;
 	}
 
 	// Places ---------------------------------------------------------------------------------------------------------

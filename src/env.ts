@@ -12,6 +12,8 @@
  *
  * Open Cloud keys, one per job (decision D4; each falls back to the shared key):
  *   OPENCLOUD_ASSETS_KEY  asset uploads and moderation polling        asset:read, asset:write
+ *                         hot assets (assets sync/status) and doctor's place check, also
+ *                         universe.place.luau-execution-session:read + :write
  *   OPENCLOUD_DEPLOY_KEY  deploy messages and the ConfigService registry
  *                         universe-messaging-service:publish, universe:read (+ universe:write to write the registry)
  *   OPENCLOUD_PLACE_KEY   kernel deploy (place publish; manual only)  universe.place:write (+ asset:read to record the
@@ -34,7 +36,7 @@ export const JOB_KEY_VARS: Record<KeyJob, string> = {
 };
 
 export const JOB_SCOPES: Record<KeyJob, string> = {
-	assets: "asset:read, asset:write",
+	assets: "asset:read, asset:write (+ universe.place.luau-execution-session:read/write for assets sync/status and doctor's place check)",
 	deploy: "universe-messaging-service:publish, universe:read (+ universe:write for the registry)",
 	place: "universe.place:write (+ asset:read to record the place version)",
 };

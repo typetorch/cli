@@ -27,17 +27,20 @@ export class LockError extends Error {
 	override name = "LockError";
 }
 
+/** `typetorch assets sync` holds this one while it uploads and writes the lockfile (deploys keep `deploy.lock`). */
+export const ASSETS_SYNC_LOCK = "assets-sync.lock";
+
 /**
- * Runs `fn` while holding the state dir's deploy lock. Waits up to `waitMs` for another holder; a lock older than
- * `staleMs` (a crashed run) is taken over.
+ * Runs `fn` while holding the state dir's deploy lock (or `options.file`). Waits up to `waitMs` for another holder; a
+ * lock older than `staleMs` (a crashed run) is taken over.
  */
 export async function withStateLock<T>(
 	dir: string,
 	what: string,
 	fn: () => Promise<T>,
-	options: { waitMs?: number; staleMs?: number } = {},
+	options: { waitMs?: number; staleMs?: number; file?: string } = {},
 ): Promise<T> {
-	const file = join(dir, LOCK_FILE);
+	const file = join(dir, options.file ?? LOCK_FILE);
 	const waitMs = options.waitMs ?? 120_000;
 	const staleMs = options.staleMs ?? 10 * 60_000;
 	mkdirSync(dir, { recursive: true });
@@ -64,7 +67,7 @@ export async function withStateLock<T>(
 				continue;
 			}
 			if (Date.now() - started > waitMs) {
-				throw new LockError(`another deploy holds ${file} (${holder.slice(0, 200)}); wait for it, or delete the file if that run is gone`);
+				throw new LockError(`another ${options.file ? "run" : "deploy"} holds ${file} (${holder.slice(0, 200)}); wait for it, or delete the file if that run is gone`);
 			}
 			await Bun.sleep(250);
 		}

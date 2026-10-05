@@ -5,6 +5,7 @@
  */
 import pkg from "../package.json" with { type: "json" };
 import { flagBool, flagString, parseArgs, UsageError, type FlagSpec, type ParsedArgs } from "./args";
+import { assetsCommand, assetsFlags } from "./commands/assets";
 import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands/build";
 import { configCommand, configFlags } from "./commands/config";
 import { deployCommand, deployFlags } from "./commands/deploy";
@@ -209,6 +210,32 @@ typetorch keys resign [--key-file <path>] [--fallback-key-file <path>]
 		usage: `typetorch proposals [--all] [--json]
 
   Proposals live in proposals.jsonl in the state dir and expire after 24 h.`,
+	},
+	assets: {
+		flags: assetsFlags,
+		run: (args) => assetsCommand(args),
+		summary: "hot assets: sync models/UI marked TypeTorchAsset in the place to assets + typetorch.assets.lock.json",
+		usage: `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n>] [--moderation-timeout <s>]
+typetorch assets status [--place-version <n>]
+typetorch assets list
+
+  Hot assets (TypeTorch plans/13): instances in the place with the attribute TypeTorchAsset = "<key>" (lowercase
+  a-z 0-9 / - _, at most 64 characters, unique, no scripts inside, not inside another hot asset).
+  sync    1. a Luau Execution task on the place's latest PUBLISHED version (or --place-version) serializes each one
+          2. SHA-256 (first 12 hex) vs typetorch.assets.lock.json
+          3. new key: a group-owned Model (a placeholder reserves the id, the export is its next version); changed key:
+             a new version of the SAME asset (PATCH). Uploaded copies carry TypeTorchAssetId and TypeTorchAssetHash;
+             the place is never changed. Waits for moderation; logged to assets.jsonl in the state dir
+          4. a second task resolves each new version's assetVersionId (GetLatestAssetVersionAsync, hash checked)
+          5. writes typetorch.assets.lock.json (commit it); \`typetorch deploy\` stamps its asset map on the payload as
+             the Assets attribute
+  --dry-run          stop after the diff (= assets status)
+  --deploy <branch>  then deploy that branch (same approval policy; --message, --propose, --proposed-by,
+                     --no-registry and the key file flags are passed on). A prod-channel branch needs the lockfile
+                     committed first, so --deploy refuses it when the sync changes the lockfile.
+  status  export + diff, nothing uploaded or written
+  list    the lockfile
+  Scopes (the assets key): asset:read, asset:write, universe.place.luau-execution-session:read and :write.`,
 	},
 	doctor: {
 		flags: doctorFlags,

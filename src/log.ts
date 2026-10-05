@@ -42,9 +42,30 @@ export function debug(line: string) {
 	if (verboseMode) console.error(dim(`[debug] ${line}`));
 }
 
+let jsonSink: ((value: unknown) => void) | undefined;
+
 /** The one JSON document of a --json run. */
 export function emitJson(value: unknown) {
-	console.log(JSON.stringify(value, null, 2));
+	if (jsonSink) jsonSink(value);
+	else console.log(JSON.stringify(value, null, 2));
+}
+
+/**
+ * Runs `fn` with emitJson captured instead of printed, so a command that runs another one (`assets sync --deploy`)
+ * still emits ONE document holding both. Returns the last captured document.
+ */
+export async function captureJson(fn: () => Promise<void>): Promise<unknown> {
+	const previous = jsonSink;
+	let captured: unknown;
+	jsonSink = (value) => {
+		captured = value;
+	};
+	try {
+		await fn();
+	} finally {
+		jsonSink = previous;
+	}
+	return captured;
 }
 
 export function seconds(ms: number): number {
