@@ -115,7 +115,7 @@ message. Keep the deploy key away from agents. An old `signingPublicKey` (CLI 0.
 Releases (deploy, rollback, promote, re-sign) and pins to a **prod-channel** branch are signed with two Ed25519 keys
 when they are published; dev-channel ones never are. Every prod message and registry head carries `sig` (main key) and
 `sigF` (fallback key). The kernel's rule is strict: once the key asset has loaded on a server only `sig` counts; while
-it never loaded only `sigF` counts (format, rule and vectors in TypeTorch `plans/03-artifact.md`).
+it never loaded only `sigF` counts (rules: [Prod signing](https://github.com/typetorch/docs/blob/main/guides/prod-signing.md)).
 
 | | Main key | Fallback key |
 |---|---|---|
@@ -235,7 +235,7 @@ script name.
 `{"b":branch,"a":assetId,"i":artifactId,"s":seq,"c":commit,"ch":channel,"t":unixMs,"r":1?,"sig":"…","sigF":"…"}` (`r`:
 `1` for rollbacks, `"resign"` for heads re-signed by `keys rotate`; `sig`/`sigF` only for prod-channel branches: base64
 Ed25519 over
-`tt1\n<b>\n<a>\n<i>\n<s>\n<c>\n<ch>\n<t>\n<r>`, rules and test vectors in TypeTorch `plans/03-artifact.md`). Servers on
+`tt1\n<b>\n<a>\n<i>\n<s>\n<c>\n<ch>\n<t>\n<r>`, rules in [Prod signing](https://github.com/typetorch/docs/blob/main/guides/prod-signing.md)). Servers on
 branch `b` swap, and persist it as their branch head (the higher `s` wins; heads are ordered by `(seq, time)`).
 `TypeTorch/rekey` `{"t":unixMs}` tells servers to re-read the key asset (after `keys rotate`).
 
@@ -265,7 +265,7 @@ log. **When it can be read but not written, the deploy aborts** before the messa
 ### Hot assets
 
 Builders edit models and UI templates in the real place and publish it as usual; running servers pick up the new
-versions without a restart (the framework's `hotAsset`). Design: TypeTorch `plans/13` "Hot assets".
+versions without a restart (the framework's `hotAsset`). Guide: [Hot assets](https://github.com/typetorch/docs/blob/main/guides/hot-assets.md).
 
 - **Marking:** any instance with the string attribute `TypeTorchAsset` = a key: lowercase `a-z 0-9 / - _`, at most 64
   characters, unique in the place. A hot asset may not contain scripts (any LuaSourceContainer), may not sit inside
@@ -337,7 +337,7 @@ versions without a restart (the framework's `hotAsset`). Design: TypeTorch `plan
    `ServerScriptService.TypeTorchKernel` (publishing refuses without the keys, or when the fallback key file doesn't
    match);
 4. publishes **only with `--replace-place --yes`**, which replaces the whole place and wipes Studio/Team Create
-   content (patching just the kernel slots comes later; see TypeTorch `plans/13`). The place version before and after
+   content (patching just the kernel slots comes later). The place version before and after
    go to `kernel-deploys.jsonl`. `--dry-run` stops before publishing.
 
 ## Develop
