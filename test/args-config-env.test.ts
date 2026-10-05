@@ -64,6 +64,13 @@ describe("validateConfig", () => {
 		expect(validateConfig({ ...good, revoked: { "5": true, "6": false } }).config?.revoked).toEqual({ "5": true });
 	});
 	test("warns about unknown keys", () => expect(validateConfig({ ...good, extra: 1 }).warnings).toHaveLength(1));
+	test("roles: owner and dev; the old admin is a dev, with a warning (kernel 0.3.4)", () => {
+		const { config, errors, warnings } = validateConfig({ ...good, members: { "1": "owner", "2": "admin", "3": "dev" } });
+		expect(errors).toEqual([]);
+		expect(config?.members).toEqual({ "1": "owner", "2": "dev", "3": "dev" });
+		expect(warnings).toEqual([`"members.2": role admin no longer exists: use owner or dev (treated as dev)`]);
+		expect(validateConfig({ ...good, members: { "4": "god" } }).errors[0]).toMatch(/must be one of owner, dev/);
+	});
 	test("signing fields: base64 32-byte keys, no duplicates, a separate fallback, no test-vector keys, a numeric key asset", () => {
 		const a = generateSigningKey().publicKey;
 		const b = generateSigningKey().publicKey;

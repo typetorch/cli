@@ -9,7 +9,7 @@
  *   "defaultBranch": "prod",
  *   "branches": { "main": "prod" },           // git branch -> TypeTorch branch
  *   "channels": { "prod": "prod" },           // TypeTorch branch -> channel (unlisted: prod for defaultBranch, else dev)
- *   "members": { "123456789": "owner" },      // userId -> owner | admin | dev
+ *   "members": { "123456789": "owner" },      // userId -> owner | dev (kernel 0.3.4: no admin role)
  *   "revoked": { "123": true },               // optional
  *   "devBadgeId": null,
  *   "kernel": "node_modules/@typetorch/kernel", // optional, folder with place.project.json
@@ -28,8 +28,11 @@ import { branchNameError, isChannel, type Channel } from "./naming.ts";
 import { isTestVectorKey, publicKeyError, publicKeyListProblems } from "./signing.ts";
 
 export const CONFIG_FILE = "typetorch.json";
-export const ROLES = ["owner", "admin", "dev"] as const;
+/** Kernel 0.3.4 / framework 0.3.2: two roles. The old "admin" is read as "dev" (least privilege), with a warning. */
+export const ROLES = ["owner", "dev"] as const;
 export type Role = (typeof ROLES)[number];
+/** The warning `typetorch doctor` (and every command) shows for a member with the old role "admin". */
+export const ADMIN_ROLE_WARNING = "role admin no longer exists: use owner or dev";
 
 export interface ProjectConfig {
 	project: string;
@@ -164,7 +167,10 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 		else
 			for (const [userId, role] of Object.entries(raw.members)) {
 				if (!/^\d+$/.test(userId)) errors.push(`"members": "${userId}" is not a user id`);
-				if (!ROLES.includes(role as Role)) errors.push(`"members.${userId}" must be one of ${ROLES.join(", ")}`);
+				if (role === "admin") {
+					warnings.push(`"members.${userId}": ${ADMIN_ROLE_WARNING} (treated as dev)`);
+					members[userId] = "dev";
+				} else if (!ROLES.includes(role as Role)) errors.push(`"members.${userId}" must be one of ${ROLES.join(", ")}`);
 				else members[userId] = role as Role;
 			}
 	}

@@ -8,7 +8,7 @@
  * Message (kernel 0.2.3 fields, this order): {j?, pct?, a?, b, by, t, unpin?} plus sig/sigF on prod. `--all` is
  * pct 100. JobIds that don't fit one 1 KiB message are split over several messages, each signed on its own.
  * `by` is the user's id: --by, else the single "owner" in typetorch.json members, else the creator userId; servers
- * check that it is an owner or admin.
+ * check that it is an owner.
  *
  * Approval follows the typetorch.json policy like a deploy: when it applies, a person at the terminal answers y/N
  * (pins can't wait as proposals: the kernel drops pins older than 120 s, and `t` is set when published). Signing
@@ -100,7 +100,7 @@ export function pinBy(proj: Pick<Project, "config">, flag?: string): number {
 		.map(([id]) => Number(id));
 	if (owners.length === 1) return owners[0];
 	if ("userId" in proj.config.creator) return proj.config.creator.userId;
-	throw new UsageError(`which user sends the pin? pass --by <your userId> (servers accept owners and admins; typetorch.json members has ${owners.length} owners)`);
+	throw new UsageError(`which user sends the pin? pass --by <your userId> (servers accept owners only; typetorch.json members has ${owners.length} owners)`);
 }
 
 /** Splits the JobIds over as many messages as needed so each signed message fits 1 KiB (order kept). */

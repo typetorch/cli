@@ -59,7 +59,7 @@ A game repo has `typetorch.json` next to `default.project.json`:
   "defaultBranch": "prod",
   "branches": { "main": "prod" },        // git branch -> TypeTorch branch (default: lowercased, "/" -> "-")
   "channels": { "prod": "prod" },        // branch -> "prod" | "dev" (default: prod for defaultBranch, else dev)
-  "members": { "123456789": "owner" },   // userId -> owner | admin | dev
+  "members": { "123456789": "owner" },   // userId -> owner | dev ("admin" no longer exists: read as dev, with a warning)
   "devBadgeId": null,
   "kernel": "node_modules/@typetorch/kernel",
   "approval": "all",                     // "all" (default) | "prod" | "none": which deploys need `typetorch approve`
@@ -151,8 +151,8 @@ key asset's RevokedKeys first, then makes a new pair), then `typetorch kernel de
 **Signed pins (A/B experiments on prod):** `typetorch pin <artifact> --branch <b> (--servers <jobId,...> | --pct
 <1-99>)` and `typetorch pin --unpin --branch <b> (--servers ... | --all)` publish `TypeTorch/pin` (kernel 0.2.3 fields)
 with `sig`/`sigF` on prod-channel branches, after a y/N (the approval policy; pins can't be proposals because servers
-drop them after 120 s). `--by <userId>` names the owner/admin (default: the only "owner" in `members`, else the creator
-userId). Unsigned pins from the in-game Admin tab only work on dev-channel servers.
+drop them after 120 s). `--by <userId>` names the owner (default: the only "owner" in `members`, else the creator
+userId). Unsigned pins from the in-game Manage tab only work on dev-channel servers.
 
 No command prints a seed; a key file inside the repo or any git work tree is refused. The remote-claude dev-server only
 deploys dev-channel branches, never gets the key variables, and is refused if it ever tries to publish to prod. Dry runs

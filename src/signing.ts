@@ -96,7 +96,7 @@ export interface PinFields {
 	j?: string[];
 	/** 1-100: servers whose jobBucket is below it. */
 	pct?: number;
-	/** The owner's/admin's userId. */
+	/** The owner's userId. */
 	by: number;
 	t: number;
 	unpin?: true;

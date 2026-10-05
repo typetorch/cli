@@ -254,7 +254,7 @@ typetorch pin --unpin --branch <b> (--servers <jobId,...> | --all) [<artifact>] 
   --pct, run the artifact until the next deploy reaches them, an unpin, or they close. --all (unpin only) = every
   server. Prod-channel branches: signed with both keys (sig + sigF) when published. Approval follows typetorch.json
   "approval" like a deploy: a y/N here (pins can't be proposals: servers drop them after 120 s). --by: the userId
-  sent as the pinner (default: the only "owner" in members, else the creator userId); servers accept owners/admins.
+  sent as the pinner (default: the only "owner" in members, else the creator userId); servers accept owners only.
   Many JobIds are split over several messages (1 KiB each), each signed.`,
 	},
 	keys: {
