@@ -2,7 +2,8 @@
 
 `typetorch` builds a roblox-ts game into a payload, uploads it to Roblox as a private Model asset, and hot-swaps it
 into live servers without a restart. It also promotes and rolls back already uploaded builds, lists deployments with
-their git identity, and checks and publishes the kernel place. **Every deploy is approved by a person**
+their git identity, checks and publishes the kernel place, and syncs **hot assets** (models and UI templates that
+builders edit in the place) into the artifact. **Every deploy is approved by a person**
 (`typetorch approve`); agents and the remote-claude dev-server only prepare them. **Prod-channel deploys are signed**
 with two Ed25519 keys, so live prod servers only run what you published.
 
@@ -68,7 +69,7 @@ scripts, git) get an allowlisted environment without any key. Keys are never pri
 
 | Variable | Used for | Scopes |
 |---|---|---|
-| `OPENCLOUD_ASSETS_KEY` | payload uploads and moderation (`deploy`, `upload`) | `asset:read`, `asset:write` |
+| `OPENCLOUD_ASSETS_KEY` | payload uploads and moderation (`deploy`, `upload`); hot assets (`assets sync`, `assets status`); doctor's place check | `asset:read`, `asset:write`; `universe.place.luau-execution-session:read` + `:write` for hot assets and doctor (see "Hot assets") |
 | `OPENCLOUD_DEPLOY_KEY` | deploy messages and the registry (`deploy`, `rollback`, `promote`, `config push`, `deployments`) | `universe-messaging-service:publish`, `universe:read` (+ `universe:write` to write the registry) |
 | `OPENCLOUD_PLACE_KEY` | `kernel deploy` (manual only) | `universe.place:write` (+ `asset:read` to record the place version) |
 | `TYPETORCH_API_KEY`, `OPENCLOUD_API_KEY` or `ROBLOX_API_KEY` | any job without its own key | all of the above |
@@ -160,6 +161,8 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch keys init [--key-file]` / `keys init --fallback [--force] [--yes]` / `keys rotate [--yes]` / `keys resign` | the signing keys: see "Signing prod deploys" |
 | `typetorch pin <artifact> --branch <b> (--servers <ids> \| --pct <1-99>)` / `pin --unpin --branch <b> (--servers <ids> \| --all)` | A/B experiment pins, signed on prod-channel branches; `--by`, `--dry-run` |
 | `typetorch reject <id> [--reason]` / `typetorch proposals [--all]` | drop a proposal / list them |
+| `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n>]` | hot assets: export the instances marked `TypeTorchAsset` from the place's latest published version, upload new and changed ones, write `typetorch.assets.lock.json`; see "Hot assets" |
+| `typetorch assets status` / `typetorch assets list` | export + diff without uploading / the lockfile |
 | `typetorch doctor` | checks bun, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key), and probes each key's scopes with harmless calls |
 
 Every command takes `--json` (one JSON document on stdout; human lines go to stderr), `--verbose`, `--config <path>`
@@ -182,7 +185,8 @@ and `--env-file <path>`.
   package. `<commit>*` means a dirty checkout. Stamped as payload attributes and as `SOURCES` in build.ts, logged, and
   put on the registry head.
 - **Payload root attributes:** `ArtifactId`, `KernelApi` (1), `Channel`, `Commit`, `BuiltAt` (unix seconds),
-  `SourceTemplate`, `SourceFramework`, `SourceKernel`, and `Notes`.
+  `SourceTemplate`, `SourceFramework`, `SourceKernel`, `Notes`, and `Assets` (also on the payload's `Server` folder;
+  see "Hot assets").
 - **`Notes`** (what the dev menu shows): a JSON string, at most 4000 bytes,
   `{"v":1,"message":"…","changes":["template: …","framework: …"],"sources":{"template":"…","framework":"…","kernel":"…"},"built":"<ISO>","branch":"…"}`.
   `message` is the deploy's `--message` (remote-claude passes Claude's summary); `changes` are the game's commits since
@@ -227,7 +231,8 @@ branch `b` swap, and persist it as their branch head (the higher `s` wins; heads
 The state dir (`TYPETORCH_STATE_DIR`, default `.typetorch/`) holds `deployments.jsonl` ("published" lines, with
 `proposalId` and `proposedBy` when approved from a proposal), `uploads.jsonl` ("uploaded" lines, written as soon as
 moderation answers, before anything is published), `proposals.jsonl` (proposed / approved / rejected / failed events)
-and `kernel-deploys.jsonl`. Choosing a seq and logging it happens under `deploy.lock` there, and logs are only appended.
+`kernel-deploys.jsonl` and `assets.jsonl` (hot assets: created / uploaded / failed / synced). Choosing a seq and logging
+it happens under `deploy.lock` there (`assets sync` holds `assets-sync.lock` instead), and logs are only appended.
 The remote-claude dev-server points the deploys it runs from its worktree at the main repo's state dir, so both share
 one log and one seq. If a deploy stops after the upload, `typetorch deployments` lists the upload with its
 `typetorch promote` command.
@@ -243,6 +248,67 @@ prod head like the message) and the last 25 deployments, under the 10,000-charac
 **The registry is optional.** When it can't be read (no `universe:read`), `deploy`, `rollback` and `promote` warn once
 and continue with the message; the next seq is one above the highest in the registry (if readable) and the state dir's
 log. **When it can be read but not written, the deploy aborts** before the message (pass `--no-registry` to skip it).
+
+### Hot assets
+
+Builders edit models and UI templates in the real place and publish it as usual; running servers pick up the new
+versions without a restart (the framework's `hotAsset`). Design: TypeTorch `plans/13` "Hot assets".
+
+- **Marking:** any instance with the string attribute `TypeTorchAsset` = a key: lowercase `a-z 0-9 / - _`, at most 64
+  characters, unique in the place. A hot asset may not contain scripts (any LuaSourceContainer), may not sit inside
+  another hot asset, and its parents' names may not contain `/`. A service can't be one. The sync refuses and lists
+  every problem before uploading anything.
+- **`typetorch assets sync`:**
+  1. **Export:** a Luau Execution task on the place's **latest published** version (the newest version the Assets API
+     marks `published`; `--place-version <n>` picks one) finds them, checks them, and serializes each with
+     `SerializationService:SerializeInstancesAsync`. The task returns its metadata as `ReturnValues` and the bytes as
+     binary output (`enableBinaryOutput`: `TTA1` + the exports back to back, at most 256 MiB, downloaded from a
+     presigned URL that never gets the key). The task drops the runtime's stamps (`TypeTorchAssetId`,
+     `TypeTorchAssetHash`, `TypeTorchAssetVersion`, `__typetorch_asset:*` tags) from its own copy first; the place is
+     never changed.
+  2. **Diff:** SHA-256 of each export, first 12 hex, against the lockfile: added, updated, removed, unchanged (and
+     moved: same bytes, another parent).
+  3. **Upload** (4 at a time): a new key gets a group-owned Model; a small placeholder (version 1) reserves the id,
+     then the export is PATCHed on as version 2. A changed key gets a new version of the SAME asset (PATCH), so ids
+     never change. Every uploaded copy carries `TypeTorchAssetId` (number) and `TypeTorchAssetHash` on its root.
+     Waits for moderation (`--moderation-timeout`, default 600 s). A removed key's asset stays on Roblox, and comes
+     back with the same id if the key does.
+  4. **Resolve:** a second task calls `InsertService:GetLatestAssetVersionAsync(id)` for each upload and loads that
+     version to check its `TypeTorchAssetHash` (retrying for up to 60 s), giving the `assetVersionId` that
+     `LoadAssetVersion` needs.
+  5. **Write** `typetorch.assets.lock.json` (commit it), **only when every upload and lookup worked**: its
+     `placeVersion` promises that every entry matches the place at that version, and new servers adopt the place's own
+     copies on that promise. A failed run writes nothing and exits 1; the next run reuses its approved uploads
+     (`assets.jsonl`) and a placeholder it created. A newer published place with the same assets only updates
+     `placeVersion`.
+  6. **Report** and print the next step. `--dry-run` stops after the diff. `--deploy <branch>` then runs `typetorch
+     deploy --branch <branch>` (same approval policy; `--message`, `--propose`, `--proposed-by`, `--no-registry`,
+     `--moderation-timeout` and the key file flags are passed on) when the Assets attribute changes. A prod-channel
+     branch only takes clean builds, so `--deploy` to one is refused while the sync changes the lockfile: sync, commit,
+     then deploy.
+- **`typetorch assets status`:** export + diff only (`upToDate` in `--json`). **`typetorch assets list`:** the lockfile.
+- **Lockfile** (`typetorch.assets.lock.json`, keys sorted, one line per asset):
+
+  ```json
+  {
+  	"v": 1,
+  	"placeVersion": 57,
+  	"assets": {
+  		"ui/shop": {"id":123456789012,"ver":44838191841145,"n":2,"hash":"abc123def456","realm":"replicated","path":"ReplicatedStorage/Assets/UI","className":"ScreenGui"}
+  	}
+  }
+  ```
+
+  `id` asset id, `ver` assetVersionId, `n` version number, `hash` the export's SHA-256 (12 hex), `path` the parent's
+  path, `realm` `server` under ServerStorage or ServerScriptService, else `replicated`.
+- **In the artifact:** every build stamps the lockfile as the JSON attribute `Assets` on the payload root **and on its
+  `Server` folder** (the kernel drops the root; the framework reads `Server`): `{"v":1,"placeVersion":57,"assets":{...}}`,
+  or `{"v":1,"assets":{}}` without a lockfile. An invalid lockfile stops the build. It is data only: the payload check
+  (Folders and ModuleScripts) is unchanged. On prod it rides the signed payload; a rollback brings back older versions.
+- **Scopes** (the assets key, `OPENCLOUD_ASSETS_KEY` or the shared key): `asset:read` (also on the place: its version
+  list), `asset:write`, `universe.place.luau-execution-session:read` and `universe.place.luau-execution-session:write`.
+  A refused call stops the command and names the scope. Luau Execution allows 5 task creations per minute per key
+  owner; a sync uses 2 (`status` 1).
 
 ### Kernel deploy
 
