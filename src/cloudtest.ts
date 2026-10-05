@@ -25,6 +25,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { latestPublishedVersion } from "./assets.ts";
 import { debug, warn } from "./log.ts";
+import { withJob } from "./progress.ts";
 import { ApiError, type OpenCloud } from "./opencloud.ts";
 import { sleep } from "./runtime.ts";
 import type { Channel } from "./naming.ts";
@@ -692,6 +693,10 @@ export interface GateClient {
 
 /** Runs the gate: the latest published place version, one task, the verdict. Throws GateError for setup problems. */
 export async function runGate(oc: GateClient, place: { universeId: number; placeId: number }, input: GateInput, options: { onWait?: (text: string) => void } = {}): Promise<GateRun> {
+	return withJob(`cloud test of asset ${input.assetId}`, () => gate(oc, place, input, options));
+}
+
+async function gate(oc: GateClient, place: { universeId: number; placeId: number }, input: GateInput, options: { onWait?: (text: string) => void }): Promise<GateRun> {
 	const started = performance.now();
 	let placeVersion: number | undefined;
 	let base: GateRun["base"] = "latest published";

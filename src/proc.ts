@@ -6,7 +6,19 @@
  */
 import { childEnv } from "./env.ts";
 import { debug, isVerbose } from "./log.ts";
+import { withJob } from "./progress.ts";
 import { captureAsync, captureSync } from "./runtime.ts";
+
+/** "rbxtsc", "rojo build", "lune run", "bun run build": the program and its subcommand, for the progress line. */
+export function commandLabel(cmd: readonly string[]): string {
+	const program = (cmd[0] ?? "").split(/[\\/]/).pop()!.replace(/\.(exe|cmd|bat)$/i, "");
+	const words = [program];
+	for (const arg of cmd.slice(1, 3)) {
+		if (arg.startsWith("-") || arg.includes(".") || arg.includes("/") || arg.includes("\\") || arg.length > 24) break;
+		words.push(arg);
+	}
+	return words.join(" ");
+}
 
 export interface RunResult {
 	exitCode: number;
@@ -29,7 +41,7 @@ export class CommandError extends Error {
 /** Runs a command and captures its output. Never throws for a non-zero exit; a missing binary gives exit 127. */
 export async function capture(cmd: string[], cwd: string, extra?: Record<string, string>): Promise<RunResult> {
 	debug(`$ ${cmd.join(" ")}  (in ${cwd})`);
-	const { exitCode, stdout, stderr } = await captureAsync(cmd, { cwd, env: childEnv(extra) });
+	const { exitCode, stdout, stderr } = await withJob(commandLabel(cmd), () => captureAsync(cmd, { cwd, env: childEnv(extra) }));
 	if (isVerbose()) {
 		if (stdout.trim()) debug(stdout.trimEnd());
 		if (stderr.trim()) debug(stderr.trimEnd());

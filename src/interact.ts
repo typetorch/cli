@@ -6,6 +6,8 @@
  * Prompts go to stderr, so `--json` output on stdout stays one document. Tests swap in a scripted Interaction.
  */
 
+import { progress } from "./progress.ts";
+
 export interface Interaction {
 	/** A person can answer: stdin, stdout and stderr are terminals. */
 	interactive: boolean;
@@ -29,12 +31,15 @@ export class PromptCancelledError extends Error {
 /** Reads one echoed line from the terminal (node:readline; works in PowerShell, cmd and Unix terminals). */
 async function readLine(question: string): Promise<string> {
 	const { createInterface } = await import("node:readline/promises");
-	const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: true });
-	try {
-		return await rl.question(question);
-	} finally {
-		rl.close();
-	}
+	// The progress line stays away while a person types.
+	return progress().suspend(async () => {
+		const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: true });
+		try {
+			return await rl.question(question);
+		} finally {
+			rl.close();
+		}
+	});
 }
 
 /** True only when stdin, stdout and stderr are all TTYs. */

@@ -25,6 +25,7 @@ import {
 import { bold, dim, emitJson, formatSeconds, green, info, isJson, red, table, warn, yellow } from "../log.ts";
 import { branchNameError, type Channel } from "../naming.ts";
 import type { OpenCloud } from "../opencloud.ts";
+import { progress } from "../progress.ts";
 import { sleep } from "../runtime.ts";
 import { openCloud, project, readHistory, registryApi } from "./common.ts";
 
@@ -186,6 +187,7 @@ export async function waitForFleet(input: {
 	info(dim(`  waiting up to ${input.seconds} s for the servers of ${input.branch} to report #${input.seq} (--no-wait skips this)...`));
 	let summary: FleetSummary | undefined;
 	let lastLine = "";
+	const job = progress().job(`reports of #${input.seq} from the servers of ${input.branch}`);
 	try {
 		while (true) {
 			const [{ reports }, { servers }] = await Promise.all([readReports(input.oc, input.universeId, input.seq), readServers(input.oc, input.universeId)]);
@@ -193,15 +195,18 @@ export async function waitForFleet(input: {
 			const line = `${formatCounts(summary.counts)}; waiting for ${summary.waiting.length} of ${summary.servers}`;
 			if (line !== lastLine) info(dim(`  ${formatSeconds(elapsed()).padStart(8)}  ${line}`));
 			lastLine = line;
+			job.update(`reports of #${input.seq}: ${summary.waiting.length} of ${summary.servers} server(s) still to report`);
 			const done = summary.servers === 0 ? elapsed() >= 10 : summary.waiting.length === 0;
 			if (done || elapsed() >= input.seconds) break;
 			await pause(5000);
 		}
 	} catch (error) {
+		job.done();
 		const message = error instanceof FleetScopeError ? error.message : `reading the fleet failed: ${(error as Error).message}`;
 		warn(`${message}. The deploy went out; check later with \`typetorch report ${input.seq}\``);
 		return { waitedSeconds: elapsed(), timedOut: false, unavailable: message };
 	}
+	job.done();
 	const timedOut = summary.waiting.length > 0 && summary.servers > 0;
 	if (summary.servers === 0 && summary.reports === 0) {
 		info(dim(`  no live servers on ${input.branch} reported (none running, or kernels before the fleet heartbeat); new servers boot #${input.seq}`));

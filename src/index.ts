@@ -25,6 +25,7 @@ import { rollbackCommand, rollbackFlags } from "./commands/rollback.ts";
 import { UPDATE_USAGE, updateCommandRun, updateFlags } from "./commands/update.ts";
 import { redact, Settings, useSettings } from "./env.ts";
 import { red, setOutputMode } from "./log.ts";
+import { progress } from "./progress.ts";
 
 /** package.json sits one level above both src/ (Bun) and dist/ (Node). */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
@@ -365,6 +366,7 @@ async function main(argv: string[]): Promise<number> {
 		return typeof process.exitCode === "number" ? process.exitCode : 0;
 	} catch (error) {
 		const err = error as Error;
+		progress().stop();
 		console.error(red(`error: ${redact(err.message ?? String(error))}`));
 		if (error instanceof UsageError) {
 			console.error(command.usage);

@@ -20,6 +20,7 @@ import { gitInfo } from "../git.ts";
 import { emitJson, green, info, isJson, red, yellow } from "../log.ts";
 import { OpenCloud } from "../opencloud.ts";
 import { FLEET_SCOPE, SERVERS_MAP } from "../fleet.ts";
+import { withJob } from "../progress.ts";
 import { capture } from "../proc.ts";
 import { hasZstd, isBun, runtimeName } from "../runtime.ts";
 import { rojoBinary } from "../build.ts";
@@ -40,7 +41,7 @@ async function probe(
 	interpret: (status: number, text: string) => [Status, string],
 ): Promise<Check> {
 	try {
-		const { status, text } = await fn();
+		const { status, text } = await withJob(name, fn);
 		const [result, detail] = interpret(status, text);
 		return { name, status: result, detail };
 	} catch (error) {
@@ -148,12 +149,12 @@ export async function doctorCommand(args: ParsedArgs) {
 
 	// Prod signing: key files, the key asset, the place (seeds are never printed; public keys are)
 	if (proj) {
-		const facts = await gatherKeyFacts({
+		const facts = await withJob("signing keys (key files, key asset, place)", () => gatherKeyFacts({
 			config: proj.config,
 			paths: signingKeyPaths(proj, args),
 			stateDir: stateDir(proj.root),
 			assets: keys.assets ? new OpenCloud(keys.assets.key) : undefined,
-		});
+		}));
 		checks.push(...keyChecks(facts));
 	}
 

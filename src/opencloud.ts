@@ -4,6 +4,7 @@
  * The API key goes only into the `x-api-key` header; it is never logged.
  */
 import { debug } from "./log.ts";
+import { progress, withJob } from "./progress.ts";
 import { sleep } from "./runtime.ts";
 import { redact } from "./env.ts";
 import type { Channel } from "./naming.ts";
@@ -63,6 +64,24 @@ export interface RequestOptions {
 	timeoutMs?: number;
 	/** Retry 429/5xx/network errors (default: only for GET). */
 	retry?: boolean;
+	/** What the progress line calls it (default: describeRequest). */
+	label?: string;
+}
+
+/** A short name for a request on the progress line ("publish message", "MemoryStore TypeTorchServers"). */
+export function describeRequest(method: string, path: string): string {
+	const bare = path.replace(/^https?:\/\/[^/]+/, "").split("?")[0];
+	if (bare.endsWith(":publishMessage")) return "publish message";
+	if (bare.includes("/creator-configs-public-api/")) return "registry (ConfigService)";
+	const map = /memory-store\/sorted-maps\/([^/]+)/.exec(bare);
+	if (map) return `MemoryStore ${decodeURIComponent(map[1])}`;
+	if (bare.includes("luau-execution")) return method === "POST" ? "create Luau Execution task" : "Luau Execution task";
+	if (bare === "/assets/v1/assets" && method === "POST") return "upload asset";
+	if (bare.startsWith("/assets/v1/operations/")) return "asset operation";
+	if (/^\/assets\/v1\/assets\/\d+\/versions/.test(bare)) return "place versions";
+	if (/^\/assets\/v1\/assets\/\d+$/.test(bare)) return method === "PATCH" ? "upload asset version" : `asset ${bare.split("/").pop()}`;
+	if (/^\/universes\/v1\/\d+\/places\/\d+\/versions/.test(bare)) return "place publish";
+	return `${method} ${bare.replace(/\/\d{4,}/g, "/…").slice(0, 60)}`;
 }
 
 export class OpenCloud {
@@ -78,7 +97,16 @@ export class OpenCloud {
 			body = JSON.stringify(options.json);
 		}
 		const retry = options.retry ?? method === "GET";
-		const attempts = retry ? 4 : 1;
+		const job = progress().job(options.label ?? describeRequest(method, path));
+		try {
+			return await this.send(method, path, url, headers, body, retry ? 4 : 1, options.timeoutMs ?? 60_000);
+		} finally {
+			job.done();
+		}
+	}
+
+	private async send(method: string, path: string, url: string, headers: Record<string, string>, body: RequestInit["body"], attempts: number, timeoutMs: number): Promise<ApiResponse> {
+		const retry = attempts > 1;
 		let lastError: unknown;
 		for (let attempt = 1; attempt <= attempts; attempt++) {
 			const started = performance.now();
@@ -87,7 +115,7 @@ export class OpenCloud {
 					method,
 					headers,
 					body,
-					signal: AbortSignal.timeout(options.timeoutMs ?? 60_000),
+					signal: AbortSignal.timeout(timeoutMs),
 				});
 				const text = await response.text();
 				let parsed: any = text;
@@ -161,6 +189,10 @@ export class OpenCloud {
 
 	/** Polls an assets operation until done. `request` sets each poll's timeout and retries (default: 60 s, 4 tries). */
 	async waitForOperation(operationId: string, timeoutSeconds = 600, request: Pick<RequestOptions, "timeoutMs" | "retry"> = {}): Promise<any> {
+		return withJob("asset upload operation", () => this.pollOperation(operationId, timeoutSeconds, request));
+	}
+
+	private async pollOperation(operationId: string, timeoutSeconds: number, request: Pick<RequestOptions, "timeoutMs" | "retry">): Promise<any> {
 		const started = performance.now();
 		let delay = 500;
 		while (true) {
@@ -176,6 +208,10 @@ export class OpenCloud {
 
 	/** Polls an asset until moderation leaves "Reviewing" (or the timeout passes). */
 	async waitForModeration(assetId: number, timeoutSeconds = 600): Promise<{ state?: string; timedOut: boolean }> {
+		return withJob(`moderation of asset ${assetId}`, () => this.pollModeration(assetId, timeoutSeconds));
+	}
+
+	private async pollModeration(assetId: number, timeoutSeconds: number): Promise<{ state?: string; timedOut: boolean }> {
 		const started = performance.now();
 		let delay = 500;
 		while (true) {
@@ -215,15 +251,23 @@ export class OpenCloud {
 		options: { version?: number; binaryOutput?: boolean } = {},
 	): Promise<LuauTaskResult> {
 		const base = `/cloud/v2/universes/${universeId}/places/${placeId}${options.version !== undefined ? `/versions/${options.version}` : ""}`;
-		const task = await this.call("POST", `${base}/luau-execution-session-tasks`, {
-			json: { script, timeout: `${timeoutSeconds}s`, ...(options.binaryOutput ? { enableBinaryOutput: true } : {}) },
-		});
-		let current = task;
-		const started = performance.now();
-		while (current?.state === "QUEUED" || current?.state === "PROCESSING") {
-			if ((performance.now() - started) / 1000 > timeoutSeconds + 60) throw new Error(`Luau Execution task ${task?.path} still ${current.state}`);
-			await sleep(1500);
-			current = await this.call("GET", `/cloud/v2/${task.path}`);
+		const job = progress().job("Luau Execution task: creating");
+		let task: any;
+		let current: any;
+		try {
+			task = await this.call("POST", `${base}/luau-execution-session-tasks`, {
+				json: { script, timeout: `${timeoutSeconds}s`, ...(options.binaryOutput ? { enableBinaryOutput: true } : {}) },
+			});
+			current = task;
+			const started = performance.now();
+			while (current?.state === "QUEUED" || current?.state === "PROCESSING") {
+				job.update(`Luau Execution task: ${String(current.state).toLowerCase()}`);
+				if ((performance.now() - started) / 1000 > timeoutSeconds + 60) throw new Error(`Luau Execution task ${task?.path} still ${current.state}`);
+				await sleep(1500);
+				current = await this.call("GET", `/cloud/v2/${task.path}`, { label: "Luau Execution task status" });
+			}
+		} finally {
+			job.done();
 		}
 		return {
 			state: String(current?.state),
@@ -242,6 +286,10 @@ export class OpenCloud {
 		const url = new URL(uri);
 		if (url.protocol !== "https:") throw new Error(`refusing a binary output URI that isn't https (${url.protocol}//${url.hostname})`);
 		const headers: Record<string, string> = url.hostname === "apis.roblox.com" ? { "x-api-key": this.apiKey } : {};
+		return withJob("download task output", () => this.fetchBinary(url, headers, timeoutMs));
+	}
+
+	private async fetchBinary(url: URL, headers: Record<string, string>, timeoutMs: number): Promise<Uint8Array> {
 		let last = "";
 		for (let attempt = 1; attempt <= 3; attempt++) {
 			try {

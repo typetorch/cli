@@ -1,7 +1,9 @@
 /**
  * Output helpers. Human output goes to stdout; with --json, stdout carries exactly one JSON document and every human
  * line goes to stderr instead, so `typetorch deploy --json | jq` works.
+ * Every line clears the progress line first (progress.ts), so log output never interleaves with it.
  */
+import { Progress, progress, useProgress } from "./progress.ts";
 
 let jsonMode = false;
 let verboseMode = false;
@@ -9,6 +11,8 @@ let verboseMode = false;
 export function setOutputMode(options: { json: boolean; verbose: boolean }) {
 	jsonMode = options.json;
 	verboseMode = options.verbose || process.env.TYPETORCH_DEBUG === "1";
+	// --json: no progress output at all.
+	useProgress(new Progress({ silent: options.json }));
 }
 
 export function isJson(): boolean {
@@ -30,16 +34,15 @@ export const cyan = paint(36);
 
 /** A normal human line (stdout, or stderr in --json mode). */
 export function info(line = "") {
-	if (jsonMode) console.error(line);
-	else console.log(line);
+	progress().print(() => (jsonMode ? console.error(line) : console.log(line)));
 }
 
 export function warn(line: string) {
-	console.error(yellow(`warning: ${line}`));
+	progress().print(() => console.error(yellow(`warning: ${line}`)));
 }
 
 export function debug(line: string) {
-	if (verboseMode) console.error(dim(`[debug] ${line}`));
+	if (verboseMode) progress().print(() => console.error(dim(`[debug] ${line}`)));
 }
 
 let jsonSink: ((value: unknown) => void) | undefined;
@@ -94,11 +97,14 @@ export class Stopwatch {
 	readonly started = performance.now();
 	readonly timings: Record<string, number> = {};
 
-	async stage<T>(name: string, fn: () => Promise<T> | T): Promise<T> {
+	/** Times a stage; it is also a progress job named after it ("build", "upload", "test"...). */
+	async stage<T>(name: string, fn: () => Promise<T> | T, label = name): Promise<T> {
 		const at = performance.now();
+		const job = progress().job(label);
 		try {
 			return await fn();
 		} finally {
+			job.done();
 			this.timings[name] = seconds(performance.now() - at);
 		}
 	}
