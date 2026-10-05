@@ -5,7 +5,9 @@ into live servers without a restart. It also promotes and rolls back already upl
 their git identity, checks and publishes the kernel place, and syncs **hot assets** (models and UI templates that
 builders edit in the place) into the artifact. **Every deploy is approved by a person**
 (`typetorch approve`); agents and the remote-claude dev-server only prepare them. **Prod-channel deploys are signed**
-with two Ed25519 keys, so live prod servers only run what you published.
+with two Ed25519 keys, so live prod servers only run what you published. **A cloud test gates prod deploys**: the
+uploaded payload boots headless in the place before anything is published. `typetorch servers` and `typetorch report`
+show the live fleet and what each server did with a deploy, and a GitHub Action builds and deploys dev branches.
 
 Part of TypeTorch: the kernel (`@typetorch/kernel`) is baked into the place and swaps payloads; the framework
 (`@typetorch/framework`) ships inside every payload.
@@ -82,8 +84,8 @@ scripts, git) get an allowlisted environment without any key. Keys are never pri
 
 | Variable | Used for | Scopes |
 |---|---|---|
-| `OPENCLOUD_ASSETS_KEY` | payload uploads and moderation (`deploy`, `upload`); hot assets (`assets sync`, `assets status`); doctor's place check | `asset:read`, `asset:write`; `universe.place.luau-execution-session:read` + `:write` for hot assets and doctor (see "Hot assets") |
-| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the registry (`deploy`, `rollback`, `promote`, `config push`, `deployments`) | `universe-messaging-service:publish`, `universe:read` (+ `universe:write` to write the registry) |
+| `OPENCLOUD_ASSETS_KEY` | payload uploads and moderation (`deploy`, `upload`); the cloud test (`test --cloud`, the prod gate); hot assets (`assets sync`, `assets status`); doctor's place check | `asset:read` (also on the place), `asset:write`; `universe.place.luau-execution-session:read` + `:write` for the cloud test, hot assets and doctor |
+| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the registry (`deploy`, `rollback`, `promote`, `config push`, `deployments`); the fleet (`servers`, `report`, `--wait`) | `universe-messaging-service:publish`, `universe:read` (+ `universe:write` to write the registry); `memory-store.sorted-map:read` for the fleet |
 | `OPENCLOUD_PLACE_KEY` | `kernel deploy` (manual only) | `universe.place:write` (+ `asset:read` to record the place version) |
 | `TYPETORCH_API_KEY`, `OPENCLOUD_API_KEY` or `ROBLOX_API_KEY` | any job without its own key | all of the above |
 
@@ -163,14 +165,18 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 |---|---|
 | `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs rbxtsc (`bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first |
 | `typetorch upload [--no-build]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
-| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--no-registry] [--propose] [--proposed-by <who>]` | clean build, upload, wait until Approved, log "uploaded"; then approve here (a person at a terminal) or write a proposal; on approval: registry, deploy message, log "published". Per-stage timings |
-| `typetorch promote <branch> <artifactId\|assetId\|#seq\|commit> [--force] [--dry-run]` | point a branch at an already uploaded, approved payload (from the deployments or `uploads.jsonl`) with a new seq; no rebuild. A prod-channel branch only takes prod-channel artifacts, even with `--force` ("rebuild for prod"). `promote <artifact> <branch>` works too when only the second is a known branch |
-| `typetorch rollback [--branch] [--to <commit\|artifactId\|assetId\|#seq>] [--force] [--dry-run]` | point the branch at an earlier, already approved asset (no build or upload) and tell its servers |
+| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--no-registry] [--require-registry] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: registry, deploy message, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
+| `typetorch deploy --widen <1-100> [--branch]` | re-send the branch's live deploy (same seq) to more servers; dev-channel branches only (see "Rollouts") |
+| `typetorch promote <branch> <artifactId\|assetId\|#seq\|commit> [--force] [--dry-run] [--test] [--skip-test <reason>] [--wait [s]] [--rollout <1-99>]` | point a branch at an already uploaded, approved payload (from the deployments or `uploads.jsonl`) with a new seq; no rebuild. A prod-channel branch only takes prod-channel artifacts, even with `--force` ("rebuild for prod"). `promote <artifact> <branch>` works too when only the second is a known branch |
+| `typetorch rollback [--branch] [--to <commit\|artifactId\|assetId\|#seq>] [--force] [--dry-run] [--test] [--wait [s]]` | point the branch at an earlier, already approved asset (no build or upload) and tell its servers; no cloud test unless `--test` (it is an earlier build) |
 | `typetorch deployments [--branch] [--limit n]` | deployment history with git identity; `*` = each branch's live head; lists uploads that never went out |
 | `typetorch branch ls` | branches, channels and live heads |
 | `typetorch config push [--dry-run]` | copy `defaultBranch`, `channels`, `members`, `devBadgeId` (and `revoked`) into the registry |
 | `typetorch kernel deploy [--kernel <dir>] [--dry-run] [--replace-place --yes] [--allow-dirty] [--allow-untagged]` | see below |
-| `typetorch approve [id]` | approve a proposal: details, y/N, publish (interactive terminal only); prod-channel ones are signed |
+| `typetorch approve [id] [--import <dir>] [--test] [--skip-test <reason>] [--rollout <1-99>] [--wait [s]]` | approve a proposal: details, y/N, publish (interactive terminal only); prod-channel ones are signed. A prod deploy or promote proposal without a passed (or skipped) cloud test runs it before the y/N. `--import`: a CI run's state dir (see "CI") |
+| `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
+| `typetorch servers [--branch]` | live servers from the kernel's heartbeats (see "Fleet") |
+| `typetorch report <seq\|artifact\|latest> [--branch]` | what the servers did with one deploy; exits 1 when one failed or rolled back (see "Fleet") |
 | `typetorch keys init [--key-file]` / `keys init --fallback [--force] [--yes]` / `keys rotate [--yes]` / `keys resign` | the signing keys: see "Signing prod deploys" |
 | `typetorch pin <artifact> --branch <b> (--servers <ids> \| --pct <1-99>)` / `pin --unpin --branch <b> (--servers <ids> \| --all)` | A/B experiment pins, signed on prod-channel branches; `--by`, `--dry-run` |
 | `typetorch reject <id> [--reason]` / `typetorch proposals [--all]` | drop a proposal / list them |
@@ -185,6 +191,12 @@ Every command takes `--json` (one JSON document on stdout; human lines go to std
 and `--env-file <path>` (`remote-claude` passes everything to the dev-server). Under Node, an `--env-file` naming a
 missing file is reported by Node itself (`node: <file>: not found`, exit 9): Node checks that flag even after the
 script name.
+
+**Long waits name what they wait on.** On a terminal, one line on stderr is redrawn while anything takes longer than a
+quarter second, e.g. `⠹ 12s  waiting on: moderation of asset 123 (12s), publish message (1s)` (jobs over 10 s turn
+yellow; `|/-\` instead of braille on Windows consoles without UTF-8). Log lines clear it first, prompts hide it, and
+the cursor comes back on exit and on Ctrl+C. Without a terminal (CI, agents, pipes) there is no animation: a job past
+15 s prints `still waiting on: ...` every 15 s. `--json` prints none of it.
 
 ### Identity
 
@@ -237,7 +249,8 @@ script name.
 ### Deploy message
 
 `POST /cloud/v2/universes/{universeId}:publishMessage`, topic `TypeTorch/deploy`, message
-`{"b":branch,"a":assetId,"i":artifactId,"s":seq,"c":commit,"ch":channel,"t":unixMs,"r":1?,"sig":"…","sigF":"…"}` (`r`:
+`{"b":branch,"a":assetId,"i":artifactId,"s":seq,"c":commit,"ch":channel,"t":unixMs,"r":1?,"ro":pct?,"sig":"…","sigF":"…"}`
+(`ro`: the rollout %, dev-channel only, see "Rollouts"; `r`:
 `1` for rollbacks, `"resign"` for heads re-signed by `keys rotate`; `sig`/`sigF` only for prod-channel branches: base64
 Ed25519 over
 `tt1\n<b>\n<a>\n<i>\n<s>\n<c>\n<ch>\n<t>\n<r>`, rules in [Prod signing](https://github.com/typetorch/docs/blob/main/guides/prod-signing.md)). Servers on
@@ -249,7 +262,9 @@ branch `b` swap, and persist it as their branch head (the higher `s` wins; heads
 The state dir (`TYPETORCH_STATE_DIR`, default `.typetorch/`) holds `deployments.jsonl` ("published" lines, with
 `proposalId` and `proposedBy` when approved from a proposal), `uploads.jsonl` ("uploaded" lines, written as soon as
 moderation answers, before anything is published), `proposals.jsonl` (proposed / approved / rejected / failed events)
-`kernel-deploys.jsonl` and `assets.jsonl` (hot assets: created / uploaded / failed / synced). Choosing a seq and logging
+`kernel-deploys.jsonl`, `assets.jsonl` (hot assets: created / uploaded / failed / synced), `tests.jsonl` (every cloud
+test: asset, pass or fail, seconds, place version, task) and `rollouts.jsonl` (`deploy --widen`). A deployment line
+carries `test` (`{ok, seconds, placeVersion}` or `{skipped: "<reason>"}`) and `rollout` when they apply. Choosing a seq and logging
 it happens under `deploy.lock` there (`assets sync` holds `assets-sync.lock` instead), and logs are only appended.
 The remote-claude dev-server points the deploys it runs from its worktree at the main repo's state dir, so both share
 one log and one seq. If a deploy stops after the upload, `typetorch deployments` lists the upload with its
@@ -327,6 +342,99 @@ versions without a restart (the framework's `hotAsset`). Guide: [Hot assets](htt
   list), `asset:write`, `universe.place.luau-execution-session:read` and `universe.place.luau-execution-session:write`.
   A refused call stops the command and names the scope. Luau Execution allows 5 task creations per minute per key
   owner; a sync uses 2 (`status` 1).
+
+### Cloud test (the pre-publish gate)
+
+`typetorch test --cloud [<artifact>]` runs one Open Cloud Luau Execution task on the place's **latest published
+version** (what live servers run). Measured on the test place: 9-11 s (the task itself about 7 s).
+
+1. `InsertService:LoadAsset` the payload (the path live servers use) and the kernel's mount checks: a payload root,
+   only Folders and ModuleScripts, `KernelApi` not above the place kernel's, the expected `ArtifactId`, and on a
+   prod-channel branch `Channel` exactly `"prod"` (prod servers refuse anything else).
+2. Mount the server tree in `ServerStorage.TypeTorch.Generations` and call `Server.boot.boot(kernel)` with a stub
+   kernel (the real contract: persist, status, onMessage..., plus `test = true`); onInit runs inside it, onStart in
+   spawned threads. It must return its stop function within the kernel's `READY_TIMEOUT`.
+3. `require` every ModuleScript under `Shared` (5 s budget).
+4. Run for `--seconds` (default 5) while `ScriptContext.Error` collects every error, spawned threads included.
+5. Stop it: the stop function within the kernel's `STOP_DEADLINE` (5 s); then the tree is destroyed (scripts can't be
+   disabled in a task, so the hard stop is emulated). Errors after the stop and instances the generation left behind
+   are reported.
+6. Boot a second generation of a fresh copy, run 1 s and stop it, as a hot swap would (`--no-swap` skips it).
+
+**Fails** (exit 1): the load and mount checks, a boot that throws or doesn't return, any error while it runs (onInit,
+onStart, Shared requires, the swap), a stop that throws, times out or logs "onStop threw". **Warnings**: errors after
+the stop (live servers' hard stop kills those threads), leftover instances, game warnings. Place scripts don't run in a
+task, but **DataStores, MemoryStores and HttpService do**: game code runs against real data, with no players.
+`workspace:GetAttribute("TypeTorchTest")` is true there, and the stub kernel has `test = true`, for code that must not
+run in the test.
+
+**In releases:** `deploy` runs it on the approved upload, before the proposal or the message; `promote` before
+publishing; both **always for prod-channel branches**, and with `--test` elsewhere (rollbacks: `--test` only, they go
+to an earlier build). A pass of the same asset in the last 24 h (`tests.jsonl`) counts for promote and approve
+(`--test` runs it again). `approve` runs it before the y/N for a prod deploy or promote proposal that has no pass or
+skip recorded. `--skip-test "<reason>"` publishes without it; the reason goes into the proposal and the deploy log.
+Scopes: the assets key with `universe.place.luau-execution-session:read` + `:write`, and `asset:read` on the place
+(Luau Execution allows 5 task creations per minute per key owner; the CLI waits and retries on 429).
+
+### Fleet: servers, reports, --wait
+
+Kernel 0.3.2+ writes a heartbeat per server (MemoryStore SortedMap `TypeTorchServers`, key = JobId, TTL 150 s) and one
+report per deploy outcome per server (`TypeTorchReports`, key = `<seq, 10 digits>/<JobId>`, kept 7 days; results
+`swapped`, `failed`, `rolled_back`, `skipped`, `booted`). The CLI reads them through the Open Cloud MemoryStore API with
+the deploy key (`memory-store.sorted-map:read`).
+
+- `typetorch servers [--branch <b>]`: job, branch, artifact, applied seq, health (`ok`, `failed`, `unverified`,
+  `degraded`), players, kernel, age (uptime), seen (last heartbeat). Older kernels show `-` for seq and health.
+  Reserved-server access codes are never printed.
+- `typetorch report <seq|artifact|latest> [--branch <b>]`: counts per result, errors grouped with the servers that hit
+  them, and the branch's servers still on an older seq. Exits 1 when a server failed or rolled back, and prints the
+  rollback command.
+- `--wait [seconds]` on `deploy`, `promote`, `rollback` and `approve` (and `deploy --widen`): **on by default for
+  prod-channel branches (90 s)**, off for dev (`--wait` turns it on, `--no-wait` off). After the message it polls the
+  reports every 5 s until every live server of the branch has reported the seq (or moved past it), then prints the
+  summary. A failed or rolled-back server makes it red, prints
+  `typetorch rollback --branch <b> --to <previous artifact>` and exits 1; **nothing is rolled back for you**. Without
+  the scope it says which scope to add, and the deploy still counts as done.
+
+### Rollouts
+
+`--rollout <1-99>` on `deploy`, `promote` and `approve` sends the message with `ro`: only servers whose bucket (djb2
+of the JobId, mod 100) is below it swap; the others keep their artifact, and new servers boot the head.
+`typetorch deploy --widen <1-100> [--branch <b>]` re-sends the branch's live deploy, the **same seq**, with the new
+percentage (100 = every server, sent without `ro`); it asks y/N when typetorch.json `approval` applies, and logs to
+`rollouts.jsonl`. **Dev-channel branches only:** `ro` isn't covered by the signature, so prod servers ignore it on
+signed messages, and the CLI refuses `--rollout` for prod-channel branches (to try a build on some prod servers, use
+signed A/B pins: `typetorch pin <artifact> --branch prod --pct <1-99>`). The registry head never carries the rollout
+(the kernel keeps a message's head with `ro` over a registry head of the same seq without one).
+
+### CI (GitHub Action)
+
+`action.yml` in this repo is a composite action: it installs Bun and the game's `rokit.toml` tools, runs
+`bun install`, then `typetorch build`, `test --cloud`, or `deploy` (the `command` input).
+
+- **Dev-channel branches deploy**, with `--require-registry`: CI has no deployment log to take the next seq from (a dev
+  server ignores a seq below the one it applied), so the key needs `universe:read` + `universe:write`. They publish only
+  when typetorch.json `approval` lets a non-person publish (`"prod"` or `"none"`); with `"all"` they become proposals.
+  Inputs `test: "true"` (the cloud test) and `wait: <seconds>`.
+- **Prod-channel branches are never published from CI** (prod is signed with the owner's key files): the action builds,
+  uploads, runs the cloud test and writes a proposal, then uploads its state dir as the artifact
+  `typetorch-state-<run id>` (kept 2 days). On your PC:
+  `gh run download <run id> -n typetorch-state-<run id> -D ci-state`, then `typetorch approve --import ci-state`.
+  `prod: skip` turns this off.
+- Other inputs: `api-key` (or `assets-key` / `deploy-key`; pass secrets), `branch`, `working-directory`, `message`,
+  `cli-version` (default: the game's own devDependency), `bun-version`, `rokit`. Outputs: `branch`, `channel`,
+  `artifact-id`, `asset-id`, `seq`, `proposal-id`.
+
+```yaml
+- uses: actions/checkout@v4
+  with: { fetch-depth: 0 }   # deploy notes list the commits since the branch's last deploy
+- uses: typetorch/cli@v0.7.0
+  with:
+    api-key: ${{ secrets.OPENCLOUD_API_KEY }}
+```
+
+The template's `.github/workflows/ci.yml` installs, compiles, runs `typetorch build`, and deploys dev-channel branches
+when the repo secret `OPENCLOUD_API_KEY` exists.
 
 ### Kernel deploy
 
