@@ -26,7 +26,7 @@ bun src/index.ts <command>     # from a checkout of this repo
 your user PATH once, then open a new terminal. PowerShell, for this machine's checkout:
 
 ```powershell
-[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";C:\Users\phasenull\Documents\GitHub\TypeTorch\cli\bin", "User")
+[Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";<path-to>\typetorch-cli\bin", "User")
 ```
 
 Alternatively `bun link` in this folder, then `bun link @typetorch/cli` in a game repo (that puts it on the repo's
