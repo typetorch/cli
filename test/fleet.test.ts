@@ -21,6 +21,7 @@ import { validateConfig, type Project } from "../src/config";
 import { appendLocalLog, readLocalLog, type LocalDeployment } from "../src/deployments";
 import { Settings, useSettings } from "../src/env";
 import {
+	alertBody,
 	formatServersTable,
 	httpFleetClient,
 	parseReport,
@@ -123,6 +124,9 @@ describe("rows from the fleet API", () => {
 			"GET https://fleet.example/v1/fleet/alerts?since=5&level=warning Bearer admin-token-0000",
 			"POST https://fleet.example/v1/fleet/alert Bearer ingest-token-0000",
 		]);
+		// the alert body has the kernel's shape (kernel src/server/Fleet.luau)
+		expect(JSON.parse(calls[3].body!)).toMatchObject({ level: "critical", code: "auto_rollback", message: "x", j: "cli", t: expect.any(Number) });
+		expect(alertBody({ level: "warning", code: "server_stuck", message: "2 stuck", branch: "dev", seq: 42, artifact: "a", jobs: [job(1), job(2)] })).toMatchObject({ b: "dev", s: 42, a: "a", message: `2 stuck [${job(1)}, ${job(2)}]` });
 		const refused = httpFleetClient({ url: "https://fleet.example", token: "admin-token-0000", fetch: (async () => new Response("no", { status: 401 })) as unknown as typeof fetch });
 		const error = (await refused.servers().catch((e: Error) => e)) as Error;
 		expect(error.message).toContain("check TYPETORCH_FLEET_TOKEN");

@@ -92,6 +92,25 @@ const rowsOf = (body: unknown, key: string): Record<string, unknown>[] => {
 	return list.filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null && !Array.isArray(r));
 };
 
+/**
+ * The alert body in the kernel's shape (kernel src/server/Fleet.luau: {level, code, message, j, b, a, s, t, g, k}), so
+ * the fleet API sees one format; `j` = "cli" (no JobId), stuck JobIds go in the message.
+ */
+export function alertBody(alert: NewAlert): Record<string, unknown> {
+	const jobs = alert.jobs?.length ? ` [${alert.jobs.slice(0, 10).join(", ")}${alert.jobs.length > 10 ? ", ..." : ""}]` : "";
+	const message = `${alert.message}${jobs}`;
+	return {
+		level: alert.level,
+		code: alert.code,
+		message: message.length > 300 ? `${message.slice(0, 297)}...` : message,
+		j: "cli",
+		...(alert.branch ? { b: alert.branch } : {}),
+		...(alert.artifact ? { a: alert.artifact } : {}),
+		...(alert.seq !== undefined ? { s: alert.seq } : {}),
+		t: Math.floor(Date.now() / 1000),
+	};
+}
+
 /** One configured fleet API over fetch (tests pass `fetch`). */
 export function httpFleetClient(options: { url: string; token?: string; ingestToken?: string; fetch?: typeof fetch; timeoutMs?: number }): FleetClient {
 	const base = options.url.replace(/\/+$/, "");
@@ -141,7 +160,7 @@ export function httpFleetClient(options: { url: string; token?: string; ingestTo
 		},
 		async postAlert(alert) {
 			if (!options.ingestToken) return false;
-			await request("POST", "/v1/fleet/alert", options.ingestToken, alert);
+			await request("POST", "/v1/fleet/alert", options.ingestToken, alertBody(alert));
 			return true;
 		},
 	};
