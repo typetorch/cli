@@ -284,12 +284,14 @@ describe("lockfile", () => {
 		writeFileSync(join(root, ASSETS_LOCK_FILE), "{ nope");
 		expect(() => readAssetsLock(root)).toThrow(AssetsError);
 	});
-	test("the payload attribute is the asset map without placeVersion", () => {
+	test("the payload attribute is the lockfile, placeVersion kept; {v:1,assets:{}} without one", () => {
 		const lock = lockOf({ "ui/shop": { id: 11 }, "fx/a": {} }, 57);
-		const attribute = JSON.parse(assetsAttribute(lock));
-		expect(attribute).toEqual({ v: 1, assets: lock.assets });
-		expect(Object.keys(attribute.assets)).toEqual(["fx/a", "ui/shop"]);
-		expect(attribute.placeVersion).toBeUndefined();
+		const text = assetsAttribute(lock);
+		expect(JSON.parse(text)).toEqual({ v: 1, placeVersion: 57, assets: lock.assets });
+		expect(text.startsWith('{"v":1,"placeVersion":57,"assets":{"fx/a":{"id":1,')).toBe(true);
+		expect(typeof JSON.parse(text).assets["ui/shop"].id).toBe("number");
+		expect(assetsAttribute(undefined)).toBe('{"v":1,"assets":{}}');
+		expect(assetsAttribute({ v: 1, placeVersion: 3, assets: {} })).toBe('{"v":1,"placeVersion":3,"assets":{}}');
 	});
 });
 
@@ -477,7 +479,7 @@ describe("typetorch assets sync", () => {
 		const shopId = Number(patches.find((p) => readRbxm(p.rbxm!).some((i) => i.attributes?.TypeTorchAsset === "ui/shop"))!.path.split("/").pop());
 		expect(lock.assets["ui/shop"]).toEqual({ id: shopId, ver: 70_000_000_000_000 + shopId, n: 2, hash: hashOf(SHOP), realm: "replicated", path: "ReplicatedStorage/Assets/UI", className: "ScreenGui" });
 		expect(lock.assets["props/crate"]).toMatchObject({ realm: "server", path: "ServerStorage/Props", className: "Model", n: 2 });
-		expect(json.lock).toEqual({ placeVersion: 57, assets: 2, changed: true });
+		expect(json.lock).toEqual({ written: true, changed: true, placeVersion: 57, assets: 2 });
 
 		// the log in the state dir
 		const log = readFileSync(join(root, ".typetorch", "assets.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
@@ -556,18 +558,48 @@ describe("typetorch assets sync", () => {
 		expect(readAssetsLock(root)!.assets["ui/shop"].id).toBe(4242);
 	});
 
-	test("moderation not approved, or Roblox serving another version: that key keeps its old entry and the run fails", async () => {
-		const root = gameProject(lockOf({ "ui/shop": { id: 700, ver: 5, n: 3, hash: "111111111111" }, "props/crate": { id: 701, ver: 6, n: 2, hash: "222222222222" } }));
-		mockCloud({ exportAssets: [SHOP, CRATE], moderation: { 700: "Rejected" }, servedHash: { "props/crate": "333333333333" } });
+	test("a failed asset: nothing is written (placeVersion must match every entry); the next run reuses the approved upload", async () => {
+		const original = lockOf({
+			"ui/shop": { id: 700, ver: 5, n: 3, hash: "111111111111" },
+			"props/crate": { id: 701, ver: 6, n: 2, hash: "222222222222" },
+			"fx/coin-burst": { id: 702, ver: 7, n: 2, hash: "444444444444" },
+		});
+		const root = gameProject(original);
+		const before = readFileSync(join(root, ASSETS_LOCK_FILE), "utf8");
+		mockCloud({ exportAssets: [SHOP, CRATE, COIN], moderation: { 700: "Rejected" }, servedHash: { "props/crate": "333333333333" } });
 		const json = await run(root, ["sync"]);
 		expect(process.exitCode).toBe(1);
 		expect(json.failed.map((f: any) => f.key).sort()).toEqual(["props/crate", "ui/shop"]);
 		expect(json.failed.find((f: any) => f.key === "ui/shop").error).toContain("moderation is Rejected");
 		expect(json.failed.find((f: any) => f.key === "props/crate").error).toContain("version lookup");
+		expect(json.lock).toMatchObject({ written: false, changed: false, placeVersion: 50 });
+		expect(readFileSync(join(root, ASSETS_LOCK_FILE), "utf8")).toBe(before);
+
+		// next run: fx/coin-burst (uploaded, approved, resolved) is reused; the failed two are uploaded again
+		process.exitCode = 0;
+		const { calls } = mockCloud({ exportAssets: [SHOP, CRATE, COIN] });
+		const again = await run(root, ["sync"]);
+		expect(calls.filter((c) => c.method === "PATCH").map((c) => c.path).sort()).toEqual(["/assets/v1/assets/700", "/assets/v1/assets/701"]);
+		expect(again.changes.find((c: any) => c.key === "fx/coin-burst")).toMatchObject({ reused: true, assetId: 702, n: 4 });
 		const lock = readAssetsLock(root)!;
-		expect(lock.assets["ui/shop"]).toMatchObject({ id: 700, ver: 5, hash: "111111111111" });
-		expect(lock.assets["props/crate"]).toMatchObject({ id: 701, ver: 6, hash: "222222222222" });
 		expect(lock.placeVersion).toBe(57);
+		expect(lock.assets["fx/coin-burst"]).toMatchObject({ id: 702, n: 4, ver: 70_000_000_000_702, hash: hashOf(COIN) });
+		expect(lock.assets["ui/shop"]).toMatchObject({ id: 700, hash: hashOf(SHOP) });
+		expect(process.exitCode).toBe(0);
+	});
+
+	test("a newer published place with the same assets: no upload, the lockfile records the new place version", async () => {
+		const root = gameProject(lockOf({ "props/crate": { id: 701, ver: 6, n: 2, hash: hashOf(CRATE), path: "ServerStorage/Props", className: "Model", realm: "server" } }, 50));
+		mockCloud({ exportAssets: [CRATE] });
+		const status = await run(root, ["status"]);
+		expect(status).toMatchObject({ upToDate: false, counts: { unchanged: 1 } });
+		const { calls } = mockCloud({ exportAssets: [CRATE] });
+		const json = await run(root, ["sync"]);
+		expect(calls.filter((c) => c.method === "PATCH" || c.path === "/assets/v1/assets")).toHaveLength(0);
+		expect(json.lock).toEqual({ written: true, changed: true, placeVersion: 57, assets: 1 });
+		expect(readAssetsLock(root)!.placeVersion).toBe(57);
+		mockCloud({ exportAssets: [CRATE] });
+		expect(await run(root, ["status"])).toMatchObject({ upToDate: true });
 	});
 
 	test("a refused Luau Execution call stops with the scopes it needs", async () => {

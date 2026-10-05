@@ -7,6 +7,7 @@
 import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { ASSETS_LOCK_FILE, assetsAttribute, formatAssetsLock, stampExport, type AssetsLock } from "../src/assets";
 import { newKeyFile, writeKeyFile } from "../src/keyfiles";
 import { readRbxm } from "../src/rbxm";
 
@@ -294,6 +295,67 @@ rmSync(join(kernel, "src", "server", "Broken.luau"));
 writeFileSync(join(kernel, "package.json"), JSON.stringify({ name: "@typetorch/kernel", version: "9.9.8" }));
 r = tt(["kernel", "deploy", "--kernel", kernel, "--dry-run"]);
 check("a version mismatch stops the kernel deploy", r.code === 1 && /9.9.8 != Constants.luau KERNEL_VERSION 9.9.9/.test(r.stderr), r.stderr);
+
+// 11. Hot assets (plans/13): the lockfile rides the payload as the Assets attribute, on the root Model and on its
+// Server folder (the kernel drops the root; the framework reads Server)
+const payloadInstances = () => readRbxm(new Uint8Array(readFileSync(join(dir, ".typetorch", "payload.rbxm"))));
+const payloadRoot = () => payloadInstances().find((i) => i.className === "Model");
+const payloadServer = () => {
+	const all = payloadInstances();
+	const model = all.find((i) => i.className === "Model");
+	return all.find((i) => i.name === "Server" && i.parent === model?.referent);
+};
+r = tt(["build", "--json"]);
+check(
+	'no typetorch.assets.lock.json: Assets = {"v":1,"assets":{}} on the root and on Server',
+	r.code === 0 && payloadRoot()?.attributes?.Assets === '{"v":1,"assets":{}}' && payloadServer()?.attributes?.Assets === '{"v":1,"assets":{}}' && r.json?.assets?.count === 0 && r.json?.assets?.placeVersion === undefined,
+	r.stderr || { root: payloadRoot()?.attributes, server: payloadServer()?.attributes },
+);
+const assetsLock: AssetsLock = {
+	v: 1,
+	placeVersion: 57,
+	assets: {
+		"ui/shop": { id: 123456789012, ver: 44838191841145, n: 4, hash: "abc123def456", realm: "replicated", path: "ReplicatedStorage/Assets/UI", className: "ScreenGui" },
+		"props/crate": { id: 123456789013, ver: 44838191841146, n: 2, hash: "0123456789ab", realm: "server", path: "ServerStorage/Props", className: "Model" },
+	},
+};
+writeFileSync(join(dir, ASSETS_LOCK_FILE), formatAssetsLock(assetsLock));
+r = tt(["build", "--json"]);
+const stampedAssets = JSON.parse(String(payloadRoot()?.attributes?.Assets ?? "null"));
+check(
+	"Assets on the payload root = the lockfile with placeVersion (numbers stay numbers)",
+	r.code === 0 && JSON.stringify(stampedAssets) === assetsAttribute(assetsLock) && stampedAssets?.v === 1 && stampedAssets?.placeVersion === 57 &&
+		stampedAssets?.assets?.["ui/shop"]?.ver === 44838191841145 && stampedAssets?.assets?.["ui/shop"]?.id === 123456789012 &&
+		Object.keys(stampedAssets?.assets ?? {}).join() === "props/crate,ui/shop" && r.json?.assets?.count === 2 && r.json?.assets?.placeVersion === 57 &&
+		typeof payloadRoot()?.attributes?.Notes === "string",
+	r.stderr || payloadRoot()?.attributes,
+);
+check("...and the same Assets on the payload's Server folder", payloadServer()?.className === "Folder" && payloadServer()?.attributes?.Assets === assetsAttribute(assetsLock), payloadServer());
+r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json"]);
+check("deploy --dry-run shows the hot assets", r.code === 0 && r.json?.assets?.count === 2 && r.json?.assets?.placeVersion === 57, r.stderr || r.json);
+r = tt(["deploy", "--dry-run", "--no-registry", "--no-build"]);
+check("...also in its human output", r.code === 0 && /assets\s+2 hot asset\(s\) from place v57/.test(r.stdout), r.stdout + r.stderr);
+r = tt(["assets", "list", "--json"]);
+check("assets list reads the lockfile", r.code === 0 && r.json?.exists === true && r.json?.assets?.["ui/shop"]?.id === 123456789012, r.stderr || r.json);
+r = tt(["assets", "status"]);
+check("assets status without a key: refused before any network, naming the scopes", r.code === 1 && /no Open Cloud API key for assets/.test(r.stderr) && /luau-execution-session/.test(r.stderr), r.stderr);
+writeFileSync(join(dir, ASSETS_LOCK_FILE), "{ broken");
+r = tt(["build", "--json"]);
+check("an invalid lockfile stops the build", r.code === 1 && /typetorch\.assets\.lock\.json is not valid JSON/.test(r.stderr), r.stderr);
+rmSync(join(dir, ASSETS_LOCK_FILE));
+// A stamped export (TypeTorchAssetId + TypeTorchAssetHash on the root) reads back in Lune's rbx_binary (rbx-dom).
+writeFileSync(join(kernel, "stamped.rbxm"), stampExport(new Uint8Array(readFileSync(join(dir, ".typetorch", "payload.rbxm"))), 123456789012345, "abc123def456"));
+writeFileSync(
+	join(kernel, "read-stamped.luau"),
+	`local roblox = require("@lune/roblox")
+local fs = require("@lune/fs")
+local root = roblox.deserializeModel(fs.readFile("stamped.rbxm"))[1]
+print(root.Name, root:GetAttribute("TypeTorchAssetId"), root:GetAttribute("TypeTorchAssetHash"), #root:GetDescendants(), typeof(root:GetAttribute("Notes")))
+`,
+);
+const lune = Bun.spawnSync(["lune", "run", "read-stamped.luau"], { cwd: kernel, stdout: "pipe", stderr: "pipe", env: cleanEnv });
+const luneOut = lune.stdout.toString().trim();
+check("Lune reads the stamped export: id, hash, and everything else intact", lune.exitCode === 0 && /^TypeTorchPayload\s+123456789012345\s+abc123def456\s+\d+\s+string$/.test(luneOut), luneOut + lune.stderr.toString());
 
 console.log(failures ? `${failures} failure(s) (${dir})` : `all e2e checks passed (${dir})`);
 process.exit(failures ? 1 : 0);

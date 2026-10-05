@@ -202,7 +202,7 @@ export async function deployCommand(args: ParsedArgs) {
 		info(`  description  ${description.split("\n").join(dim(" | "))}`);
 		if (message) info(`  message      ${message}`);
 		for (const line of changes) info(`  change       ${line}`);
-		info(`  assets       ${meta.assets ? `${meta.assets.count} hot asset(s) from place v${meta.assets.placeVersion} (Assets attribute)` : "none (no typetorch.assets.lock.json)"}`);
+		info(`  assets       ${meta.assets?.placeVersion !== undefined ? `${meta.assets.count} hot asset(s) from place v${meta.assets.placeVersion}` : "none (no typetorch.assets.lock.json)"}`);
 		info(`  creator      ${JSON.stringify(proj.config.creator)}`);
 		info(
 			`  registry     ${snapshot ? `readable (config v${snapshot.configVersion ?? "?"}${snapshot.exists ? "" : ", no TypeTorch key yet"}); would publish "${plan.registry.message}"` : `not used (${read.unavailable})`}`,

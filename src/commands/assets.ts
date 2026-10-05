@@ -24,6 +24,7 @@ import {
 	exportScript,
 	formatAssetsLock,
 	knownAssetId,
+	reusableUpload,
 	latestPublishedVersion,
 	nextLock,
 	parseExport,
@@ -40,7 +41,7 @@ import {
 	type ResolveItem,
 } from "../assets";
 import type { Project } from "../config";
-import { bold, captureJson, dim, emitJson, formatBytes, formatSeconds, info, isJson, seconds, Stopwatch, table, warn } from "../log";
+import { bold, captureJson, debug, dim, emitJson, formatBytes, formatSeconds, info, isJson, seconds, Stopwatch, table, warn } from "../log";
 import { branchChannel, branchNameError } from "../naming";
 import { ApiError, type OpenCloud } from "../opencloud";
 import { ASSETS_SYNC_LOCK, withStateLock } from "../state";
@@ -101,6 +102,14 @@ export async function exportPlace(oc: OpenCloud, proj: Project, versionFlag?: st
 		if (!/^\d+$/.test(versionFlag) || Number(versionFlag) < 1) throw new UsageError(`--place-version must be a positive whole number, got "${versionFlag}"`);
 		placeVersion = Number(versionFlag);
 		base = "--place-version";
+		// The lockfile records this version, and new servers adopt the place's copies only when they run exactly it:
+		// warn when the Assets API says it was never published (best effort; the list may not be readable).
+		try {
+			const listed = (await oc.placeVersions(placeId)).find((v) => v.version === placeVersion);
+			if (listed && !listed.published) warn(`place version ${placeVersion} is a save, not a published version: live servers never run it, so they won't adopt the place's copies`);
+		} catch (error) {
+			debug(`--place-version ${placeVersion}: the version list isn't readable (${(error as Error).message.slice(0, 200)})`);
+		}
 	} else {
 		let versions;
 		try {
@@ -128,6 +137,8 @@ export async function exportPlace(oc: OpenCloud, proj: Project, versionFlag?: st
 
 interface Outcome {
 	upload?: HotAssetUpload;
+	/** The upload came from an earlier run (assets.jsonl), not this one. */
+	reused?: boolean;
 	ver?: number;
 	error?: string;
 }
@@ -146,7 +157,7 @@ function changeJson(change: AssetChange, outcome?: Outcome) {
 		...(change.status === "updated" ? { previousHash: l!.hash } : {}),
 		...(e ? { bytes: e.bytes.length } : {}),
 		assetId: outcome?.upload?.assetId ?? l?.id,
-		...(outcome?.upload ? { n: outcome.upload.n, moderation: outcome.upload.moderation, created: outcome.upload.created } : {}),
+		...(outcome?.upload ? { n: outcome.upload.n, moderation: outcome.upload.moderation, created: outcome.upload.created, ...(outcome.reused ? { reused: true } : {}) } : {}),
 		...(outcome?.ver ? { ver: outcome.ver } : change.status === "unchanged" && l ? { ver: l.ver, n: l.n } : {}),
 		...(outcome?.error ? { error: outcome.error } : {}),
 	};
@@ -226,19 +237,24 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 		taskPath: placed.taskPath,
 	};
 
+	// The lockfile changes when anything is uploaded, removed or moved, or when it records a newer place version (the
+	// runtime adopts the place's own copies only on servers of exactly that version). An empty place and no lockfile:
+	// nothing to write.
+	const entriesChange = pending.length > 0 || counts.removed > 0 || changes.some((c) => c.moved);
+	const lockChanges = entriesChange || (lock ? lock.placeVersion !== placed.placeVersion : placed.result.assets.length > 0);
 	if (dryRun) {
-		const upToDate = pending.length === 0 && counts.removed === 0 && !changes.some((c) => c.moved);
-		if (isJson()) return emitJson({ ...base, mode, dryRun: true, upToDate, changes: changes.map((c) => changeJson(c)) });
+		if (isJson()) return emitJson({ ...base, mode, dryRun: true, upToDate: !lockChanges, changes: changes.map((c) => changeJson(c)) });
 		info(
-			upToDate
-				? dim(`up to date: nothing to upload${lock && lock.placeVersion !== placed.placeVersion ? ` (sync would only record place v${placed.placeVersion})` : ""}`)
-				: bold(`${mode === "status" ? "out of date" : "dry run"}: \`typetorch assets sync\` would upload ${pending.length} and write ${ASSETS_LOCK_FILE}`),
+			!lockChanges
+				? dim(`up to date: nothing to upload or write`)
+				: !entriesChange
+					? bold(`${mode === "status" ? "out of date" : "dry run"}: nothing to upload; \`typetorch assets sync\` would record place v${placed.placeVersion} in ${ASSETS_LOCK_FILE}`)
+					: bold(`${mode === "status" ? "out of date" : "dry run"}: \`typetorch assets sync\` would upload ${pending.length} and write ${ASSETS_LOCK_FILE}`),
 		);
 		return;
 	}
 
-	const mapChanges = pending.length > 0 || counts.removed > 0 || changes.some((c) => c.moved);
-	if (deployBranch && mapChanges && branchChannel(proj.config, deployBranch) === "prod") {
+	if (deployBranch && lockChanges && branchChannel(proj.config, deployBranch) === "prod") {
 		throw new UsageError(
 			`--deploy ${deployBranch}: prod-channel branches only take clean builds, and this sync changes ${ASSETS_LOCK_FILE}. Run \`typetorch assets sync\`, commit the lockfile, then \`typetorch deploy --branch ${deployBranch}\``,
 		);
@@ -246,23 +262,31 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 
 	const stateDir = projectStateDir(proj);
 	const outcomes = new Map<string, Outcome>();
-	const { next, changed } = await withStateLock(
+	const { next, written, changed } = await withStateLock(
 		stateDir,
 		`assets sync ${proj.config.project}`,
 		async () => {
-			// 3. Upload: a new key reuses an id this machine already made for it, else creates one.
+			// 3. Upload: a new key reuses an id this machine already made for it, else creates one. The same bytes
+			// uploaded and approved by a run that then failed elsewhere are reused (the resolve task checks them).
 			const log = readAssetLog(stateDir, universeId);
 			await watch.stage("upload", () =>
 				pool(pending, 4, async (change) => {
 					const e = change.exported!;
 					const started = performance.now();
+					const assetId = change.locked?.id ?? knownAssetId(log, change.key);
+					const reused = reusableUpload(log, change.key, e.hash);
+					if (reused && (assetId === undefined || reused.assetId === assetId)) {
+						info(`  upload     ${change.key}: reusing asset ${reused.assetId} v${reused.n} (uploaded and approved by an earlier run)`);
+						outcomes.set(change.key, { upload: reused, reused: true });
+						return;
+					}
 					try {
 						const upload = await uploadHotAsset(oc, {
 							creator: proj.config.creator,
 							key: change.key,
 							bytes: e.bytes,
 							hash: e.hash,
-							assetId: change.locked?.id ?? knownAssetId(log, change.key),
+							assetId,
 							moderationTimeout,
 							onCreated: (assetId) => appendAssetLog(stateDir, { event: "created", universeId, project: proj.config.project, key: change.key, assetId }),
 						});
@@ -313,21 +337,25 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 						const r = resolved.get(item.key)!;
 						const outcome = outcomes.get(item.key)!;
 						if (r.ver !== undefined) outcome.ver = r.ver;
-						else outcome.error = `version lookup: ${r.error}`;
+						else {
+							outcome.error = `version lookup: ${r.error}`;
+							// a later run uploads it again instead of reusing this upload
+							appendAssetLog(stateDir, { event: "failed", universeId, project: proj.config.project, key: item.key, assetId: item.id, error: outcome.error.slice(0, 500) });
+						}
 					}
 				});
 			}
 
-			// 5. The lockfile: uploaded keys get their new entry, failed ones keep the old one.
+			// 5. The lockfile, only when everything worked: its placeVersion promises that every entry matches the place
+			// at that version (new servers adopt the place's copies on that promise).
+			const failed = [...outcomes].filter(([, o]) => o.error).map(([key]) => key);
 			const uploaded = new Map<string, { id: number; ver: number; n: number }>();
 			for (const [key, outcome] of outcomes) if (outcome.upload && outcome.ver !== undefined && !outcome.error) uploaded.set(key, { id: outcome.upload.assetId, ver: outcome.ver, n: outcome.upload.n });
 			const next = nextLock({ placeVersion: placed.placeVersion, changes, uploaded });
-			const before = lock ? formatAssetsLock(lock) : undefined;
-			if (formatAssetsLock(next) !== before) writeAssetsLock(proj.root, next);
-			const failed = [...outcomes].filter(([, o]) => o.error).map(([key]) => key);
-			appendAssetLog(stateDir, { event: "synced", universeId, project: proj.config.project, placeVersion: placed.placeVersion, ...counts, uploaded: [...uploaded.keys()], failed });
-			const empty: AssetsLock = { v: 1, placeVersion: placed.placeVersion, assets: {} };
-			return { next, changed: assetsAttribute(next) !== assetsAttribute(lock ?? empty) };
+			const written = failed.length === 0 && lockChanges && formatAssetsLock(next) !== (lock ? formatAssetsLock(lock) : undefined);
+			if (written) writeAssetsLock(proj.root, next);
+			appendAssetLog(stateDir, { event: "synced", universeId, project: proj.config.project, placeVersion: placed.placeVersion, ...counts, uploaded: [...uploaded.keys()], failed, written });
+			return { next: written ? next : lock, written, changed: written && assetsAttribute(next) !== assetsAttribute(lock) };
 		},
 		{ file: ASSETS_SYNC_LOCK, staleMs: 60 * 60_000 },
 	);
@@ -339,30 +367,32 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 		dryRun: false,
 		changes: changes.map((c) => changeJson(c, outcomes.get(c.key))),
 		failed: failed.map(([key, o]) => ({ key, error: o.error })),
-		lock: { placeVersion: next.placeVersion, assets: Object.keys(next.assets).length, changed },
+		lock: { written, changed, placeVersion: next?.placeVersion, assets: Object.keys(next?.assets ?? {}).length },
 		timings: watch.total(),
 	};
 	for (const [key, outcome] of failed) warn(`${key}: ${outcome.error}`);
 	if (failed.length) process.exitCode = 1;
 	if (!isJson()) {
 		info(
-			changed
-				? bold(`wrote ${ASSETS_LOCK_FILE} (place v${next.placeVersion}): ${counts.added} added, ${counts.updated} updated, ${counts.removed} removed, ${counts.unchanged} unchanged${failed.length ? `; ${failed.length} failed (kept as before)` : ""}`)
-				: dim(`assets unchanged${lock?.placeVersion !== next.placeVersion ? `; recorded place v${next.placeVersion} in ${ASSETS_LOCK_FILE}` : ""}`),
+			failed.length
+				? bold(`${ASSETS_LOCK_FILE} NOT written: ${failed.length} asset(s) failed (its place version must match every entry). Fix them and sync again; approved uploads are reused`)
+				: written
+					? bold(`wrote ${ASSETS_LOCK_FILE} (place v${next!.placeVersion}): ${counts.added} added, ${counts.updated} updated, ${counts.removed} removed, ${counts.unchanged} unchanged`)
+					: dim(next ? `up to date: ${ASSETS_LOCK_FILE} unchanged` : `no hot assets in the place: no ${ASSETS_LOCK_FILE} written`),
 		);
 		info(dim(`  ${Object.entries(watch.total()).map(([stage, s]) => `${stage} ${formatSeconds(s)}`).join(", ")}`));
 	}
 
-	// --deploy: a deploy with the new asset map (same approval policy as `typetorch deploy`).
+	// --deploy: a deploy with the new Assets attribute (same approval policy as `typetorch deploy`).
 	let deploy: unknown;
 	if (deployBranch) {
 		if (failed.length) warn(`not deploying ${deployBranch}: ${failed.length} asset(s) failed`);
-		else if (!changed) info(dim(`not deploying ${deployBranch}: the asset map didn't change (\`typetorch deploy\` deploys anyway)`));
+		else if (!changed) info(dim(`not deploying ${deployBranch}: the Assets attribute wouldn't change (\`typetorch deploy\` deploys anyway)`));
 		else {
 			const flags: Record<string, string | boolean> = { branch: deployBranch };
 			for (const name of DEPLOY_PASSTHROUGH) if (args.flags[name] !== undefined) flags[name] = args.flags[name];
 			const deployArgs: ParsedArgs = { positionals: [], flags };
-			info(bold(`deploying ${deployBranch} with the new asset map`));
+			info(bold(`deploying ${deployBranch} with the new Assets attribute`));
 			const run = deps.deploy ?? deployCommand;
 			if (isJson()) deploy = await captureJson(() => run(deployArgs));
 			else await run(deployArgs);

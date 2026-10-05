@@ -14,7 +14,10 @@
  *               Waits for moderation; logged to assets.jsonl in the state dir
  *   4. resolve  a second task calls InsertService:GetLatestAssetVersionAsync(id) and loads that version to check its
  *               TypeTorchAssetHash, giving the assetVersionId that LoadAssetVersion needs
- *   5. write    typetorch.assets.lock.json; `typetorch deploy` stamps its `assets` map on the payload root as `Assets`
+ *   5. write    typetorch.assets.lock.json, only when every upload and lookup worked: its `placeVersion` promises that
+ *               every entry matches the place at that version (the runtime adopts the place's copies on that basis).
+ *               A failed run writes nothing; the next one reuses its approved uploads (assets.jsonl).
+ *   `typetorch deploy` stamps the lockfile as the `Assets` attribute on the payload root and its Server folder.
  */
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -35,8 +38,10 @@ export const ASSET_HASH_ATTRIBUTE = "TypeTorchAssetHash";
 export const ASSET_VERSION_ATTRIBUTE = "TypeTorchAssetVersion";
 /** CollectionService tag prefix the runtime uses (`__typetorch_asset:<key>`); stripped from exports. */
 export const ASSET_TAG_PREFIX = "__typetorch_asset:";
-/** The payload root attribute that carries the lockfile's asset map. */
+/** The payload attribute (root Model and its Server folder) that carries the lockfile. */
 export const ASSETS_PAYLOAD_ATTRIBUTE = "Assets";
+/** The payload child that also gets the attribute: the kernel unpacks the root and drops it. */
+export const ASSETS_PAYLOAD_FOLDER = "Server";
 /** First bytes of the export task's binary output. */
 export const EXPORT_MAGIC = "TTA1";
 export const KEY_MAX_LENGTH = 64;
@@ -177,9 +182,15 @@ export function writeAssetsLock(root: string, lock: AssetsLock): string {
 	return path;
 }
 
-/** The payload root's `Assets` attribute: `{"v":1,"assets":{...}}` (the lockfile without placeVersion). */
-export function assetsAttribute(lock: AssetsLock): string {
-	return JSON.stringify({ v: 1, assets: sortedAssets(lock.assets) });
+/**
+ * The payload's `Assets` attribute (stamped on the root Model and on its `Server` folder, which the framework reads
+ * at runtime because the kernel drops the root): `{"v":1,"placeVersion":N,"assets":{...}}`, the lockfile as is.
+ * `placeVersion` stays: places that builders publish carry no TypeTorchAssetHash on their copies, so a new server
+ * adopts the place's own copies only when `placeVersion == game.PlaceVersion`. Without a lockfile: `{"v":1,"assets":{}}`.
+ */
+export function assetsAttribute(lock: AssetsLock | undefined): string {
+	if (!lock) return JSON.stringify({ v: 1, assets: {} });
+	return JSON.stringify({ v: 1, placeVersion: lock.placeVersion, assets: sortedAssets(lock.assets) });
 }
 
 // Export (Luau Execution) --------------------------------------------------------------------------------------------
@@ -720,6 +731,22 @@ export function readAssetLog(stateDir: string, universeId: number): AssetLogReco
 		} catch {}
 	}
 	return records;
+}
+
+/**
+ * An upload of exactly these bytes that a previous run made and Roblox approved, when it is the key's latest event
+ * here (a run that failed elsewhere writes no lockfile; the next one reuses it instead of uploading again). A later
+ * "failed" or "created" record for the key voids it.
+ */
+export function reusableUpload(records: AssetLogRecord[], key: string, hash: string): HotAssetUpload | undefined {
+	for (let i = records.length - 1; i >= 0; i--) {
+		const record = records[i];
+		if (record.key !== key || (record.event !== "uploaded" && record.event !== "failed" && record.event !== "created")) continue;
+		if (record.event !== "uploaded" || record.hash !== hash || record.moderation !== "Approved") return undefined;
+		if (!positiveInt(record.assetId) || !positiveInt(record.n)) return undefined;
+		return { assetId: record.assetId, n: record.n, moderation: "Approved", created: false };
+	}
+	return undefined;
 }
 
 /** The asset id this machine already made for a key (a run that stopped after creating it, or a key that came back). */

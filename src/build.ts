@@ -28,7 +28,7 @@ import {
 	PACKAGES_MANIFEST,
 } from "./naming";
 import { query, run } from "./proc";
-import { ASSETS_PAYLOAD_ATTRIBUTE, assetsAttribute, readAssetsLock } from "./assets";
+import { ASSETS_PAYLOAD_ATTRIBUTE, ASSETS_PAYLOAD_FOLDER, assetsAttribute, readAssetsLock } from "./assets";
 import { checkPayloadContents } from "./rbxm";
 import { payloadNotes, sourceChanges } from "./changes";
 import { liveHeads, readLocalLog } from "./deployments";
@@ -73,8 +73,8 @@ export interface PayloadMeta {
 	modules?: number;
 	/** What was stamped as the payload's Notes attribute (message + change lines). */
 	notes?: { message?: string; changes: string[] };
-	/** Hot assets stamped as the Assets attribute (from typetorch.assets.lock.json); absent without a lockfile. */
-	assets?: { count: number; placeVersion: number };
+	/** Hot assets stamped as the Assets attribute (typetorch.assets.lock.json; count 0, no placeVersion without one). */
+	assets?: { count: number; placeVersion?: number };
 }
 
 export interface BuildTarget {
@@ -108,12 +108,25 @@ export function resolveTarget(project: Project, git: GitInfo, options: { branch?
 	return { branch, channel: options.channel ?? impliedChannel, impliedChannel, git };
 }
 
-/** default.project.json with the payload identity stamped on the root (Rojo `$attributes`). */
-export function stampProject(projectJson: any, attributes: Record<string, string | number>): any {
+/**
+ * default.project.json with the payload identity stamped on the root (Rojo `$attributes`), and `children` attributes
+ * on the root's direct child nodes that exist (e.g. `Assets` on `Server`; Rojo applies `$attributes` next to `$path`).
+ */
+export function stampProject(
+	projectJson: any,
+	attributes: Record<string, string | number>,
+	children: Record<string, Record<string, string | number>> = {},
+): any {
 	if (!isRecord(projectJson) || !isRecord(projectJson.tree)) throw new BuildError("default.project.json has no tree");
 	const tree = projectJson.tree as Record<string, unknown>;
 	const existing = isRecord(tree.$attributes) ? tree.$attributes : {};
-	return { ...projectJson, tree: { ...tree, $attributes: { ...existing, ...attributes } } };
+	const stamped: Record<string, unknown> = { ...tree, $attributes: { ...existing, ...attributes } };
+	for (const [name, extra] of Object.entries(children)) {
+		const node = tree[name];
+		if (!isRecord(node)) continue;
+		stamped[name] = { ...node, $attributes: { ...(isRecord(node.$attributes) ? node.$attributes : {}), ...extra } };
+	}
+	return { ...projectJson, tree: stamped };
 }
 
 /** Warns when the payload project doesn't look like a TypeTorch payload (plans/03). */
@@ -397,10 +410,11 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 	const projectJson = readJsonc(defaultProjectPath);
 	for (const problem of checkPayloadTree(projectJson)) warn(`default.project.json: ${problem}`);
 	const layout = tsLayout(root);
-	// Hot assets (plans/13): the lockfile's asset map rides the payload as the Assets attribute (none without a
-	// lockfile). Read first, so an invalid lockfile stops the build before rbxtsc.
+	// Hot assets (plans/13): the lockfile rides the payload as the Assets attribute, on the root and on Server (the
+	// kernel drops the root; the framework reads Server), always ({"v":1,"assets":{}} without a lockfile). Read
+	// first, so an invalid lockfile stops the build before rbxtsc.
 	const assetsLock = readAssetsLock(root);
-	const assetsJson = assetsLock ? assetsAttribute(assetsLock) : undefined;
+	const assetsJson = assetsAttribute(assetsLock);
 
 	// 1. Clean state (S-M3): no stale or stray output, and no ignored file in a source dir, can reach a clean id.
 	if (options.clean) {
@@ -483,12 +497,13 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		if (sources.framework) stamped.SourceFramework = sources.framework;
 		if (sources.kernel) stamped.SourceKernel = sources.kernel;
 		stamped.Notes = notes;
-		if (assetsJson !== undefined) stamped[ASSETS_PAYLOAD_ATTRIBUTE] = assetsJson;
+		stamped[ASSETS_PAYLOAD_ATTRIBUTE] = assetsJson;
 		return stamped;
 	};
 	const rojoBuild = async (id: string): Promise<Uint8Array> => {
 		debug(`rojo build stamped ArtifactId=${id}`);
-		writeFileSync(genPath, JSON.stringify(stampProject(projectJson, attributes(id)), null, "\t"));
+		const children = { [ASSETS_PAYLOAD_FOLDER]: { [ASSETS_PAYLOAD_ATTRIBUTE]: assetsJson } };
+		writeFileSync(genPath, JSON.stringify(stampProject(projectJson, attributes(id), children), null, "\t"));
 		try {
 			await run([rojoBinary(), "build", GEN_PROJECT, "-o", PAYLOAD_FILE], root);
 		} finally {
@@ -532,7 +547,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		debugMacros,
 		modules: contents.modules,
 		notes: { ...(notesInput.message ? { message: notesInput.message } : {}), changes: JSON.parse(notes).changes },
-		...(assetsLock ? { assets: { count: Object.keys(assetsLock.assets).length, placeVersion: assetsLock.placeVersion } } : {}),
+		assets: { count: Object.keys(assetsLock?.assets ?? {}).length, ...(assetsLock ? { placeVersion: assetsLock.placeVersion } : {}) },
 	};
 	writeFileSync(join(root, PAYLOAD_META), JSON.stringify(meta, null, "\t") + "\n");
 	return { meta, timings: watch.total(), target };

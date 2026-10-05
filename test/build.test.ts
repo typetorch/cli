@@ -54,6 +54,15 @@ describe("payload project", () => {
 		expect(stamped.globIgnorePaths).toEqual(["**/package.json"]);
 		expect(payloadProject.tree.$attributes).toEqual({ Keep: true }); // not mutated
 	});
+	test("stampProject stamps existing child nodes too (Assets on Server), keeping their $path and $attributes", () => {
+		const project = { ...payloadProject, tree: { ...payloadProject.tree, Server: { $path: "out/server", $attributes: { Own: 1 } } } };
+		const stamped = stampProject(project, { ArtifactId: "x" }, { Server: { Assets: '{"v":1,"assets":{}}' }, Missing: { A: 1 } });
+		expect(stamped.tree.Server).toEqual({ $path: "out/server", $attributes: { Own: 1, Assets: '{"v":1,"assets":{}}' } });
+		expect(stamped.tree.Missing).toBeUndefined();
+		expect(stamped.tree.Shared).toEqual({ $path: "out/shared" });
+		expect(stamped.tree.$attributes).toEqual({ Keep: true, ArtifactId: "x" });
+		expect(project.tree.Server.$attributes).toEqual({ Own: 1 }); // not mutated
+	});
 	test("checkPayloadTree", () => {
 		expect(checkPayloadTree(payloadProject)).toEqual([]);
 		expect(checkPayloadTree({ tree: { $className: "DataModel" } })).toHaveLength(5);
