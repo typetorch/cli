@@ -86,7 +86,7 @@ scripts, git) get an allowlisted environment without any key. Keys are never pri
 |---|---|---|
 | `OPENCLOUD_ASSETS_KEY` | payload uploads and moderation (`deploy`, `upload`); the cloud test (`test --cloud`, the prod gate); hot assets (`assets sync`, `assets status`); doctor's place check | `asset:read` (also on the place), `asset:write`; `universe.place.luau-execution-session:read` + `:write` for the cloud test, hot assets and doctor |
 | `OPENCLOUD_DEPLOY_KEY` | deploy messages and the registry (`deploy`, `rollback`, `promote`, `config push`, `deployments`); the fleet (`servers`, `report`, `--wait`) | `universe-messaging-service:publish`, `universe:read` (+ `universe:write` to write the registry); `memory-store.sorted-map:read` for the fleet |
-| `OPENCLOUD_PLACE_KEY` | `kernel deploy` (manual only) | `universe.place:write` (+ `asset:read` to record the place version) |
+| `OPENCLOUD_PLACE_KEY` | `kernel deploy`, `kernel restore` (manual only) | `universe.place:write` (publish), `asset:read` (place versions), `legacy-asset:manage` (download the place to patch it; Asset Delivery API) |
 | `TYPETORCH_API_KEY`, `OPENCLOUD_API_KEY` or `ROBLOX_API_KEY` | any job without its own key | all of the above |
 
 Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_CHILD_ENV=NAME,NAME` (extra
@@ -134,10 +134,10 @@ it never loaded only `sigF` counts (rules: [Prod signing](https://github.com/typ
    the assets key; its id goes into `keyAssetId`). Running it again resumes or does nothing.
 2. `typetorch keys init --fallback`: the fallback key file and `fallbackPublicKey` (no network).
 3. Commit typetorch.json (public keys only).
-4. `typetorch kernel deploy --replace-place --yes`: bakes `KeyAssetId`, `FallbackPublicKey` and `BootstrapHeads`
-   (the current prod heads, which the kernel trusts unsigned: heads stored before signing have no signature) into the
-   place (servers restart). It refuses to publish without the keys. Run it from the machine with the latest
-   deployment log (or a readable registry).
+4. `typetorch kernel deploy`: bakes `KeyAssetId`, `FallbackPublicKey` and `BootstrapHeads` (the current prod heads,
+   which the kernel trusts unsigned: heads stored before signing have no signature) into the place's kernel (patched
+   in; servers run it after a restart). It refuses to publish without the keys. Run it from the machine with the
+   latest deployment log (or a readable registry).
 5. `typetorch doctor`: both key files exist and match typetorch.json, the key asset (Approved, right owner, same
    lists) and the place's kernel attributes; any mismatch is a warning.
 
@@ -172,7 +172,8 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch deployments [--branch] [--limit n]` | deployment history with git identity; `*` = each branch's live head; lists uploads that never went out |
 | `typetorch branch ls` | branches, channels and live heads |
 | `typetorch config push [--dry-run]` | copy `defaultBranch`, `channels`, `members`, `devBadgeId` (and `revoked`) into the registry |
-| `typetorch kernel deploy [--kernel <dir>] [--dry-run] [--replace-place --yes] [--allow-dirty] [--allow-untagged]` | see below |
+| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--place-file <file>] [--engine splice\|lune] [--kernel <dir>]` | patch the kernel into the live place (backup, verify, y/N); `--replace-place --yes` for the template/test place only; see below |
+| `typetorch kernel restore <file> [--dry-run] [--yes]` | publish a place file: a backup from `.typetorch/place-backups/`, or a dry run's patched file |
 | `typetorch approve [id] [--import <dir>] [--test] [--skip-test <reason>] [--rollout <1-99>] [--wait [s]]` | approve a proposal: details, y/N, publish (interactive terminal only); prod-channel ones are signed. A prod deploy or promote proposal without a passed (or skipped) cloud test runs it before the y/N. `--import`: a CI run's state dir (see "CI") |
 | `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
 | `typetorch servers [--branch]` | live servers from the kernel's heartbeats (see "Fleet") |
@@ -449,9 +450,33 @@ when the repo secret `OPENCLOUD_API_KEY` exists.
    prod-channel heads, `{"<branch>":{"a","s","i"}}`, from the registry or the local log; `--no-registry`), on
    `ServerScriptService.TypeTorchKernel` (publishing refuses without the keys, or when the fallback key file doesn't
    match);
-4. publishes **only with `--replace-place --yes`**, which replaces the whole place and wipes Studio/Team Create
-   content (patching just the kernel slots comes later). The place version before and after
-   go to `kernel-deploys.jsonl`. `--dry-run` stops before publishing.
+4. **patches** the live place (the default, `--patch`):
+   - picks the base: the place's newest version, which must be published (newer unpublished saves are refused and
+     listed; `--base published` patches the last publish and leaves them in version history, `--base latest` ships
+     them, `--base <n>` takes that version);
+   - downloads it (Open Cloud Asset Delivery, `legacy-asset:manage`) and backs it up to
+     `.typetorch/place-backups/<placeId>-v<n>.rbxl`; or `--place-file <file>` (Studio: File > Download a Copy);
+   - replaces only the **kernel slots** (the `TypeTorch*` children of services in the kernel's `place.project.json`:
+     `ServerScriptService.TypeTorchKernel`, `ReplicatedStorage.TypeTorchKernelShared`,
+     `ReplicatedFirst.TypeTorchKernelClient`; every copy of each) and applies the service settings that project
+     declares (`HttpService.HttpEnabled`, `ServerScriptService.LoadStringEnabled`). The default **splice** engine works
+     on the binary chunks: every chunk of a class the kernel doesn't use is copied byte for byte; the script and folder
+     classes are re-encoded with the game's own values moved as raw bytes; referents stay dense; references into the
+     old kernel are re-pointed to the new instance at the same path, or cleared (listed). `--engine lune` re-encodes
+     the whole place with Lune (rbx-dom) instead, which migrates some properties (Image -> ImageContent and others)
+     and drops a few: only for when the splice engine refuses;
+   - verifies twice: the CLI's binary reader (every instance outside the slots by path and class, no property chunk
+     lost, the slots equal to the kernel build) and Lune (every subtree outside the slots equal, every reference
+     pointing where it did, the slots and settings equal to the kernel build);
+   - writes `.typetorch/place-patches/<placeId>-v<n>-kernel-<version>.rbxl` and a JSON report, prints a summary (kernel
+     old -> new, scripts changed/added/removed per slot, settings, references, chunks copied), asks y/N (or `--yes`),
+     checks that nobody published meanwhile, and publishes. A place without a kernel needs `--install`. An active
+     Team Create session blocks the publish (409).
+
+   `--dry-run` does everything except the publish. `typetorch kernel restore <file> [--dry-run] [--yes]` publishes a
+   place file back: a backup (undo), or a dry run's patched file (publish exactly what was inspected).
+   `--replace-place --yes` publishes the whole kernel place instead and **wipes Studio/Team Create content** (the
+   template/test place only). The place version before and after go to `kernel-deploys.jsonl`.
 
 ## Develop
 

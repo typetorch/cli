@@ -153,16 +153,28 @@ ${WAIT_USAGE}`,
 	kernel: {
 		flags: kernelFlags,
 		run: kernelCommand,
-		summary: "kernel deploy: check, identify, build and (with --replace-place --yes) publish the kernel place",
-		usage: `typetorch kernel deploy [--kernel <dir>] [--dry-run] [--replace-place --yes] [--allow-dirty] [--allow-untagged]
-                        [--fallback-key-file <path>]
+		summary: "kernel deploy: patch the kernel into the live place (backup, verify, y/N); kernel restore <file>",
+		usage: `typetorch kernel deploy [--patch] [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>]
+                        [--engine splice|lune] [--kernel <dir>] [--allow-dirty] [--allow-untagged] [--fallback-key-file <path>]
+typetorch kernel deploy --replace-place [--dry-run] [--yes]      (template/test place only: wipes Studio content)
+typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
 
   1. lune run scripts/check.luau in the kernel dir  2. version (package.json = Constants.luau) + content hash, printed;
   a git checkout must be clean and tagged v<version>  3. rojo build <kernel>/place.project.json -> .typetorch/place.rbxl
-  with KernelVersion/KernelHash/KernelCommit and the signing trust roots KeyAssetId + FallbackPublicKey (from
-  typetorch.json; publishing refuses without them) on ServerScriptService.TypeTorchKernel.
-  Publishing only patches the kernel slots once plans/13 lands (needs spike S12). Until then --replace-place --yes
-  publishes the whole kernel place, which WIPES Studio/Team Create content; the place version before and after go to
+  with KernelVersion/KernelHash/KernelCommit, KeyAssetId + FallbackPublicKey (typetorch.json; publishing refuses
+  without them) and BootstrapHeads on ServerScriptService.TypeTorchKernel.
+  4. Patch (default): download the place's newest version (it must be published; --base published|latest|<n>),
+  back it up to .typetorch/place-backups/<placeId>-v<n>.rbxl, replace ONLY the kernel slots (the TypeTorch* children
+  of services in place.project.json) and its service settings (LoadStringEnabled, HttpEnabled), verify (binary + Lune:
+  everything outside the slots unchanged), write .typetorch/place-patches/<placeId>-v<n>-kernel-<version>.rbxl, show a
+  summary, y/N (or --yes), check nobody published meanwhile, publish. A place without a kernel needs --install.
+  --dry-run       everything except the publish
+  --place-file    patch a local .rbxl instead of downloading (Studio: File > Download a Copy); publishing also needs
+                  --base <the version it was taken from>
+  --engine lune   re-encode the whole place with Lune (rbx-dom) when the default splice engine refuses; rbx-dom migrates
+                  some properties (Image -> ImageContent, ...) and drops a few, listed in the summary
+  restore         publish a place file (a backup, or a dry run's patched file) as the new live version
+  Scopes (the place key): asset:read, legacy-asset:manage (download), universe.place:write (publish). Records go to
   kernel-deploys.jsonl in the state dir. Kernel dir: --kernel, else typetorch.json "kernel", else
   node_modules/@typetorch/kernel, else ../kernel.`,
 	},

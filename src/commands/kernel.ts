@@ -1,5 +1,5 @@
 /**
- * `typetorch kernel deploy`: check, identify and publish the kernel place.
+ * `typetorch kernel deploy`: check, identify, build and publish the kernel into the place.
  *   1. `lune run scripts/check.luau` in the kernel package (syntax check of every kernel Luau file), before anything.
  *   2. Identity (security audit S-L5): the version must agree in package.json and src/shared/Constants.luau
  *      (KERNEL_VERSION, KERNEL_API = package.json typetorch.kernelApi), and a content hash covers place.project.json
@@ -14,32 +14,47 @@
  *      {"<branch>":{"a":assetId,"s":seq,"i":"artifactId"}}, from the registry (when readable) and the local log. The
  *      kernel trusts exactly those heads unsigned (heads stored before signing have no sig); anything newer must be
  *      signed (plans/03 "Bootstrap heads").
- *   4. Publish: only with --replace-place --yes, which REPLACES THE WHOLE PLACE (it wipes Studio/Team Create content).
+ *   4. Publish, in one of two modes:
+ *      - PATCH (default, `--patch`; plans/13 "Kernel deploy = patch, not replace", spike S12): download the place's
+ *        current version (Open Cloud Asset Delivery, scope legacy-asset:manage; or `--place-file`), save it to
+ *        `.typetorch/place-backups/<placeId>-v<n>.rbxl`, replace ONLY the kernel slots (the TypeTorch* children of
+ *        services in the kernel's place.project.json) and the service settings it declares, keep everything else byte
+ *        for byte (placepatch.ts), verify twice (the CLI's binary reader and Lune), write
+ *        `.typetorch/place-patches/<placeId>-v<n>-kernel-<version>.rbxl`, show a summary, ask y/N (or --yes), check
+ *        that nobody published meanwhile, publish. A place without a kernel needs --install. `--dry-run` stops before
+ *        the publish. `typetorch kernel restore <file>` publishes a backup (or any place file) back.
+ *      - REPLACE (`--replace-place --yes`, for the template/test place only): publishes the whole kernel place, which
+ *        wipes Studio/Team Create content.
  *      The place version before and after go to `<state dir>/kernel-deploys.jsonl`.
- *
- * TODO(plans/13 "Kernel deploy = patch, not replace"): the default mode should patch only the TypeTorch-owned slots
- * into an explicit base version (luau engine through a Luau Execution task + SavePlaceAsync, or the file engine), with
- * a dry-run diff, an outside-slot manifest check, a backup and a verify step. It needs spike S12 first; until then the
- * only publishing mode is --replace-place.
  */
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { flagBool, flagString, UsageError, type ParsedArgs } from "../args.ts";
 import { luneBinary, OUT_DIR, rojoBinary } from "../build.ts";
 import type { Project } from "../config.ts";
 import { gitInfo } from "../git.ts";
+import { interaction } from "../interact.ts";
 import { isRecord, parseJsonc } from "../json.ts";
 import { inspectKeyFile } from "../keyfiles.ts";
-import { bold, dim, emitJson, formatBytes, formatSeconds, info, isJson, red, Stopwatch, warn } from "../log.ts";
+import { BACKUP_DIR, chooseBase, kernelLayout, LunePatchError, PATCH_DIR, runLunePatch, runLuneVerify, summaryLines, writeLuneScript, type LuneVerification } from "../kernelpatch.ts";
+import { bold, dim, emitJson, formatBytes, formatSeconds, info, isJson, Stopwatch, warn } from "../log.ts";
+import { ApiError, type OpenCloud } from "../opencloud.ts";
+import { patchPlace, PlaceFile, PlacePatchError, sha256Hex, summarizePlace, verifyPatch, type PatchReport, type SlotRef } from "../placepatch.ts";
 import { capture, query, run } from "../proc.ts";
 import { branchChannel, strictest } from "../naming.ts";
+import { RbxmError } from "../rbxm.ts";
 import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, readHistory, registryApi, signingKeyPaths, warnRegistryFallback, type History } from "./common.ts";
 
 export const kernelFlags = {
 	kernel: "string",
 	"dry-run": "boolean",
+	patch: "boolean",
 	"replace-place": "boolean",
+	install: "boolean",
+	base: "string",
+	engine: "string",
+	"place-file": "string",
 	yes: "boolean",
 	"allow-dirty": "boolean",
 	"allow-untagged": "boolean",
@@ -248,13 +263,40 @@ function logKernel(dir: string, record: Record<string, unknown>) {
 	appendFileSync(join(dir, KERNEL_LOG), JSON.stringify({ at: new Date().toISOString(), ...record }) + "\n");
 }
 
+const PLACE_MAGIC = "<roblox!";
+
+/** A path for messages: relative to the game root when inside it, else absolute; forward slashes. */
+function displayPath(root: string, path: string): string {
+	const rel = relative(root, path);
+	return (rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : path).replace(/\\/g, "/");
+}
+
+/** Scope hints for the place key's jobs in patch mode. */
+const DOWNLOAD_SCOPE_HINT =
+	"downloading the place needs the legacy-asset:manage scope on the place key (OPENCLOUD_PLACE_KEY or the shared key; Creator Hub > Open Cloud > API Keys > add Legacy Asset > manage). Or download the place yourself (Studio: File > Download a Copy) and pass --place-file <file> --base <version>";
+
 export async function kernelCommand(args: ParsedArgs) {
 	const sub = args.positionals[0];
-	if (sub !== "deploy") throw new UsageError(`unknown kernel subcommand "${sub ?? ""}" (only "deploy")`);
+	if (sub === "deploy") return kernelDeploy(args);
+	if (sub === "restore") return kernelRestore(args);
+	throw new UsageError(`unknown kernel subcommand "${sub ?? ""}" (deploy, restore)`);
+}
+
+interface PreparedKernel {
+	proj: Project;
+	kernelDir: string;
+	identity: KernelIdentity;
+	signing: ReturnType<typeof signingAttributes>;
+	heads: Record<string, BootstrapHead>;
+	stamped: unknown;
+	bytes: Uint8Array;
+	watch: Stopwatch;
+	where: string;
+}
+
+/** Steps 1-3: check, identify, build the stamped kernel place (.typetorch/place.rbxl). */
+async function prepareKernel(args: ParsedArgs): Promise<PreparedKernel> {
 	const proj = project(args);
-	const dryRun = flagBool(args, "dry-run");
-	const replacePlace = flagBool(args, "replace-place");
-	const yes = flagBool(args, "yes");
 	const kernelDir = resolveKernelDir(proj, flagString(args, "kernel"));
 	const watch = new Stopwatch();
 	const where = `universe ${proj.config.universeId}, place ${proj.config.placeId}`;
@@ -313,7 +355,265 @@ export async function kernelCommand(args: ParsedArgs) {
 	}
 	const bytes = new Uint8Array(readFileSync(join(proj.root, PLACE_FILE)));
 	info(`  build    ${formatSeconds(watch.timings.build)}  ${relative(proj.root, join(kernelDir, "place.project.json"))} -> ${PLACE_FILE}  ${formatBytes(bytes.length)}`);
+	return { proj, kernelDir, identity, signing, heads, stamped, bytes, watch, where };
+}
 
+async function kernelDeploy(args: ParsedArgs) {
+	const replacePlace = flagBool(args, "replace-place");
+	if (replacePlace && flagBool(args, "patch")) throw new UsageError("--patch and --replace-place are two different modes; pick one");
+	if (replacePlace) {
+		for (const flag of ["install", "base", "engine", "place-file"]) {
+			if (args.flags[flag] !== undefined) throw new UsageError(`--${flag} belongs to patch mode, not --replace-place`);
+		}
+	}
+	const engine = flagString(args, "engine") ?? "splice";
+	if (engine !== "splice" && engine !== "lune") throw new UsageError(`--engine must be "splice" or "lune", got "${engine}"`);
+	const placeFile = flagString(args, "place-file");
+	const prepared = await prepareKernel(args);
+	if (replacePlace) return replacePlaceFlow(args, prepared);
+	return patchFlow(args, prepared, engine, placeFile);
+}
+
+/** Step 4, patch mode (the default). */
+async function patchFlow(args: ParsedArgs, prepared: PreparedKernel, engine: "splice" | "lune", placeFile: string | undefined) {
+	const { proj, kernelDir, identity, signing, heads, watch, where } = prepared;
+	const dryRun = flagBool(args, "dry-run");
+	const yes = flagBool(args, "yes");
+	const install = flagBool(args, "install");
+	const baseFlag = flagString(args, "base");
+	const { placeId, universeId } = proj.config;
+	const outDir = join(proj.root, OUT_DIR);
+	const layout = kernelLayout(prepared.stamped);
+	if (layout.slots.length === 0) throw new KernelCheckError(`${join(kernelDir, "place.project.json")} declares no TypeTorch* slot under a service; nothing to patch`);
+	info(`  slots    ${layout.slots.map((s) => `${s.service}.${s.name}`).join(", ")}${layout.serviceProps.length ? `  settings ${layout.serviceProps.map((p) => `${p.service}.${p.prop}`).join(", ")}` : ""}`);
+
+	// The base place: downloaded (and backed up), or a local file.
+	let oc: OpenCloud | undefined;
+	let original: Uint8Array;
+	let originalPath: string;
+	let backup: string | undefined;
+	// newest: the place's newest version when the base was chosen; the publish refuses if the place moved past it.
+	let base: { version?: number; newest?: number; published?: boolean; skipped: number[]; source: string; bytes: number; seconds?: number };
+	if (placeFile) {
+		if (baseFlag !== undefined && !/^\d+$/.test(baseFlag)) throw new UsageError("with --place-file, --base is the version number the file was taken from");
+		originalPath = resolve(process.cwd(), placeFile);
+		if (!existsSync(originalPath)) throw new UsageError(`--place-file ${placeFile} does not exist`);
+		original = new Uint8Array(readFileSync(originalPath));
+		const claimed = baseFlag === undefined ? undefined : Number(baseFlag);
+		base = { version: claimed, newest: claimed, skipped: [], source: `local file ${displayPath(proj.root, originalPath)}`, bytes: original.length };
+	} else {
+		oc = openCloud("place")!;
+		let versions;
+		try {
+			versions = await watch.stage("versions", () => oc!.placeVersions(placeId, 1));
+		} catch (error) {
+			if (error instanceof ApiError && error.isScopeError) throw new KernelCheckError(`listing the place's versions needs asset:read on the place key: ${error.message}`);
+			throw error;
+		}
+		const choice = chooseBase(versions, baseFlag);
+		if (!choice.ok) throw new KernelCheckError(choice.reason);
+		let download;
+		try {
+			download = await watch.stage("download", () => oc!.downloadPlace(placeId, choice.version));
+		} catch (error) {
+			if (error instanceof ApiError && error.isScopeError) throw new KernelCheckError(`${DOWNLOAD_SCOPE_HINT} (${error.status} from the Asset Delivery API)`);
+			throw error;
+		}
+		original = download.bytes;
+		mkdirSync(join(outDir, BACKUP_DIR), { recursive: true });
+		originalPath = join(outDir, BACKUP_DIR, `${placeId}-v${choice.version}.rbxl`);
+		if (!existsSync(originalPath) || sha256Hex(new Uint8Array(readFileSync(originalPath))) !== sha256Hex(original)) writeFileSync(originalPath, original);
+		backup = displayPath(proj.root, originalPath);
+		base = { version: choice.version, newest: versions[0].version, published: choice.published, skipped: choice.skipped, source: "downloaded", bytes: original.length, seconds: download.seconds };
+	}
+	if (new TextDecoder().decode(original.subarray(0, 8)) !== PLACE_MAGIC) {
+		throw new KernelCheckError(`the base place is not a binary place file (.rbxl)${original.subarray(0, 7).every((b, i) => b === "<roblox".charCodeAt(i)) ? ": it is XML (.rbxlx); save it as .rbxl" : ""}`);
+	}
+	let parsed: PlaceFile;
+	try {
+		parsed = new PlaceFile(original);
+	} catch (error) {
+		if (error instanceof PlacePatchError || error instanceof RbxmError) throw new KernelCheckError(`the base place can't be read: ${error.message}`);
+		throw error;
+	}
+	const before = summarizePlace(parsed, layout.slots);
+	const hasKernel = before.slots.some((s) => s.copies > 0);
+
+	// Patch.
+	mkdirSync(join(outDir, PATCH_DIR), { recursive: true });
+	const stem = `${placeId}-v${base.version ?? "local"}-kernel-${identity.version}${engine === "lune" ? "-lune" : ""}`;
+	const patchedPath = join(outDir, PATCH_DIR, `${stem}.rbxl`);
+	const specPath = join(outDir, PATCH_DIR, `${stem}.spec.json`);
+	writeFileSync(specPath, JSON.stringify({ slots: layout.slots, settings: layout.serviceProps }));
+	const kernelBuildPath = join(proj.root, PLACE_FILE);
+	const lune = luneBinary();
+	const script = writeLuneScript(outDir);
+	let patched: Uint8Array;
+	let report: PatchReport | undefined;
+	let lunePatch: { removed: number; added: number } | undefined;
+	try {
+		if (engine === "splice") {
+			const result = await watch.stage("patch", async () => patchPlace({ original, kernel: prepared.bytes, slots: layout.slots, serviceProps: layout.serviceProps, seed: identity.hash }));
+			patched = result.bytes;
+			report = result.report;
+			writeFileSync(patchedPath, patched);
+		} else {
+			lunePatch = await watch.stage("patch", () => runLunePatch(lune, kernelDir, script, { original: originalPath, kernel: kernelBuildPath, spec: specPath, out: patchedPath }));
+			patched = new Uint8Array(readFileSync(patchedPath));
+		}
+	} catch (error) {
+		if (error instanceof PlacePatchError) throw new KernelCheckError(`the splice engine can't patch this place: ${error.message}\n  --engine lune re-encodes the whole place through rbx-dom instead (it migrates some properties; see \`typetorch help kernel\`)`);
+		if (error instanceof LunePatchError) throw new KernelCheckError(error.message);
+		throw error;
+	}
+
+	// Verify twice: the CLI's own binary reader, then Lune (rbx-dom).
+	const ts = verifyPatch(original, patched, prepared.bytes, layout.slots);
+	let luneResult: LuneVerification;
+	try {
+		luneResult = await watch.stage("verify", () => runLuneVerify(lune, kernelDir, script, { original: originalPath, patched: patchedPath, kernel: kernelBuildPath, spec: specPath, out: join(outDir, PATCH_DIR, `${stem}.lune.json`) }));
+	} catch (error) {
+		if (error instanceof LunePatchError) throw new KernelCheckError(error.message);
+		throw error;
+	}
+	// The lune engine re-encodes everything: its property migrations are expected (shown), anything else is a failure.
+	const tsProblems = engine === "lune" ? ts.problems.filter((p) => !p.startsWith("properties lost")) : ts.problems;
+	const problems = [...tsProblems.map((p) => `binary check: ${p}`), ...luneResult.problems.map((p) => `Lune check: ${p}`)];
+	// References re-pointed by path keep their target's full name; only the cleared ones may change (to nil).
+	if (report && luneResult.references.length !== report.references.cleared.length) {
+		problems.push(`Lune check: ${luneResult.references.length} reference(s) outside the slots point elsewhere, the patch cleared ${report.references.cleared.length}: ${luneResult.references.slice(0, 5).join("; ")}`);
+	}
+	const firstInstall = !hasKernel;
+
+	const output = { path: displayPath(proj.root, patchedPath), bytes: patched.length, sha256: sha256Hex(patched) };
+	const record = {
+		universeId,
+		placeId,
+		mode: "patch",
+		engine,
+		base,
+		backup,
+		firstInstall,
+		oldKernel: before.kernel,
+		kernel: identity,
+		slots: layout.slots,
+		settings: layout.serviceProps,
+		report,
+		lunePatch,
+		verification: { ok: problems.length === 0, problems, binary: ts, lune: luneResult },
+		output,
+		bootstrapHeads: heads,
+	};
+	writeFileSync(join(outDir, PATCH_DIR, `${stem}.json`), JSON.stringify(record, null, "\t"));
+	if (!isJson()) {
+		info("");
+		for (const line of summaryLines({ where, base, backup, before, engine, report, lunePatch, newKernel: { version: identity.version, hash: identity.hash, commit: identity.commit }, ts, lune: luneResult, output })) info(`  ${line}`);
+		if (report?.filled.length) info(dim(`  filled   ${report.filled.length} value(s) the kernel build doesn't set (UniqueId, SourceAssetId, Tags...): see ${output.path.replace(/\.rbxl$/, ".json")}`));
+		// A property only the kernel build has is now written explicitly (zero) for the game's own instances too.
+		for (const line of report?.filled.filter((f) => f.includes("existing instance")) ?? []) warn(`game instances get an explicit default: ${line}`);
+		info("");
+	}
+	if (problems.length > 0) {
+		throw new KernelCheckError(`the patched place failed verification (nothing published; files in ${relative(proj.root, join(outDir, PATCH_DIR))}):\n  - ${problems.slice(0, 15).join("\n  - ")}`);
+	}
+	if (firstInstall && !install) {
+		const text = `place ${placeId}${base.version !== undefined ? ` v${base.version}` : ""} has no TypeTorch kernel yet (none of ${layout.slots.map((s) => `${s.service}.${s.name}`).join(", ")}): a first install adds them; check the summary, then run again with --install`;
+		if (!dryRun) throw new UsageError(text);
+		warn(text);
+	}
+	if (hasKernel && before.slots.some((s) => s.copies === 0)) warn(`the place has only part of the kernel (${before.slots.filter((s) => s.copies > 0).map((s) => s.slot).join(", ")}); the patch adds the missing slots`);
+	if (dryRun) {
+		if (isJson()) return emitJson({ dryRun: true, ...record });
+		info(bold(`dry run: kernel ${identity.version} patched into ${base.version !== undefined ? `v${base.version}` : "the local place file"}; nothing published`));
+		info(dim(`  patched place: ${output.path} (sha256 ${output.sha256.slice(0, 16)}), report next to it`));
+		info(dim(`  publish: typetorch kernel deploy${placeFile ? ` --place-file ${displayPath(proj.root, originalPath)}${base.version !== undefined ? ` --base ${base.version}` : " --base <version>"}` : base.version !== undefined && baseFlag ? ` --base ${baseFlag}` : ""}${firstInstall ? " --install" : ""} (patches again and asks y/N), or publish this exact file: typetorch kernel restore ${output.path}`));
+		return;
+	}
+	if (signing.problems.length > 0) {
+		throw new KernelCheckError(`refusing to publish a kernel that can't verify prod deploys:\n  - ${signing.problems.join("\n  - ")}`);
+	}
+	if (base.version === undefined) {
+		throw new UsageError("--place-file needs --base <version> to publish: the version the file was taken from, so the deploy can check that nobody published since");
+	}
+	if (!yes) {
+		const io = interaction();
+		if (!io.interactive) throw new UsageError(`refusing to publish without --yes (no interactive terminal to ask); check the summary above, then run again with --yes`);
+		if (!(await io.confirm(`Publish the patched place as the new live version of place ${placeId}?`))) {
+			info("not published");
+			return;
+		}
+	}
+	oc ??= openCloud("place")!;
+	let latest: number;
+	try {
+		latest = await oc.latestPlaceVersion(placeId);
+	} catch (error) {
+		throw new KernelCheckError(`can't read the place's current version (asset:read on the place key), so the deploy can't check that nobody published since v${base.version}: ${(error as Error).message}`);
+	}
+	if (latest !== base.newest) {
+		throw new KernelCheckError(`the place changed since the patch was made (newest version then v${base.newest}, now v${latest}); nothing published. Run the deploy again to patch the new version`);
+	}
+	await publishPatched({ args, proj, identity, heads, watch, where, bytes: patched, base: base.version, extra: { mode: "patch", engine, backup, firstInstall, patchedSha256: output.sha256, patchedFile: output.path, oldKernelVersion: before.kernel.version ?? null } });
+	if (backup) info(dim(`  restore the previous version: typetorch kernel restore ${backup}`));
+}
+
+/** Publishes a patched place, with the kernel-deploys.jsonl records around it. */
+async function publishPatched(input: {
+	args: ParsedArgs;
+	proj: Project;
+	identity: KernelIdentity;
+	heads: Record<string, BootstrapHead>;
+	watch: Stopwatch;
+	where: string;
+	bytes: Uint8Array;
+	base: number;
+	extra: Record<string, unknown>;
+}) {
+	const { proj, identity, watch, where } = input;
+	const oc = openCloud("place")!;
+	const stateDir = projectStateDir(proj);
+	const record = {
+		universeId: proj.config.universeId,
+		placeId: proj.config.placeId,
+		...input.extra,
+		kernelVersion: identity.version,
+		kernelApi: identity.api,
+		kernelHash: identity.hash,
+		kernelCommit: identity.commit,
+		kernelDirty: identity.dirty,
+		kernelTag: identity.tag,
+		kernelSource: identity.source,
+		keyAssetId: proj.config.keyAssetId ?? null,
+		fallbackPublicKey: proj.config.fallbackPublicKey ?? null,
+		bootstrapHeads: input.heads,
+		placeVersionBefore: input.base,
+		by: gitInfo(proj.root).userName,
+	};
+	logKernel(stateDir, { event: "kernel-publishing", ...record });
+	let response: any;
+	try {
+		response = await watch.stage("publish", () => oc.publishPlace(proj.config.universeId, proj.config.placeId, input.bytes));
+	} catch (error) {
+		logKernel(stateDir, { event: "kernel-failed", ...record, error: (error as Error).message.slice(0, 500) });
+		if (error instanceof ApiError && error.status === 409) {
+			throw new KernelCheckError(`the place didn't take the publish (409): an active Team Create session blocks it. Ask everyone to close the place in Studio, then run again (nothing was published): ${error.message}`);
+		}
+		throw error;
+	}
+	const after = typeof response?.versionNumber === "number" ? response.versionNumber : null;
+	const timings = watch.total();
+	logKernel(stateDir, { event: "kernel-published", ...record, placeVersionAfter: after, timings });
+	if (isJson()) return emitJson({ ...record, placeVersionAfter: after, timings });
+	info(`  publish  ${formatSeconds(timings.publish)}  place version ${input.base} -> ${after ?? "?"}`);
+	info(bold(`published kernel ${identity.version} (hash ${identity.hash.slice(0, 16)}) into ${where}; servers run it after they restart`));
+	info(dim(`  recorded in ${join(stateDir, KERNEL_LOG)}`));
+}
+
+/** Step 4, --replace-place: the whole kernel place (template/test place only). */
+async function replacePlaceFlow(args: ParsedArgs, prepared: PreparedKernel) {
+	const { proj, kernelDir, identity, signing, heads, bytes, watch, where } = prepared;
+	const dryRun = flagBool(args, "dry-run");
+	const yes = flagBool(args, "yes");
 	const summary = {
 		kernelDir,
 		kernel: identity,
@@ -325,19 +625,7 @@ export async function kernelCommand(args: ParsedArgs) {
 		fallbackPublicKey: proj.config.fallbackPublicKey ?? null,
 		bootstrapHeads: heads,
 	};
-
-	// 4. Publish mode. Patching (plans/13) is not built yet: see the TODO at the top.
-	if (!replacePlace) {
-		const text = "patching only the kernel slots (plans/13) is not implemented yet (it needs spike S12); --replace-place publishes the whole kernel place instead, which WIPES Studio/Team Create content";
-		if (dryRun) {
-			if (isJson()) return emitJson({ dryRun: true, mode: "patch (not implemented)", ...summary });
-			info(bold(`dry run: kernel ${identity.version} checked and built; nothing published`));
-			info(dim(`  ${text}`));
-			return;
-		}
-		throw new UsageError(text);
-	}
-	warn(`--replace-place REPLACES THE WHOLE PLACE (${where}) with the kernel place: every Studio/Team Create edit (maps, UI, builders' work) is wiped from the live version. It stays in the place's version history.`);
+	warn(`--replace-place REPLACES THE WHOLE PLACE (${where}) with the kernel place: every Studio/Team Create edit (maps, UI, builders' work) is wiped from the live version. It stays in the place's version history. Real games: use the default patch mode.`);
 	if (dryRun) {
 		if (isJson()) return emitJson({ dryRun: true, mode: "replace-place", ...summary });
 		info(bold(`dry run: would publish ${PLACE_FILE} to ${where}, replacing the place`));
@@ -394,4 +682,91 @@ export async function kernelCommand(args: ParsedArgs) {
 	info(`  publish  ${formatSeconds(timings.publish)}  place version ${before ?? "?"} -> ${after ?? "?"}`);
 	info(bold(`published kernel ${identity.version} (hash ${identity.hash.slice(0, 16)}) to ${where}; servers run it after they restart`));
 	info(dim(`  recorded in ${join(stateDir, KERNEL_LOG)}; revert from the place's version history in Creator Hub if needed`));
+}
+
+/** The default slots, for describing a place file outside a deploy (restore). */
+export const DEFAULT_SLOTS: SlotRef[] = [
+	{ service: "ServerScriptService", name: "TypeTorchKernel" },
+	{ service: "ReplicatedStorage", name: "TypeTorchKernelShared" },
+	{ service: "ReplicatedFirst", name: "TypeTorchKernelClient" },
+];
+
+/** `<placeId>-v<n>` at the start of a backup's or patched file's name. */
+export function placeFileName(name: string): { placeId: number; version: number } | undefined {
+	const match = /^(\d+)-v(\d+)\b/.exec(name);
+	return match ? { placeId: Number(match[1]), version: Number(match[2]) } : undefined;
+}
+
+/**
+ * `typetorch kernel restore <file>`: publishes a place file as the new live version: a backup from
+ * .typetorch/place-backups/ (undo a kernel deploy), or a dry run's patched file from .typetorch/place-patches/.
+ */
+async function kernelRestore(args: ParsedArgs) {
+	const file = args.positionals[1];
+	if (!file || args.positionals.length > 2) throw new UsageError("usage: typetorch kernel restore <file.rbxl> [--dry-run] [--yes]");
+	const proj = project(args);
+	const path = resolve(process.cwd(), file);
+	if (!existsSync(path)) throw new UsageError(`${file} does not exist`);
+	const bytes = new Uint8Array(readFileSync(path));
+	if (new TextDecoder().decode(bytes.subarray(0, 8)) !== PLACE_MAGIC) throw new KernelCheckError(`${file} is not a binary place file (.rbxl)`);
+	let summary;
+	try {
+		summary = summarizePlace(new PlaceFile(bytes), DEFAULT_SLOTS);
+	} catch (error) {
+		throw new KernelCheckError(`${file} can't be read as a place: ${(error as Error).message}`);
+	}
+	const { placeId, universeId } = proj.config;
+	const named = placeFileName(basename(path));
+	if (named && named.placeId !== placeId) {
+		throw new KernelCheckError(`${basename(path)} is a file of place ${named.placeId}, but typetorch.json is place ${placeId}`);
+	}
+	const where = `universe ${universeId}, place ${placeId}`;
+	const sha = sha256Hex(bytes);
+	const kernel = summary.kernel.version ? `kernel ${summary.kernel.version}${summary.kernel.commit ? ` @ ${summary.kernel.commit}` : ""}` : "no TypeTorch kernel";
+	info(`  file     ${displayPath(proj.root, path)}  ${formatBytes(bytes.length)}  sha256 ${sha.slice(0, 16)}${named ? `  (taken from v${named.version})` : ""}`);
+	info(`  content  ${summary.instances} instances in ${summary.services} services, ${kernel}`);
+	const dryRun = flagBool(args, "dry-run");
+	// A dry run works without a key (it only can't show the current version); a publish needs one.
+	const oc = openCloud("place", dryRun);
+	let latest: number | undefined;
+	if (!oc) warn("no place key: the place's current version isn't shown");
+	else {
+		try {
+			latest = await oc.latestPlaceVersion(placeId);
+			info(`  place    ${where}, now at v${latest}`);
+		} catch (error) {
+			warn(`could not read the place's current version (asset:read): ${(error as Error).message}`);
+		}
+	}
+	const since = named && latest !== undefined && latest > named.version ? ` (versions v${named.version + 1}..v${latest} were saved after the version this file comes from)` : "";
+	warn(`this publishes ${basename(path)} as the new live version of place ${placeId}: everything published after it (Studio work, other kernel deploys) leaves the live place (it stays in version history)${since}`);
+	if (dryRun || !oc) {
+		if (isJson()) return emitJson({ dryRun: true, file: path, bytes: bytes.length, sha256: sha, placeId, latest: latest ?? null, kernel: summary.kernel });
+		info(bold("dry run: nothing published"));
+		return;
+	}
+	if (!flagBool(args, "yes")) {
+		const io = interaction();
+		if (!io.interactive) throw new UsageError("refusing to publish without --yes (no interactive terminal to ask)");
+		if (!(await io.confirm(`Publish ${basename(path)} as the new live version of place ${placeId}?`))) {
+			info("not published");
+			return;
+		}
+	}
+	const stateDir = projectStateDir(proj);
+	const record = { universeId, placeId, mode: "restore", file: displayPath(proj.root, path), sha256: sha, fileKernel: summary.kernel.version ?? null, placeVersionBefore: latest ?? null, by: gitInfo(proj.root).userName };
+	logKernel(stateDir, { event: "kernel-restoring", ...record });
+	let response: any;
+	const watch = new Stopwatch();
+	try {
+		response = await watch.stage("publish", () => oc.publishPlace(universeId, placeId, bytes));
+	} catch (error) {
+		logKernel(stateDir, { event: "kernel-restore-failed", ...record, error: (error as Error).message.slice(0, 500) });
+		throw error;
+	}
+	const after = typeof response?.versionNumber === "number" ? response.versionNumber : null;
+	logKernel(stateDir, { event: "kernel-restored", ...record, placeVersionAfter: after });
+	if (isJson()) return emitJson({ ...record, placeVersionAfter: after });
+	info(`  publish  ${formatSeconds(watch.timings.publish)}  place version ${latest ?? "?"} -> ${after ?? "?"}`);
+	info(bold(`published ${basename(path)} to ${where}; servers run it after they restart`));
 }
