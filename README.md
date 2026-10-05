@@ -85,7 +85,7 @@ scripts, git) get an allowlisted environment without any key. Keys are never pri
 | Variable | Used for | Scopes |
 |---|---|---|
 | `OPENCLOUD_ASSETS_KEY` | payload uploads and moderation (`deploy`, `upload`); the cloud test (`test --cloud`, the prod gate); hot assets (`assets sync`, `assets status`); doctor's place check | `asset:read` (also on the place), `asset:write`; `universe.place.luau-execution-session:read` + `:write` for the cloud test, hot assets and doctor |
-| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the shared seq (`deploy`, `rollback`, `promote`, `keys resign`); the registry (`config push`, `deployments`); the fleet (`servers`, `report`, `--wait`) | `universe-messaging-service:publish`; `universe-datastores.objects:read` (+ `:create` and `:update` to claim seqs; see "The shared seq"); `memory-store.sorted-map:read` for the fleet. The registry needs `universe:read`, which **can't be granted to API keys today** (OAuth only), so it is skipped |
+| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the shared seq (`deploy`, `rollback`, `promote`, `keys resign`); the registry (`config push`, `deployments`); `fleet setup` | `universe-messaging-service:publish`; `universe-datastores.objects:read` (+ `:create` and `:update` to claim seqs; see "The shared seq"); `universe:write` for `fleet setup`. The registry needs `universe:read`, which **can't be granted to API keys today** (OAuth only), so it is skipped |
 | `OPENCLOUD_PLACE_KEY` | `kernel deploy`, `kernel restore` (manual only) | `universe.place:write` (publish), `asset:read` (place versions). Downloading the place needs `legacy-asset:manage`, which **can't be granted to API keys today**: pass `--place-file` (a copy downloaded in Studio) |
 | `TYPETORCH_API_KEY`, `OPENCLOUD_API_KEY` or `ROBLOX_API_KEY` | any job without its own key | all of the above |
 
@@ -176,7 +176,9 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch kernel restore <file> [--dry-run] [--yes]` | publish a place file: a backup from `.typetorch/place-backups/`, or a dry run's patched file |
 | `typetorch approve [id] [--import <dir>] [--test] [--skip-test <reason>] [--rollout <1-99>] [--wait [s]]` | approve a proposal: details, y/N, publish (interactive terminal only); prod-channel ones are signed. A prod deploy or promote proposal without a passed (or skipped) cloud test runs it before the y/N. `--import`: a CI run's state dir (see "CI") |
 | `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
-| `typetorch servers [--branch]` | live servers from the kernel's heartbeats (see "Fleet") |
+| `typetorch servers [--branch] [--watch]` | live servers from the fleet API (see "Fleet") |
+| `typetorch alerts [--follow] [--level] [--since <min>]` | the fleet's alerts (see "Fleet") |
+| `typetorch fleet setup --url <url>` | point game servers at the fleet API (see "Fleet") |
 | `typetorch report <seq\|artifact\|latest> [--branch]` | what the servers did with one deploy; exits 1 when one failed or rolled back (see "Fleet") |
 | `typetorch keys init [--key-file]` / `keys init --fallback [--force] [--yes]` / `keys rotate [--yes]` / `keys resign` | the signing keys: see "Signing prod deploys" |
 | `typetorch pin <artifact> --branch <b> (--servers <ids> \| --pct <1-99>)` / `pin --unpin --branch <b> (--servers <ids> \| --all)` | A/B experiment pins, signed on prod-channel branches; `--by`, `--dry-run` |
@@ -402,25 +404,42 @@ skip recorded. `--skip-test "<reason>"` publishes without it; the reason goes in
 Scopes: the assets key with `universe.place.luau-execution-session:read` + `:write`, and `asset:read` on the place
 (Luau Execution allows 5 task creations per minute per key owner; the CLI waits and retries on 429).
 
-### Fleet: servers, reports, --wait
+### Fleet: servers, reports, alerts, --wait and automatic rollback
 
-Kernel 0.3.2+ writes a heartbeat per server (MemoryStore SortedMap `TypeTorchServers`, key = JobId, TTL 150 s) and one
-report per deploy outcome per server (`TypeTorchReports`, key = `<seq, 10 digits>/<JobId>`, kept 7 days; results
-`swapped`, `failed`, `rolled_back`, `skipped`, `booted`). The CLI reads them through the Open Cloud MemoryStore API with
-the deploy key (`memory-store.sorted-map:read`).
+Kernel 0.3.2+ posts a heartbeat per server, one report per deploy outcome per server (results `swapped`, `failed`,
+`rolled_back`, `skipped`, `booted`) and alerts to the **fleet API**, a small service (`@typetorch/analytics`'s server)
+you host. The CLI reads it:
 
-- `typetorch servers [--branch <b>]`: job, branch, artifact, applied seq, health (`ok`, `failed`, `unverified`,
-  `degraded`), players, kernel, age (uptime), seen (last heartbeat). Older kernels show `-` for seq and health.
+- **Setup:** `typetorch fleet setup --url https://<host>` writes the ConfigService key `TypeTorchFleet` = `{url,
+  token}` for game servers, with the write-only ingest token from `TYPETORCH_FLEET_INGEST_TOKEN` (PATCH the draft with
+  that key only, then publish: `universe:write` on the deploy key; nothing is read back, and the publish ships the
+  whole draft), and sets typetorch.json `"fleet": { "url": ... }`. Reads use the admin token in
+  `TYPETORCH_FLEET_TOKEN`. Both tokens come from the environment or the env file and are never printed or passed to a
+  child process. Without them, `servers`, `report` and `alerts` say so in one line, and `--wait` is skipped with a note.
+- `typetorch servers [--branch <b>] [--watch]`: job, branch, artifact, applied seq, health (`ok`, `failed`,
+  `unverified`, `degraded`), players, kernel, age (uptime), seen (last heartbeat); `--watch` redraws every 5 s.
   Reserved-server access codes are never printed.
 - `typetorch report <seq|artifact|latest> [--branch <b>]`: counts per result, errors grouped with the servers that hit
   them, and the branch's servers still on an older seq. Exits 1 when a server failed or rolled back, and prints the
   rollback command.
+- `typetorch alerts [--follow] [--level info|warning|critical] [--since <minutes>]`: the fleet's alerts (default the
+  last 60 minutes); `--follow` keeps printing new ones.
 - `--wait [seconds]` on `deploy`, `promote`, `rollback` and `approve` (and `deploy --widen`): **on by default for
   prod-channel branches (90 s)**, off for dev (`--wait` turns it on, `--no-wait` off). After the message it polls the
-  reports every 5 s until every live server of the branch has reported the seq (or moved past it), then prints the
-  summary. A failed or rolled-back server makes it red, prints
-  `typetorch rollback --branch <b> --to <previous artifact>` and exits 1; **nothing is rolled back for you**. Without
-  the scope it says which scope to add, and the deploy still counts as done.
+  reports every 5 s until every live server of the branch has reported the seq (or moved past it):
+  - at about 30 s it **re-sends the same message** (same seq and signature; kernels ignore a seq they applied) when
+    servers are still behind and haven't reported (kernels also poll the head every 60 s and retry failed loads);
+  - **automatic rollback:** when `--rollback-at` (default 20) % or more of the servers that tried the seq (`skipped`
+    ones don't count) report `failed` or `rolled_back`, with at least one failure, it rolls the branch back to the
+    previous artifact through the same path as `typetorch rollback` (signed on prod-channel branches, with the key
+    files on this PC). It decides early once the share can't drop below the threshold. It posts a critical
+    `auto_rollback` alert (with the ingest token; otherwise it prints it), shows "rolling back <branch> to <artifact> in
+    10 s: Ctrl+C keeps the new build" at a terminal (no wait without one), logs the reason on the rollback's deployment
+    line (`autoRollback`) and on the proposal (an `auto_rollback` event), waits for the rollback's own reports, and
+    exits 1. `--no-auto-rollback` turns it off;
+  - failures below the threshold: a red summary, the rollback command, exit 1;
+  - **stalled servers alone never roll back:** their JobIds are listed, a `server_stuck` warning alert is posted, and
+    the command exits 0 with a warning.
 
 ### Rollouts
 

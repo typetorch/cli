@@ -503,3 +503,33 @@ export async function tryReadRegistry(
 /** The one-line warning shown when deploys continue without the registry. */
 export const REGISTRY_FALLBACK_NOTE =
 	"registry: ConfigService not writable, servers persist the head from the message";
+
+// A single key, written blind -------------------------------------------------------------------------------------------
+
+/**
+ * Sets ONE ConfigService key and publishes it, without reading anything first (an API key can't read configs:
+ * universe:read is OAuth-only). PATCHes the draft with only that key, then publishes the draft. Needs universe:write.
+ * The publish ships the whole draft: unpublished edits someone made to other keys go live with it (it can't be checked
+ * without the read scope). Used by `typetorch fleet setup` (key TypeTorchFleet); never for the TypeTorch registry key,
+ * whose heads and deployments must be merged with what is there.
+ */
+export async function publishConfigKey(oc: Pick<OpenCloud, "call">, universeId: number, key: string, value: unknown, message: string): Promise<{ configVersion?: number }> {
+	if (key === REGISTRY_KEY) throw new Error(`refusing to write the ${REGISTRY_KEY} registry key blind`);
+	const base = `/creator-configs-public-api/v1/configs/universes/${universeId}/repositories/${REPOSITORY}`;
+	let patched: unknown;
+	try {
+		patched = await oc.call("PATCH", `${base}/draft`, { json: { entries: { [key]: value } } });
+	} catch (error) {
+		unavailable(error, universeId, "universe:write");
+	}
+	const draftHash = isRecord(patched) && typeof patched.draftHash === "string" && patched.draftHash ? patched.draftHash : undefined;
+	const body: Record<string, unknown> = { message: message.slice(0, 200), deploymentStrategy: "Immediate" };
+	if (draftHash) body.draftHash = draftHash;
+	let published: unknown;
+	try {
+		published = await oc.call("POST", `${base}/publish`, { json: body });
+	} catch (error) {
+		unavailable(error, universeId, "universe:write");
+	}
+	return isRecord(published) && typeof published.configVersion === "number" ? { configVersion: published.configVersion } : {};
+}

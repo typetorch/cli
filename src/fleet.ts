@@ -1,87 +1,151 @@
 /**
- * Fleet visibility (plans/12 P-O1, reader side): the kernel's heartbeats and per-deploy reports in MemoryStore, read
- * with the Open Cloud MemoryStore API (`GET /cloud/v2/universes/{u}/memory-store/sorted-maps/{map}/items`, pages of
- * up to 100, CEL filter on `id` with `<`, `>` and `&&`; scope `memory-store.sorted-map:read`, on the deploy key).
+ * Fleet visibility (plans/12 P-O1, reader side) through the **fleet API**: a small service (analytics/server, SQLite)
+ * that game kernels post their heartbeats, deploy reports and alerts to. `typetorch servers`, `report`, `alerts` and
+ * `--wait` read it; `fleet setup` tells game servers where it is.
  *
- * Contract (fixed with the kernel agent):
- *   TypeTorchServers  key = JobId, TTL 150 s
- *     {t serverType, b branch, c channel, a artifact id, n players, m max players, s startedAt, u last write (unix),
- *      p placeId, k? access code, x? experiment (1), v kernel version, q applied seq, g generation,
- *      h health "ok"|"failed"|"unverified"|"degraded", e? last error, sv = 2}
- *     (older servers write the same without q, g, h, e, sv)
- *   TypeTorchReports  key = `<seq, 10 digits>/<JobId>`, TTL 7 days
- *     {s seq, b branch, a artifact id, j JobId, r "swapped"|"failed"|"rolled_back"|"skipped"|"booted", e? error,
- *      d? seconds, t unix, g generation, k kernel version, p players}
- * Reserved-server access codes (`k`) are never printed or emitted: only whether a server has one.
+ *   GET  /v1/fleet/servers?branch=<b>                 { servers: [...] }   latest heartbeat per live server
+ *   GET  /v1/fleet/reports?seq=<n>|artifact=<id>|latest[&branch=<b>]  { reports: [...] }
+ *   GET  /v1/fleet/alerts?since=<unix ms>&level=<l>   { alerts: [...] }
+ *   POST /v1/fleet/alert                              { level, code, message, branch?, seq?, artifact? } (ingest token)
+ *   GET  /v1/fleet/stream                             (SSE; not used: the CLI polls)
+ * Reads send the admin token (`TYPETORCH_FLEET_TOKEN`, Authorization: Bearer), posts the write-only ingest token
+ * (`TYPETORCH_FLEET_INGEST_TOKEN`). Tokens come from the environment or the env file and are never printed. The URL is
+ * typetorch.json `fleet.url`.
+ *
+ * The rows keep the kernel's contract (kernel src/server/Reports.luau); the parsers take the short field names the
+ * kernel posts ({t, b, c, a, n, m, s, u, p, k?, x?, v, q, g, h, e?, sv} and {s, b, a, j, r, e?, d?, t, g, k, p}) or the
+ * long names a server may answer with (job, branch, artifact, players, appliedSeq, health...). Reserved-server access
+ * codes are never kept: only whether a server has one.
+ *
+ * @typetorch/analytics will export `createFleetClient({url, token})` for the same API; the CLI keeps this small
+ * fetch client so it stays dependency-free (analytics pulls in DuckDB).
  */
-import { ApiError, type OpenCloud } from "./opencloud.ts";
 import { table } from "./log.ts";
+import { withJob } from "./progress.ts";
 
-export const SERVERS_MAP = "TypeTorchServers";
-export const REPORTS_MAP = "TypeTorchReports";
-export const FLEET_SCOPE = "memory-store.sorted-map:read";
-/** Stop reading after this many items (a huge fleet still answers; the summary says it was cut). */
-export const MAX_ITEMS = 5000;
+export const FLEET_TOKEN_VAR = "TYPETORCH_FLEET_TOKEN";
+export const FLEET_INGEST_TOKEN_VAR = "TYPETORCH_FLEET_INGEST_TOKEN";
 
-export class FleetScopeError extends Error {
-	override name = "FleetScopeError";
-	constructor(readonly status: number) {
-		super(`the deploy key (OPENCLOUD_DEPLOY_KEY or the shared key) can't read MemoryStore (${status}): add ${FLEET_SCOPE} for this experience to it (Creator Hub > Open Cloud > API Keys)`);
+export class FleetError extends Error {
+	override name = "FleetError";
+	constructor(
+		message: string,
+		readonly status = 0,
+	) {
+		super(message);
 	}
 }
 
-export interface SortedMapItem {
-	id: string;
-	value: unknown;
-	expireTime?: string;
+export type AlertLevel = "info" | "warning" | "critical";
+export const ALERT_LEVELS: readonly AlertLevel[] = ["info", "warning", "critical"];
+
+export interface AlertRow {
+	id?: string;
+	/** Unix ms. */
+	at?: number;
+	level: string;
+	code: string;
+	message?: string;
+	branch?: string;
+	seq?: number;
+	jobId?: string;
+	artifactId?: string;
+	acked?: boolean;
 }
 
-/** Every item of a sorted map (optionally filtered), paging with maxPageSize 100. A missing map is empty. */
-export async function listSortedMap(
-	oc: Pick<OpenCloud, "request">,
-	universeId: number,
-	map: string,
-	options: { filter?: string; maxItems?: number } = {},
-): Promise<{ items: SortedMapItem[]; truncated: boolean }> {
-	const items: SortedMapItem[] = [];
-	const maxItems = options.maxItems ?? MAX_ITEMS;
-	let pageToken: string | undefined;
-	while (true) {
-		// encodeURIComponent, not URLSearchParams: a space must travel as %20, not "+".
-		const query = ["maxPageSize=100", ...(options.filter ? [`filter=${encodeURIComponent(options.filter)}`] : []), ...(pageToken ? [`pageToken=${encodeURIComponent(pageToken)}`] : [])].join("&");
-		const path = `/cloud/v2/universes/${universeId}/memory-store/sorted-maps/${encodeURIComponent(map)}/items?${query}`;
-		const response = await oc.request("GET", path);
-		if (response.status === 401 || response.status === 403) throw new FleetScopeError(response.status);
-		if (response.status === 404) return { items, truncated: false };
-		if (!response.ok) throw new ApiError("GET", path, response.status, response.body, response.text);
-		// The v2 API names the list `items`; the beta named it `memoryStoreSortedMapItems`.
-		const page: unknown[] = Array.isArray(response.body?.items) ? response.body.items : Array.isArray(response.body?.memoryStoreSortedMapItems) ? response.body.memoryStoreSortedMapItems : [];
-		for (const raw of page) {
-			const entry = raw as Record<string, unknown>;
-			const id = typeof entry?.id === "string" ? entry.id : typeof entry?.path === "string" ? decodeURIComponent(entry.path.split("/").pop() ?? "") : undefined;
-			if (!id) continue;
-			items.push({ id, value: decodeValue(entry.value), ...(typeof entry.expireTime === "string" ? { expireTime: entry.expireTime } : {}) });
-			if (items.length >= maxItems) return { items, truncated: true };
-		}
-		pageToken = typeof response.body?.nextPageToken === "string" && response.body.nextPageToken ? response.body.nextPageToken : undefined;
-		if (!pageToken) return { items, truncated: false };
-	}
+export interface NewAlert {
+	level: AlertLevel;
+	code: string;
+	message: string;
+	branch?: string;
+	seq?: number;
+	artifact?: string;
+	jobs?: string[];
 }
 
-/** A value written as a table comes back as a JSON object; one written as a JSON string is decoded too. */
-function decodeValue(value: unknown): unknown {
-	if (typeof value === "string") {
-		try {
-			return JSON.parse(value);
-		} catch {
-			return value;
-		}
-	}
-	return value;
+export interface FleetClient {
+	servers(query?: { branch?: string }): Promise<ServerRow[]>;
+	reports(query: { seq?: number; artifact?: string; latest?: boolean; branch?: string }): Promise<ReportRow[]>;
+	alerts(query?: { since?: number; level?: string }): Promise<AlertRow[]>;
+	/** With the ingest token; false when there is none (nothing sent). */
+	postAlert(alert: NewAlert): Promise<boolean>;
 }
 
 const str = (v: unknown) => (typeof v === "string" && v !== "" ? v : undefined);
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v)) ? Number(v) : undefined);
+/** Unix seconds from a number (seconds or ms) or an ISO string. */
+const unixSeconds = (v: unknown): number | undefined => {
+	const n = num(v);
+	if (n !== undefined) return n > 1e11 ? Math.floor(n / 1000) : n;
+	if (typeof v === "string") {
+		const ms = Date.parse(v);
+		return Number.isNaN(ms) ? undefined : Math.floor(ms / 1000);
+	}
+	return undefined;
+};
+const pick = (row: Record<string, unknown>, ...keys: string[]): unknown => {
+	for (const key of keys) if (row[key] !== undefined && row[key] !== null) return row[key];
+	return undefined;
+};
+const rowsOf = (body: unknown, key: string): Record<string, unknown>[] => {
+	const list = Array.isArray(body) ? body : Array.isArray((body as Record<string, unknown> | null)?.[key]) ? (body as Record<string, unknown[]>)[key] : [];
+	return list.filter((r): r is Record<string, unknown> => typeof r === "object" && r !== null && !Array.isArray(r));
+};
+
+/** One configured fleet API over fetch (tests pass `fetch`). */
+export function httpFleetClient(options: { url: string; token?: string; ingestToken?: string; fetch?: typeof fetch; timeoutMs?: number }): FleetClient {
+	const base = options.url.replace(/\/+$/, "");
+	const doFetch = options.fetch ?? fetch;
+	const request = async (method: string, path: string, token: string | undefined, body?: unknown): Promise<unknown> => {
+		const label = `fleet API ${path.split("?")[0].replace("/v1/fleet/", "")}`;
+		return withJob(label, async () => {
+			const headers: Record<string, string> = {};
+			if (token) headers.authorization = `Bearer ${token}`;
+			if (body !== undefined) headers["content-type"] = "application/json";
+			let response: Response;
+			try {
+				response = await doFetch(`${base}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(options.timeoutMs ?? 20_000) });
+			} catch (error) {
+				throw new FleetError(`the fleet API at ${new URL(base).host} didn't answer: ${(error as Error).message}`);
+			}
+			const text = await response.text();
+			if (response.status === 401 || response.status === 403) {
+				throw new FleetError(`the fleet API refused the token (${response.status}): check ${method === "GET" ? FLEET_TOKEN_VAR : FLEET_INGEST_TOKEN_VAR}`, response.status);
+			}
+			if (!response.ok) throw new FleetError(`fleet API ${method} ${path.split("?")[0]} -> ${response.status} ${text.replace(/\s+/g, " ").slice(0, 200)}`, response.status);
+			try {
+				return text ? JSON.parse(text) : undefined;
+			} catch {
+				throw new FleetError(`fleet API ${path.split("?")[0]} answered something that isn't JSON`);
+			}
+		});
+	};
+	const query = (params: Record<string, string | number | boolean | undefined>) => {
+		const parts = Object.entries(params)
+			.filter(([, v]) => v !== undefined && v !== false)
+			.map(([k, v]) => (v === true ? encodeURIComponent(k) : `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`));
+		return parts.length ? `?${parts.join("&")}` : "";
+	};
+	return {
+		async servers(q = {}) {
+			const body = await request("GET", `/v1/fleet/servers${query({ branch: q.branch })}`, options.token);
+			return rowsOf(body, "servers").map(parseServer).filter((s): s is ServerRow => s !== undefined);
+		},
+		async reports(q) {
+			const body = await request("GET", `/v1/fleet/reports${query({ seq: q.seq, artifact: q.artifact, latest: q.latest, branch: q.branch })}`, options.token);
+			return rowsOf(body, "reports").map(parseReport).filter((r): r is ReportRow => r !== undefined);
+		},
+		async alerts(q = {}) {
+			const body = await request("GET", `/v1/fleet/alerts${query({ since: q.since, level: q.level })}`, options.token);
+			return rowsOf(body, "alerts").map(parseAlert).filter((a): a is AlertRow => a !== undefined);
+		},
+		async postAlert(alert) {
+			if (!options.ingestToken) return false;
+			await request("POST", "/v1/fleet/alert", options.ingestToken, alert);
+			return true;
+		},
+	};
+}
 
 export type Health = "ok" | "failed" | "unverified" | "degraded";
 export const HEALTH: readonly Health[] = ["ok", "failed", "unverified", "degraded"];
@@ -103,7 +167,7 @@ export interface ServerRow {
 	accessCode: boolean;
 	experiment: boolean;
 	kernelVersion?: string;
-	/** The applied seq (sv 2). */
+	/** The applied seq (kernel 0.3.2+). */
 	seq?: number;
 	generation?: number;
 	health?: Health;
@@ -112,29 +176,31 @@ export interface ServerRow {
 	schema?: number;
 }
 
-export function parseServer(item: SortedMapItem): ServerRow | undefined {
-	const v = item.value as Record<string, unknown> | undefined;
-	if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
-	const health = str(v.h);
+export function parseServer(row: Record<string, unknown>): ServerRow | undefined {
+	const jobId = str(pick(row, "job", "jobId", "j", "id"));
+	if (!jobId) return undefined;
+	const health = str(pick(row, "health", "h"));
+	const code = pick(row, "k", "accessCode", "hasAccessCode");
+	const experiment = pick(row, "experiment", "x");
 	return {
-		jobId: item.id,
-		serverType: str(v.t),
-		branch: str(v.b),
-		channel: str(v.c),
-		artifactId: str(v.a),
-		players: num(v.n),
-		maxPlayers: num(v.m),
-		startedAt: num(v.s),
-		updatedAt: num(v.u),
-		placeId: num(v.p),
-		accessCode: v.k !== undefined && v.k !== null && v.k !== "",
-		experiment: v.x === 1 || v.x === true,
-		kernelVersion: str(v.v),
-		seq: num(v.q),
-		generation: num(v.g),
+		jobId,
+		serverType: str(pick(row, "serverType", "type", "t")),
+		branch: str(pick(row, "branch", "b")),
+		channel: str(pick(row, "channel", "c")),
+		artifactId: str(pick(row, "artifact", "artifactId", "a")),
+		players: num(pick(row, "players", "n")),
+		maxPlayers: num(pick(row, "maxPlayers", "max_players", "m")),
+		startedAt: unixSeconds(pick(row, "startedAt", "started_at", "s")),
+		updatedAt: unixSeconds(pick(row, "lastWrite", "last_write", "lastSeen", "u")),
+		placeId: num(pick(row, "placeId", "place_id", "p")),
+		accessCode: code !== undefined && code !== false && code !== "",
+		experiment: experiment === 1 || experiment === true || experiment === "1",
+		kernelVersion: str(pick(row, "kernel", "kernelVersion", "v")),
+		seq: num(pick(row, "appliedSeq", "applied_seq", "q")),
+		generation: num(pick(row, "generation", "g")),
 		health: health && (HEALTH as readonly string[]).includes(health) ? (health as Health) : undefined,
-		error: str(v.e),
-		schema: num(v.sv),
+		error: str(pick(row, "lastError", "last_error", "error", "e")),
+		schema: num(pick(row, "serverVersion", "server_version", "sv")),
 	};
 }
 
@@ -142,7 +208,6 @@ export type ReportResult = "swapped" | "failed" | "rolled_back" | "skipped" | "b
 export const REPORT_RESULTS: readonly ReportResult[] = ["swapped", "failed", "rolled_back", "skipped", "booted"];
 
 export interface ReportRow {
-	key: string;
 	seq: number;
 	branch?: string;
 	artifactId?: string;
@@ -157,49 +222,41 @@ export interface ReportRow {
 	players?: number;
 }
 
-export function parseReport(item: SortedMapItem): ReportRow | undefined {
-	const v = item.value as Record<string, unknown> | undefined;
-	if (!v || typeof v !== "object" || Array.isArray(v)) return undefined;
-	const [seqPart, jobPart] = item.id.split("/");
-	const seq = num(v.s) ?? num(seqPart);
-	const jobId = str(v.j) ?? jobPart;
+export function parseReport(row: Record<string, unknown>): ReportRow | undefined {
+	const seq = num(pick(row, "seq", "s"));
+	const jobId = str(pick(row, "job", "jobId", "j"));
 	if (seq === undefined || !jobId) return undefined;
 	return {
-		key: item.id,
 		seq,
-		branch: str(v.b),
-		artifactId: str(v.a),
+		branch: str(pick(row, "branch", "b")),
+		artifactId: str(pick(row, "artifact", "artifactId", "a")),
 		jobId,
-		result: str(v.r) ?? "unknown",
-		error: str(v.e),
-		seconds: num(v.d),
-		at: num(v.t),
-		generation: num(v.g),
-		kernelVersion: str(v.k),
-		players: num(v.p),
+		result: str(pick(row, "result", "r")) ?? "unknown",
+		error: str(pick(row, "error", "e")),
+		seconds: num(pick(row, "seconds", "d")),
+		at: unixSeconds(pick(row, "at", "t")),
+		generation: num(pick(row, "generation", "g")),
+		kernelVersion: str(pick(row, "kernel", "kernelVersion", "k")),
+		players: num(pick(row, "players", "p")),
 	};
 }
 
-/** The report keys of one seq: `0000000042/<JobId>`. */
-export function reportPrefix(seq: number): string {
-	return `${String(seq).padStart(10, "0")}/`;
-}
-
-/** CEL filter for one seq's reports (`/` < JobId characters < `~`). */
-export function reportFilter(seq: number): string {
-	const prefix = reportPrefix(seq);
-	return `id > "${prefix}" && id < "${prefix}~"`;
-}
-
-export async function readServers(oc: Pick<OpenCloud, "request">, universeId: number): Promise<{ servers: ServerRow[]; truncated: boolean }> {
-	const { items, truncated } = await listSortedMap(oc, universeId, SERVERS_MAP);
-	return { servers: items.map(parseServer).filter((s): s is ServerRow => s !== undefined), truncated };
-}
-
-export async function readReports(oc: Pick<OpenCloud, "request">, universeId: number, seq: number): Promise<{ reports: ReportRow[]; truncated: boolean }> {
-	const { items, truncated } = await listSortedMap(oc, universeId, REPORTS_MAP, { filter: reportFilter(seq) });
-	const reports = items.map(parseReport).filter((r): r is ReportRow => r !== undefined && r.seq === seq);
-	return { reports, truncated };
+export function parseAlert(row: Record<string, unknown>): AlertRow | undefined {
+	const code = str(pick(row, "code"));
+	if (!code) return undefined;
+	const at = num(pick(row, "at", "t"));
+	return {
+		id: str(pick(row, "id")) ?? (num(row.id) !== undefined ? String(row.id) : undefined),
+		at: at !== undefined ? (at < 1e11 ? at * 1000 : at) : typeof row.at === "string" ? Date.parse(row.at) : undefined,
+		level: str(pick(row, "level")) ?? "info",
+		code,
+		message: str(pick(row, "message", "text")),
+		branch: str(pick(row, "branch", "b")),
+		seq: num(pick(row, "seq", "s")),
+		jobId: str(pick(row, "job", "jobId", "j")),
+		artifactId: str(pick(row, "artifact", "artifactId", "a")),
+		acked: row.acked === true || typeof row.ackedAt === "number" || typeof row.ackedAt === "string",
+	};
 }
 
 // Summaries -------------------------------------------------------------------------------------------------------------
@@ -312,4 +369,36 @@ export function serverJson(s: ServerRow, nowSeconds = Date.now() / 1000) {
 /** The exact command that rolls a branch back to what it ran before (no `#seq`: PowerShell reads `#` as a comment). */
 export function rollbackCommand(branch: string, fromArtifactId?: string): string {
 	return `typetorch rollback --branch ${branch}${fromArtifactId ? ` --to ${fromArtifactId}` : ""}`;
+}
+
+export interface RollbackDecision {
+	/** Servers that reported failed or rolled_back for the seq. */
+	failures: number;
+	/** Servers that tried the seq (reports other than "skipped": a server outside a rollout never tried it). */
+	answered: number;
+	/** Live servers of the branch that haven't reported yet. */
+	waiting: number;
+	/** failures / answered, 0-1. */
+	ratio: number;
+	/** The threshold is met (at least one failure). */
+	met: boolean;
+	/** Met even if every waiting server succeeds: decide now. */
+	early: boolean;
+}
+
+/** Whether a deploy's failures cross the auto-rollback threshold (percent of the servers that tried it). */
+export function rollbackDecision(summary: FleetSummary, thresholdPercent: number): RollbackDecision {
+	const failures = (summary.counts.failed ?? 0) + (summary.counts.rolled_back ?? 0);
+	const answered = summary.reports - (summary.counts.skipped ?? 0);
+	const waiting = summary.waiting.length;
+	const ratio = answered > 0 ? failures / answered : 0;
+	const met = failures >= 1 && ratio * 100 >= thresholdPercent;
+	const early = failures >= 1 && (failures / (answered + waiting)) * 100 >= thresholdPercent;
+	return { failures, answered, waiting, ratio, met, early };
+}
+
+export function formatAlert(alert: AlertRow): string {
+	const when = alert.at !== undefined ? new Date(alert.at).toISOString().replace("T", " ").slice(0, 19) : "?";
+	const where = [alert.branch, alert.seq !== undefined ? `#${alert.seq}` : undefined, alert.jobId ? alert.jobId.slice(0, 8) : undefined].filter(Boolean).join(" ");
+	return `${when}  ${alert.level.padEnd(8)} ${alert.code.padEnd(16)} ${where ? `${where}  ` : ""}${alert.message ?? ""}${alert.acked ? " (acked)" : ""}`;
 }

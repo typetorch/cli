@@ -11,7 +11,21 @@ import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands
 import { configCommand, configFlags } from "./commands/config.ts";
 import { deployCommand, deployFlags } from "./commands/deploy.ts";
 import { doctorCommand, doctorFlags } from "./commands/doctor.ts";
-import { REPORT_USAGE, reportCommand, reportFlags, SERVERS_USAGE, serversCommand, serversFlags, WAIT_USAGE } from "./commands/fleet.ts";
+import {
+	ALERTS_USAGE,
+	alertsCommand,
+	alertsFlags,
+	FLEET_USAGE,
+	fleetCommand,
+	fleetFlags,
+	REPORT_USAGE,
+	reportCommand,
+	reportFlags,
+	SERVERS_USAGE,
+	serversCommand,
+	serversFlags,
+	WAIT_USAGE,
+} from "./commands/fleet.ts";
 import { GATE_USAGE, TEST_USAGE, testCommand, testFlags } from "./commands/test.ts";
 import { ROLLOUT_USAGE, WIDEN_USAGE } from "./rollout.ts";
 import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history.ts";
@@ -207,7 +221,7 @@ ${ROLLOUT_USAGE}`,
 	servers: {
 		flags: serversFlags,
 		run: (args) => serversCommand(args),
-		summary: "live servers from the kernel's heartbeats: branch, artifact, seq, health, players",
+		summary: "live servers from the fleet API: branch, artifact, seq, health, players; --watch",
 		usage: SERVERS_USAGE,
 	},
 	report: {
@@ -215,6 +229,18 @@ ${ROLLOUT_USAGE}`,
 		run: (args) => reportCommand(args),
 		summary: "what the servers reported for a deploy: swapped/failed/rolled_back, errors, servers left behind",
 		usage: REPORT_USAGE,
+	},
+	alerts: {
+		flags: alertsFlags,
+		run: (args) => alertsCommand(args),
+		summary: "alerts from the fleet API (servers, deploys, auto-rollbacks); --follow",
+		usage: ALERTS_USAGE,
+	},
+	fleet: {
+		flags: fleetFlags,
+		run: (args) => fleetCommand(args),
+		summary: "fleet setup --url: point game servers at the fleet API (ConfigService TypeTorchFleet)",
+		usage: FLEET_USAGE,
 	},
 	pin: {
 		flags: pinFlags,

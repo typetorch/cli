@@ -274,7 +274,7 @@ export const TEST_USAGE = `typetorch test [--cloud] [<artifactId|assetId|#seq|co
   (default 5), stop it (within the kernel's stop deadline) and check the stop was clean, then boot a second generation
   as a hot swap would (--no-swap skips it). Any error fails it (exit 1); leftovers after the stop are warnings.
   Without an artifact: the newest upload of the branch, else its live head. Results go to tests.jsonl.
-  Game code runs with real DataStores and MemoryStores but no players; workspace:GetAttribute("TypeTorchTest") is
+  Game code runs with real DataStores and MemoryStores (Roblox allows them in tasks) but no players; workspace:GetAttribute("TypeTorchTest") is
   true there. Scopes (the assets key): universe.place.luau-execution-session:read and :write, asset:read on the place.
   --unit is not built yet.`;
 

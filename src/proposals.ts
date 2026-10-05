@@ -73,7 +73,8 @@ export interface Proposal {
 }
 
 export interface ProposalEvent {
-	event: "approved" | "rejected" | "failed";
+	/** auto_rollback: --wait rolled the approved deploy back (seq = the rollback's). */
+	event: "approved" | "rejected" | "failed" | "auto_rollback";
 	id: string;
 	at: string;
 	by?: string;

@@ -10,7 +10,7 @@
  *   datastore    GET DataStore TypeTorch entry "heads"         200/404 = ok, 401/403 = missing universe-datastores.objects:read
  *                                                             (the shared seq; :create/:update are checked by a deploy)
  *   place publish POST an EMPTY body                         400 = scope ok (body rejected), 403 = missing
- *   memory store  list TypeTorchServers (1 item)              200/404 = ok, 401/403 = missing (servers, report, --wait)
+ *   fleet API     GET /v1/fleet/servers with the admin token   ok, or a warning (servers, report, alerts, --wait)
  *   luau exec     GET a task that doesn't exist               404 = :read ok, 401/403 = missing (test --cloud; :write
  *                                                             is checked by the first task)
  *   place download GET the place's Asset Delivery location    200 = ok, 403 = info: legacy-asset:manage can't be granted to
@@ -24,7 +24,8 @@ import { JOB_KEY_VARS, JOB_SCOPES, settings, type KeyJob } from "../env.ts";
 import { gitInfo } from "../git.ts";
 import { emitJson, green, info, isJson, red, yellow } from "../log.ts";
 import { OpenCloud } from "../opencloud.ts";
-import { FLEET_SCOPE, SERVERS_MAP } from "../fleet.ts";
+import { FLEET_INGEST_TOKEN_VAR, FLEET_TOKEN_VAR } from "../fleet.ts";
+import { fleetFor } from "./fleet.ts";
 import { withJob } from "../progress.ts";
 import { capture } from "../proc.ts";
 import { hasZstd, isBun, runtimeName } from "../runtime.ts";
@@ -177,6 +178,22 @@ export async function doctorCommand(args: ParsedArgs) {
 		checks.push(...keyChecks(facts));
 	}
 
+	// The fleet API (servers, report, alerts, --wait and auto-rollback); tokens are never printed.
+	if (proj) {
+		const setup = fleetFor(proj);
+		if (!setup.client) {
+			checks.push({ name: "fleet API", status: "info", detail: `${setup.missing}; servers/report/alerts and --wait (with auto-rollback) are off until then` });
+		} else {
+			try {
+				const servers = await withJob("fleet API", () => setup.client!.servers({}));
+				const ingest = setup.ingest ? "" : `; no ${FLEET_INGEST_TOKEN_VAR}: the CLI can't post alerts (auto_rollback, server_stuck) or run fleet setup`;
+				checks.push({ name: "fleet API", status: "ok", detail: `${new URL(setup.url).host}: ${servers.length} live server(s)${ingest}` });
+			} catch (error) {
+				checks.push({ name: "fleet API", status: "warn", detail: `${(error as Error).message} (reads use ${FLEET_TOKEN_VAR})` });
+			}
+		}
+	}
+
 	// Scopes, each with its job's key
 	const assetsKey = keys.assets;
 	const deployKey = keys.deploy;
@@ -206,16 +223,6 @@ export async function doctorCommand(args: ParsedArgs) {
 						? ["ok", "universe-messaging-service:publish (published to TypeTorch/doctor)"]
 						: scopeMissing(status)
 							? ["fail", `missing universe-messaging-service:publish (${status} ${short(text)})`]
-							: ["warn", `unexpected ${status} ${short(text)}`],
-			),
-			!deployKey ? skipped("scope memory store", "deploy") : probe(
-				"scope memory store",
-				() => client(deployKey).request("GET", `/cloud/v2/universes/${universeId}/memory-store/sorted-maps/${SERVERS_MAP}/items?maxPageSize=1`),
-				(status, text) =>
-					status === 200 || status === 404
-						? ["ok", `${FLEET_SCOPE} (typetorch servers, report, deploy --wait)`]
-						: scopeMissing(status)
-							? ["warn", `missing ${FLEET_SCOPE} on the deploy key: typetorch servers, report and deploy --wait can't read the fleet (${status} ${short(text)})`]
 							: ["warn", `unexpected ${status} ${short(text)}`],
 			),
 			!assetsKey ? skipped("scope luau execution", "assets") : probe(

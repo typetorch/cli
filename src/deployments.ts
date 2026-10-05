@@ -40,6 +40,8 @@ export interface LocalDeployment extends RegistryDeployment {
 	rollout?: number;
 	/** The payload's ProtocolHash attribute (protocol.ts), when it had one. */
 	protocolHash?: string;
+	/** An automatic rollback (--wait): why, and the deploy it undid. */
+	autoRollback?: { reason: string; fromSeq: number; fromArtifactId: string };
 	/** Where the seq came from (seqstore.ts): the DataStore counter, the shared sources read, or this machine only. */
 	seqSource?: "counter" | "read" | "local";
 	/**

@@ -53,6 +53,8 @@ export interface ProjectConfig {
 	fallbackPublicKey?: string;
 	/** The key asset (`keys init`); stamped on the kernel as KeyAssetId. */
 	keyAssetId?: number;
+	/** The fleet API (heartbeats, deploy reports, alerts; `typetorch fleet setup`). Tokens come from the environment. */
+	fleet?: { url: string };
 }
 
 export const APPROVAL_POLICIES = ["all", "prod", "none"] as const;
@@ -89,6 +91,7 @@ const KNOWN_KEYS = new Set([
 	"revokedKeys",
 	"fallbackPublicKey",
 	"keyAssetId",
+	"fleet",
 ]);
 
 function positiveInt(value: unknown): number | undefined {
@@ -209,6 +212,13 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			errors.push(`"fallbackPublicKey" is also in "signingPublicKeys"; the fallback must be a separate key pair`);
 		}
 	}
+	let fleet: { url: string } | undefined;
+	if (raw.fleet !== undefined) {
+		const url = isRecord(raw.fleet) ? raw.fleet.url : undefined;
+		const problem = fleetUrlError(url);
+		if (problem) errors.push(`"fleet.url" ${problem}`);
+		else fleet = { url: url as string };
+	}
 	let keyAssetId: number | undefined;
 	if (raw.keyAssetId !== undefined) {
 		keyAssetId = positiveInt(raw.keyAssetId);
@@ -236,6 +246,7 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			...(Array.isArray(raw.revokedKeys) ? { revokedKeys: raw.revokedKeys as string[] } : {}),
 			...(typeof raw.fallbackPublicKey === "string" ? { fallbackPublicKey: raw.fallbackPublicKey } : {}),
 			...(keyAssetId !== undefined ? { keyAssetId } : {}),
+			...(fleet ? { fleet } : {}),
 		},
 	};
 }
@@ -277,7 +288,21 @@ export function loadProject(configPath?: string, cwd: string = process.cwd()): P
 	return { root: dirname(path), configPath: path, config, warnings };
 }
 
-export type KeyConfigField = "signingPublicKeys" | "revokedKeys" | "fallbackPublicKey" | "keyAssetId";
+export type KeyConfigField = "signingPublicKeys" | "revokedKeys" | "fallbackPublicKey" | "keyAssetId" | "fleet";
+
+/** The fleet API's base URL: https (game servers only reach https), no credentials in it. */
+export function fleetUrlError(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length > 300) return "must be the fleet API's https URL";
+	let url: URL;
+	try {
+		url = new URL(value);
+	} catch {
+		return "must be the fleet API's https URL";
+	}
+	if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname))) return "must be https (Roblox game servers only reach https endpoints)";
+	if (url.username || url.password) return "must not hold credentials (the tokens come from TYPETORCH_FLEET_TOKEN / TYPETORCH_FLEET_INGEST_TOKEN)";
+	return undefined;
+}
 
 /**
  * Writes key fields into the project's typetorch.json (only those fields change; formatting stays) and refreshes

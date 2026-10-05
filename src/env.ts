@@ -17,7 +17,7 @@
  *                         universe.place.luau-execution-session:read + :write
  *   OPENCLOUD_DEPLOY_KEY  deploy messages, the shared seq (seqstore.ts) and the ConfigService registry
  *                         universe-messaging-service:publish; universe-datastores.objects:read (+ :create and :update
- *                         to claim seqs atomically); the fleet (servers, report, --wait): memory-store.sorted-map:read.
+ *                         to claim seqs atomically); universe:write for `fleet setup` (one ConfigService key, blind).
  *                         The registry's read scope, universe:read, can't be granted to API keys today (OAuth only),
  *                         so deploys skip the registry
  *   OPENCLOUD_PLACE_KEY   kernel deploy / restore (manual only)      universe.place:write (publish), asset:read (place
@@ -42,7 +42,7 @@ export const JOB_KEY_VARS: Record<KeyJob, string> = {
 
 export const JOB_SCOPES: Record<KeyJob, string> = {
 	assets: "asset:read, asset:write (+ universe.place.luau-execution-session:read/write for test --cloud, assets sync/status and doctor's place check)",
-	deploy: "universe-messaging-service:publish, universe-datastores.objects:read (+ :create and :update to claim seqs), memory-store.sorted-map:read for servers/report/--wait",
+	deploy: "universe-messaging-service:publish, universe-datastores.objects:read (+ :create and :update to claim seqs); universe:write for fleet setup",
 	place: "universe.place:write, asset:read (place downloads need legacy-asset:manage, which API keys can't get today: use --place-file)",
 };
 
@@ -53,7 +53,9 @@ export const CHILD_ENV_VAR = "TYPETORCH_CHILD_ENV";
 /** CLI 0.2's plaintext signing seed variable: no longer read, but still a secret wherever it is left. */
 export const LEGACY_SIGNING_KEY_VAR = "TYPETORCH_SIGNING_KEY";
 /** Variables holding secrets: never passed to a child, always redacted. */
-export const SECRET_VARS: readonly string[] = [...API_KEY_VARS, ...Object.values(JOB_KEY_VARS), LEGACY_SIGNING_KEY_VAR];
+/** The fleet API's tokens (fleet.ts): admin (reads) and the write-only ingest token game servers get. */
+export const FLEET_TOKEN_VARS = ["TYPETORCH_FLEET_TOKEN", "TYPETORCH_FLEET_INGEST_TOKEN"] as const;
+export const SECRET_VARS: readonly string[] = [...API_KEY_VARS, ...Object.values(JOB_KEY_VARS), LEGACY_SIGNING_KEY_VAR, ...FLEET_TOKEN_VARS];
 
 /** The signing key files (keyfiles.ts). Read from the real environment only; never passed to a child process. */
 export const KEY_FILE_VAR = "TYPETORCH_KEY_FILE";

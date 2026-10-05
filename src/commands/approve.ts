@@ -60,7 +60,9 @@ import {
 	type History,
 } from "./common.ts";
 import { checkChannelGuard, checkPromoteChannel } from "./deploy.ts";
-import { waitSeconds, waitForFleet, WAIT_FLAGS, type WaitResult } from "./fleet.ts";
+import { fleetFor, rollbackThreshold, waitSeconds, waitForFleet, WAIT_FLAGS, type FleetDeps, type WaitResult } from "./fleet.ts";
+import { autoRollbackHook } from "./autorollback.ts";
+import { encodeDeployMessage } from "../opencloud.ts";
 import { makeEntry, messageFor, registryMessage, release, type ReleaseResult } from "./release.ts";
 import { describeTest, GATE_FLAGS, gateRelease, type TestDeps } from "./test.ts";
 import { gatePolicy, skipReason, type TestSummary } from "../cloudtest.ts";
@@ -388,6 +390,7 @@ export async function releaseExisting(input: {
 	const skipTest = skipReason(flagString(args, "skip-test"));
 	const testFlag = flagBool(args, "test");
 	const wait = waitSeconds(args, input.branchChannel);
+	const threshold = rollbackThreshold(args);
 	if (input.dryRun) {
 		const ending = modeFor(proj, args, input.branchChannel).mode.kind;
 		const entry = makeEntry({ action: kind, branch, artifact: input.artifact, by: input.by }, history.snapshot?.value, history.local);
@@ -448,21 +451,62 @@ export async function releaseExisting(input: {
 		info(bold(`${kind === "rollback" ? "rolled back" : "promoted"} #${result.entry.seq} ${input.summary} in ${timings.total.toFixed(2)} s`));
 		info(dim(`  ${formatTimings(timings)}`));
 	}
-	const fleet = await waitAfterRelease(proj, result, wait, input.oc);
+	const fleet = await waitAfterRelease(proj, result, { seconds: wait, oc: input.oc, branchChannel: input.branchChannel, threshold, keyPaths });
 	if (isJson()) return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, timings, ...(fleet ? { fleet } : {}) });
 }
 
 /** `--wait` after a published release: the servers' reports for its seq (see fleet.ts). */
-export async function waitAfterRelease(proj: Project, result: ReleaseResult, seconds: number | undefined, oc?: OpenCloud): Promise<WaitResult | undefined> {
-	if (seconds === undefined) return undefined;
+export async function waitAfterRelease(
+	proj: Project,
+	result: ReleaseResult,
+	options: {
+		seconds: number | undefined;
+		oc?: OpenCloud;
+		branchChannel: Channel;
+		/** Auto-rollback threshold (percent); undefined = off (--no-auto-rollback, or a rollback itself). */
+		threshold?: number;
+		keyPaths: Record<KeyRole, string>;
+		deps?: FleetDeps & { countdown?: (seconds: number, text: string) => Promise<"go" | "kept">; signer?: DualSigner };
+	},
+): Promise<WaitResult | undefined> {
+	if (options.seconds === undefined) return undefined;
+	const setup = fleetFor(proj, options.deps);
+	if (!setup.client) {
+		info(dim(`  not waiting for the servers' reports: ${setup.missing}`));
+		return undefined;
+	}
+	const fleet = setup.client;
+	const oc = options.oc ?? openCloud("deploy")!;
+	const text = encodeDeployMessage(result.message);
+	const seconds = options.seconds;
 	return waitForFleet({
-		oc: oc ?? openCloud("deploy")!,
-		universeId: proj.config.universeId,
+		fleet,
 		branch: result.entry.branch,
 		seq: result.entry.seq,
 		artifactId: result.entry.artifactId,
 		fromArtifactId: result.entry.fromArtifactId,
 		seconds,
+		// The same message (same seq and signature): kernels that applied it ignore it.
+		resend: () => oc.publishMessage(proj.config.universeId, DEPLOY_TOPIC, text),
+		autoRollback:
+			options.threshold === undefined || result.entry.action === "rollback"
+				? undefined
+				: autoRollbackHook(
+						{
+							proj,
+							oc,
+							fleet,
+							deployed: result.entry,
+							branchChannel: options.branchChannel,
+							keyPaths: options.keyPaths,
+							signer: options.deps?.signer,
+							countdown: options.deps?.countdown,
+							waitAfter: (rollback) =>
+								waitForFleet({ fleet, branch: rollback.entry.branch, seq: rollback.entry.seq, artifactId: rollback.entry.artifactId, seconds, deps: options.deps }),
+						},
+						options.threshold,
+					),
+		deps: options.deps,
 	});
 }
 
@@ -508,6 +552,7 @@ export async function approveCommand(args: ParsedArgs) {
 	const rollout = parseRollout(flagString(args, "rollout"));
 	const skipTest = skipReason(flagString(args, "skip-test"));
 	const wait = waitSeconds(args, state.proposal.branchChannel);
+	const threshold = rollbackThreshold(args);
 	const result = await approveProposal(proj, state, {
 		io,
 		noRegistry: flagBool(args, "no-registry"),
@@ -521,7 +566,7 @@ export async function approveCommand(args: ParsedArgs) {
 		info(bold(`approved ${state.proposal.id}: #${result.entry.seq} ${state.proposal.branch} -> ${result.entry.artifactId} (asset ${result.entry.assetId})${result.entry.rollout ? ` to ${result.entry.rollout}% of servers` : ""}`));
 		if (result.entry.timings) info(dim(`  ${formatTimings(result.entry.timings)}`));
 	}
-	const fleet = await waitAfterRelease(proj, result, wait);
+	const fleet = await waitAfterRelease(proj, result, { seconds: wait, branchChannel: state.proposal.branchChannel, threshold, keyPaths: signingKeyPaths(proj, args) });
 	if (isJson()) return emitJson({ proposal: state.proposal.id, deployment: result.entry, message: result.message, registry: result.registry, ...(fleet ? { fleet } : {}) });
 }
 

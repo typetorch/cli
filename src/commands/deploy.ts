@@ -20,7 +20,7 @@ import { gatePolicy, skipReason } from "../cloudtest.ts";
 import { describeProtocol } from "../protocol.ts";
 import { checkRollout, parseRollout } from "../rollout.ts";
 import { describeShared, DS_READ_SCOPE, DS_WRITE_SCOPES, readSharedSeq, type SharedSeq } from "../seqstore.ts";
-import { waitSeconds, WAIT_FLAGS } from "./fleet.ts";
+import { rollbackThreshold, waitSeconds, WAIT_FLAGS } from "./fleet.ts";
 import { describeTest, GATE_FLAGS, gateRelease } from "./test.ts";
 import { widenCommand } from "./widen.ts";
 import { describeBuild } from "./build.ts";
@@ -181,6 +181,7 @@ export async function deployCommand(args: ParsedArgs) {
 	checkChannelGuard({ branch, branchChannel: targetChannel, artifactChannel: meta.channel, dirty: meta.dirty, force });
 	checkRollout(branch, targetChannel, rollout);
 	const wait = waitSeconds(args, targetChannel);
+	const threshold = rollbackThreshold(args);
 
 	const { displayName, description } = assetNaming(proj.config, meta, branch);
 	const changes = meta.notes?.changes ?? [];
@@ -351,7 +352,7 @@ export async function deployCommand(args: ParsedArgs) {
 		);
 		info(dim(`  ${formatTimings(timings)}`));
 	}
-	const fleet = await waitAfterRelease(proj, result, wait, deployer);
+	const fleet = await waitAfterRelease(proj, result, { seconds: wait, oc: deployer, branchChannel: targetChannel, threshold, keyPaths });
 	if (isJson()) {
 		return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, assetName: name.name, timings, ...(fleet ? { fleet } : {}) });
 	}

@@ -16,7 +16,7 @@ import { DEPLOY_TOPIC, deployMessage, encodeDeployMessage, type OpenCloud } from
 import { appendRollout, checkRollout, parseWiden, ROLLOUTS_LOG, type RolloutRecord } from "../rollout.ts";
 import { modeFor } from "./approve.ts";
 import { openCloud, project, projectStateDir, readHistory, registryApi, warnRegistryFallback } from "./common.ts";
-import { waitForFleet, waitSeconds } from "./fleet.ts";
+import { fleetFor, waitForFleet, waitSeconds } from "./fleet.ts";
 
 /** The newest rollout % recorded for (branch, seq): a widen, else the deploy's own; undefined = every server. */
 export function currentRollout(dir: string, branch: string, seq: number, deployed?: number): number | undefined {
@@ -101,8 +101,11 @@ export async function widenCommand(args: ParsedArgs, deps: WidenDeps = {}) {
 		info(bold(`widened ${what}`));
 		info(dim(`  ${DEPLOY_TOPIC} ${text}`));
 	}
-	const fleet = wait !== undefined
-		? await waitForFleet({ oc: client, universeId: proj.config.universeId, branch, seq: head.seq, artifactId: head.artifactId, fromArtifactId: row?.fromArtifactId, seconds: wait })
-		: undefined;
+	const setup = wait !== undefined ? fleetFor(proj) : undefined;
+	if (setup && !setup.client) info(dim(`  not waiting for the servers' reports: ${setup.missing}`));
+	const fleet =
+		wait !== undefined && setup?.client
+			? await waitForFleet({ fleet: setup.client, branch, seq: head.seq, artifactId: head.artifactId, fromArtifactId: row?.fromArtifactId, seconds: wait })
+			: undefined;
 	if (isJson()) emitJson({ branch, seq: head.seq, from: before ?? null, to: pct, message, ...(fleet ? { fleet } : {}) });
 }

@@ -49,6 +49,14 @@ inputs:
     description: Optional key for deploy messages, the shared seq (DataStore) and the fleet (OPENCLOUD_DEPLOY_KEY).
     required: false
     default: ""
+  fleet-token:
+    description: The fleet API's admin token (TYPETORCH_FLEET_TOKEN) for --wait. Pass a secret.
+    required: false
+    default: ""
+  fleet-ingest-token:
+    description: The fleet API's ingest token (TYPETORCH_FLEET_INGEST_TOKEN) for the alerts --wait posts. Pass a secret.
+    required: false
+    default: ""
   message:
     description: Deploy note (shown in the dev menu). Default the head commit's subject.
     required: false
@@ -58,7 +66,7 @@ inputs:
     required: false
     default: "false"
   wait:
-    description: Seconds to wait for the servers' reports after a dev deploy (empty = don't wait). Needs memory-store.sorted-map:read.
+    description: Seconds to wait for the servers' reports after a dev deploy (empty = don't wait). Needs typetorch.json fleet.url and fleet-token; may roll back automatically (see the CLI README, "Fleet").
     required: false
     default: ""
   prod:
@@ -165,6 +173,8 @@ runs:
         OPENCLOUD_API_KEY: ${{ inputs.api-key }}
         OPENCLOUD_ASSETS_KEY: ${{ inputs.assets-key }}
         OPENCLOUD_DEPLOY_KEY: ${{ inputs.deploy-key }}
+        TYPETORCH_FLEET_TOKEN: ${{ inputs.fleet-token }}
+        TYPETORCH_FLEET_INGEST_TOKEN: ${{ inputs.fleet-ingest-token }}
         TYPETORCH_STATE_DIR: ${{ runner.temp }}/typetorch-state
         TYPETORCH_PROPOSED_BY: ci
         TT_CLI: ${{ steps.cli.outputs.run }}
