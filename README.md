@@ -7,7 +7,7 @@ builders edit in the place) into the artifact. **Every deploy is approved by a p
 (`typetorch approve`); agents and the remote-claude dev-server only prepare them. **Prod-channel deploys are signed**
 with two Ed25519 keys, so live prod servers only run what you published. **A cloud test gates prod deploys**: the
 uploaded payload boots headless in the place before anything is published. `typetorch servers` and `typetorch report`
-show the live fleet and what each server did with a deploy, and a GitHub Action builds and deploys dev branches.
+show the live fleet and what each server did with a deploy.
 
 Part of TypeTorch: the kernel (`@typetorch/kernel`) is baked into the place and swaps payloads; the framework
 (`@typetorch/framework`) ships inside every payload.
@@ -452,35 +452,11 @@ signed messages, and the CLI refuses `--rollout` for prod-channel branches (to t
 signed A/B pins: `typetorch pin <artifact> --branch prod --pct <1-99>`). The registry head never carries the rollout
 (the kernel keeps a message's head with `ro` over a registry head of the same seq without one).
 
-### CI (GitHub Action)
+### No GitHub Actions
 
-`action.yml` in this repo is a composite action: it installs Bun and the game's `rokit.toml` tools, runs
-`bun install`, then `typetorch build`, `test --cloud`, or `deploy` (the `command` input).
-
-- **Dev-channel branches deploy**, with `--require-shared-seq`: CI has no deployment log to take the next seq from (a
-  dev server ignores a seq below the one it applied), so the key needs `universe-datastores.objects:read`, plus
-  `:create` and `:update` to claim seqs atomically (see "The shared seq"). They publish only
-  when typetorch.json `approval` lets a non-person publish (`"prod"` or `"none"`); with `"all"` they become proposals.
-  Inputs `test: "true"` (the cloud test) and `wait: <seconds>`.
-- **Prod-channel branches are never published from CI** (prod is signed with the owner's key files): the action builds,
-  uploads, runs the cloud test and writes a proposal, then uploads its state dir as the artifact
-  `typetorch-state-<run id>` (kept 2 days). On your PC:
-  `gh run download <run id> -n typetorch-state-<run id> -D ci-state`, then `typetorch approve --import ci-state`.
-  `prod: skip` turns this off.
-- Other inputs: `api-key` (or `assets-key` / `deploy-key`; pass secrets), `branch`, `working-directory`, `message`,
-  `cli-version` (default: the game's own devDependency), `bun-version`, `rokit`. Outputs: `branch`, `channel`,
-  `artifact-id`, `asset-id`, `seq`, `proposal-id`.
-
-```yaml
-- uses: actions/checkout@v4
-  with: { fetch-depth: 0 }   # deploy notes list the commits since the branch's last deploy
-- uses: typetorch/cli@v0.7.0
-  with:
-    api-key: ${{ secrets.OPENCLOUD_API_KEY }}
-```
-
-The template's `.github/workflows/ci.yml` installs, compiles, runs `typetorch build`, and deploys dev-channel branches
-when the repo secret `OPENCLOUD_API_KEY` exists.
+TypeTorch doesn't use or ship GitHub Actions (owner decision: they are a common supply-chain risk). Builds,
+cloud tests and deploys run from a developer's machine. `--require-shared-seq` and `approve --import <dir>` work in
+any automation you choose to run yourself.
 
 ### Kernel deploy
 
