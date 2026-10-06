@@ -15,7 +15,10 @@
  *   6. (swap) a second generation of a fresh copy boots, runs 1 s and stops, as on a hot swap (persist survives).
  * Place scripts don't run in a task (Roblox docs; verified live), so the place's kernel stays idle; DataStores,
  * MemoryStores and HttpService DO work there, so game code runs against real data: `workspace:GetAttribute(
- * "TypeTorchTest")` is true and the stub kernel has `test = true` for code that must not run in the gate.
+ * "TypeTorchTest")` is true and the stub kernel has `test = true` for code that must not run in the gate. The stub
+ * kernel's effective channel is "dev" whatever the branch (security audit 2026-10-06), so code that splits its stores by
+ * `TypeTorch.channel` writes the `_dev` stores, never prod data; the payload's own Channel attribute is still checked
+ * against `requireChannel` and reported as the artifact's channel.
  *
  * Failures (exit 1): the load/mount checks, boot errors or a boot that throws or doesn't return, any error while it
  * runs (onInit, onStart, Shared requires, the swap), a stop that throws, times out or logs "onStop threw". Warnings
@@ -52,7 +55,16 @@ export interface GateInput {
 	seconds: number;
 	/** Boot a second generation after the stop (a hot swap). */
 	swap: boolean;
+	/**
+	 * The effective channel the stub kernel reports to the game (`TypeTorch.channel`). Default "dev": the task runs
+	 * against the real DataStores and MessagingService, so channel-split stores must point at dev data even when the
+	 * branch is prod. Tests only.
+	 */
+	stubChannel?: Channel;
 }
+
+/** The stub kernel's channel unless the input says otherwise. */
+export const STUB_CHANNEL: Channel = "dev";
 
 export class GateError extends Error {
 	override name = "GateError";
@@ -69,6 +81,7 @@ export function gateScript(input: GateInput): string {
 		seq: input.seq ?? null,
 		seconds: input.seconds,
 		swap: input.swap,
+		stubChannel: input.stubChannel ?? STUB_CHANNEL,
 	});
 	if (config.includes("]==]")) throw new GateError("the test input can't be embedded in the task script");
 	return GATE_SCRIPT.replace("__CONFIG__", () => config);
@@ -259,8 +272,9 @@ local function makeKernel(number, artifact, start)
 		artifact = table.clone(artifact),
 		generation = number,
 		branch = CONFIG.branch,
-		channel = CONFIG.channel,
-		serverType = if CONFIG.channel == "prod" then "public" else "reserved",
+		-- The effective channel is "dev" (CONFIG.stubChannel) whatever the branch: the task touches real stores.
+		channel = CONFIG.stubChannel,
+		serverType = if CONFIG.stubChannel == "prod" then "public" else "reserved",
 		start = start,
 		test = true,
 	}
@@ -293,7 +307,7 @@ local function makeKernel(number, artifact, start)
 			placeVersion = game.PlaceVersion,
 			serverType = api.serverType,
 			branch = CONFIG.branch,
-			channel = CONFIG.channel,
+			channel = CONFIG.stubChannel,
 			startedAt = startedAt,
 			uptime = os.time() - startedAt,
 			generation = { name = artifact.id .. "#" .. number, number = number, startedAt = startedAt, uptime = os.time() - startedAt, artifact = table.clone(artifact) },
@@ -358,7 +372,7 @@ local function makeKernel(number, artifact, start)
 			revokedKeys = {},
 			trusted = 0,
 			changes = 0,
-			signedOnly = CONFIG.channel == "prod",
+			signedOnly = CONFIG.stubChannel == "prod",
 			rejected = { total = 0, byKind = {} },
 			refusals = {},
 		}
@@ -417,7 +431,7 @@ local function runGeneration(number, payload, loadSeconds, runSeconds, prefix, p
 	table.insert(result.generations, generation)
 	local tree, artifact = mount(payload)
 	local start = if previous
-		then { kind = "swap", reason = "deploy", previous = { artifact = previous, branch = CONFIG.branch, channel = CONFIG.channel, generation = number - 1 }, branchChanged = false, startedAt = os.time(), loadSeconds = loadSeconds }
+		then { kind = "swap", reason = "deploy", previous = { artifact = previous, branch = CONFIG.branch, channel = CONFIG.stubChannel, generation = number - 1 }, branchChanged = false, startedAt = os.time(), loadSeconds = loadSeconds }
 		else { kind = "boot", reason = "boot", branchChanged = false, startedAt = os.time(), loadSeconds = loadSeconds }
 	local kernel = makeKernel(number, artifact, start)
 
