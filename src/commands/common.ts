@@ -108,7 +108,8 @@ export function loadSignerOrExplain(proj: Project, paths: Record<KeyRole, string
 		return loadSigner(proj, paths);
 	} catch (error) {
 		if (!(error instanceof SigningSetupError)) throw error;
-		throw new SigningSetupError(`${why}: ${error.message}. Set them up with \`typetorch keys init\` and \`typetorch keys init --fallback\``);
+		const hint = error.message.includes("typetorch keys init") ? "" : ". Set them up with `typetorch keys init` and `typetorch keys init --fallback`";
+		throw new SigningSetupError(`${why}: ${error.message}${hint}`);
 	}
 }
 
