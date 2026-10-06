@@ -206,6 +206,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch assets status` / `typetorch assets list` | export + diff without uploading / the lockfile |
 | `typetorch remote-claude --users <ids> [...]` | runs `typetorch-dev-server remote-claude` ([`@typetorch/dev-server`](https://github.com/typetorch/dev-server)) with the same arguments in this terminal, and exits with its code: devs prompt Claude Code on this machine from the in-game DEV > Claude tab (dev-channel branches only). Found in `TYPETORCH_DEV_SERVER` (an entry), `node_modules/@typetorch/dev-server` in the game repo or a parent, next to this CLI (`npm i -g @typetorch/dev-server`; with npx: `npx -p @typetorch/cli -p @typetorch/dev-server typetorch remote-claude ...`), or a sibling `../dev-server` checkout; else a clear error. It gets the real environment (the dev-server reads the key, `--env-file` / `TYPETORCH_ENV_FILE` and `.env` itself) |
 | `typetorch dev --users <ids> [...]` | the same as `typetorch remote-claude` |
+| `typetorch migrate --from flamework [--dry-run] [--net compat\|native] [--report <file>] [--allow-dirty]` | the mechanical part of moving a Flamework 1.x game (see "Migrating from Flamework"); local only, no keys |
 | `typetorch update [<version>] [--check] [--yes]` | updates this CLI to the newest `@typetorch/cli` on npm (or `<version>`) the way it was installed: in the game's `package.json` with its package manager (bun, pnpm, yarn or npm, from the lockfile; a devDependency stays one), or globally (`npm i -g`, `bun add -g`, pnpm, yarn). Asks y/N first (`--yes` skips; without a terminal it prints the command). npx needs nothing (`npx @typetorch/cli@latest`); a git checkout gets the `git pull` to run. `--check` only shows the versions and the command |
 | `typetorch doctor` | checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the health window per channel and the auto-rollback threshold, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), and probes each key's scopes with harmless calls |
 
@@ -219,6 +220,31 @@ quarter second, e.g. `⠹ 12s  waiting on: moderation of asset 123 (12s), publis
 yellow; `|/-\` instead of braille on Windows consoles without UTF-8). Log lines clear it first, prompts hide it, and
 the cursor comes back on exit and on Ctrl+C. Without a terminal (CI, agents, pipes) there is no animation: a job past
 15 s prints `still waiting on: ...` every 15 s. `--json` prints none of it.
+
+### Migrating from Flamework
+
+`typetorch migrate --from flamework`, in the game folder (next to `tsconfig.json`), rewrites the source with the
+TypeScript compiler API, using the game's own `node_modules/typescript` (no extra dependency). It refuses a working
+tree with uncommitted changes (`--allow-dirty`), so the migration is one diff to review; `--dry-run` prints that diff
+and writes nothing.
+
+- **Rewrites:** `@flamework/core` imports to `@typetorch/framework` (unsupported names are dropped when unused, else
+  kept and flagged); `@Service` / `@Controller` classes `extends Module` (or their local base class does) and call
+  `super()`; a module's own `trove = new Trove()` gives way to Module's; `@metadata flamework:*` tags; ignite files
+  (`*.server.ts` / `*.client.ts` with `Flamework.ignite()`) become `src/<realm>/boot.ts` with the `addPaths` folders,
+  and their other top-level code moves into a generated module's `onStart` in the first folder.
+- **Networking:** `--net compat` (default) swaps `Networking.createEvent` / `createFunction` for the framework's
+  `createFlameworkCompat`, so every call site stays as it is. `--net native` merges each file's networks into one
+  `createNetwork` and rewrites the call sites (`connect` -> `on` in `this.trove`, `setCallback` -> `handle`,
+  `broadcast` -> `fireAll`, `except` -> `fireExcept`, `predict` -> `emit`, `fire(players[])` -> `fireList`, the call
+  shorthand -> `fire` / `invoke`), deletes handler files that only created handlers, and flags what it can't decide.
+- **Flags (not rewritten):** module-level state, `Players.PlayerAdded.Connect`, `_G`, loops / `task.*` / connections
+  outside a trove, `@flamework/components`, `Dependency<T>()` before construction, `loadstring`, remotes,
+  MessagingService, DataStore / ProfileService code, BindToClose, Scripts left in the source tree, toolchain leftovers.
+- **Output:** `typetorch-migrate-report.md` (`--report`): a summary, every flag by kind with file, line and the fix,
+  and what was rewritten; plus a short summary on the terminal (`--json` for both as data).
+
+`typetorch build` warns while the game still uses `createFlameworkCompat` (its calls are part of the protocol hash).
 
 ### Identity
 

@@ -19,6 +19,9 @@
  * numbers, and misses networks declared elsewhere), or a manifest emitted by the framework/transformer (the most
  * explicit; see the report). Without any createNetwork call (no networking, or the transformer isn't running and the
  * call has no arguments) nothing is stamped.
+ *
+ * `createFlameworkCompat(...)` (the framework's @flamework/networking compatibility layer, the same wire format) is
+ * hashed the same way, and listed (`compatFiles`) so `typetorch build` can say the game still uses it.
  */
 import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
@@ -179,10 +182,16 @@ export function canonicalNetwork(args: string): string {
 	return nodes.map((n) => serialize(canonical(n))).join(",");
 }
 
-/** The text between the parentheses of each `createNetwork(...)` call (the alias roblox-ts gives the import too). */
-export function findNetworkCalls(source: string): string[] {
-	const names = new Set(["createNetwork"]);
-	for (const m of source.matchAll(/local\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*TS\.import\([^\n]*\)\.createNetwork\b/g)) names.add(m[1]);
+/** Network macros whose calls carry a game's guards: the native one and the Flamework compatibility layer. */
+export const NETWORK_MACROS = ["createNetwork", "createFlameworkCompat"] as const;
+
+/**
+ * The text between the parentheses of each `createNetwork(...)` call (the alias roblox-ts gives the import too), or of
+ * another macro's (`createFlameworkCompat`).
+ */
+export function findNetworkCalls(source: string, macro: string = "createNetwork"): string[] {
+	const names = new Set([macro]);
+	for (const m of source.matchAll(new RegExp(`local\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*=\\s*TS\\.import\\([^\\n]*\\)\\.${macro}\\b`, "g"))) names.add(m[1]);
 	const calls: string[] = [];
 	const pattern = new RegExp(`(?<![A-Za-z0-9_])(?:[A-Za-z_][A-Za-z0-9_]*\\.)?(${[...names].join("|")})\\s*\\(`, "g");
 	for (const m of source.matchAll(pattern)) {
@@ -231,41 +240,65 @@ export interface ProtocolInfo {
 	raw: number;
 	/** A createNetwork() without arguments: the transformer didn't generate guards. */
 	unguarded: number;
+	/** Files with a createFlameworkCompat call (relative), and the leaves those calls declare. */
+	compatFiles: string[];
+	compatLeaves: number;
 }
 
 /** The protocol hash of a compiled game: `outDir` (out/), and the project root for the framework runtime. */
 export function protocolHash(root: string, outDir: string): ProtocolInfo {
 	const parts: string[] = [];
 	const files: string[] = [];
+	const compatFiles: string[] = [];
+	let compatLeaves = 0;
 	let raw = 0;
 	let unguarded = 0;
 	for (const file of luauFiles(outDir)) {
 		const source = readFileSync(file, "utf8");
-		if (!source.includes("createNetwork")) continue;
-		const calls = findNetworkCalls(source);
-		if (calls.length === 0) continue;
-		files.push(relative(root, file).replace(/\\/g, "/"));
-		for (const call of calls) {
-			if (call.trim() === "") {
-				unguarded++;
-				continue;
+		if (!NETWORK_MACROS.some((macro) => source.includes(macro))) continue;
+		const relativePath = relative(root, file).replace(/\\/g, "/");
+		for (const macro of NETWORK_MACROS) {
+			const calls = source.includes(macro) ? findNetworkCalls(source, macro) : [];
+			if (calls.length === 0) continue;
+			if (!files.includes(relativePath)) files.push(relativePath);
+			// Compat calls carry another argument list (events and functions trees): their own prefix in the hash, so
+			// games without the compat layer hash exactly as before.
+			const prefix = macro === "createNetwork" ? "" : `${macro}:`;
+			if (macro !== "createNetwork") {
+				compatFiles.push(relativePath);
+				for (const call of calls) compatLeaves += call.match(/\bstrictArray\(/g)?.length ?? 0;
 			}
-			try {
-				parts.push(canonicalNetwork(call));
-			} catch {
-				raw++;
-				parts.push(`raw:${call.replace(/--[^\n]*/g, "").replace(/\s+/g, "")}`);
+			for (const call of calls) {
+				if (call.trim() === "") {
+					unguarded++;
+					continue;
+				}
+				try {
+					parts.push(prefix + canonicalNetwork(call));
+				} catch {
+					raw++;
+					parts.push(`${prefix}raw:${call.replace(/--[^\n]*/g, "").replace(/\s+/g, "")}`);
+				}
 			}
 		}
 	}
 	const runtimePath = join(root, FRAMEWORK_NET_RUNTIME);
 	const runtime = existsSync(runtimePath);
-	if (parts.length === 0) return { files, networks: 0, runtime, raw, unguarded };
+	if (parts.length === 0) return { files, networks: 0, runtime, raw, unguarded, compatFiles, compatLeaves };
 	const hash = createHash("sha256");
 	hash.update(`${PROTOCOL_VERSION}\n`);
 	for (const part of [...parts].sort()) hash.update(`net\n${part}\n`);
 	if (runtime) hash.update(`runtime\n${createHash("sha256").update(readFileSync(runtimePath, "utf8").replace(/\r\n/g, "\n")).digest("hex")}\n`);
-	return { hash: `${PROTOCOL_VERSION}-${hash.digest("hex").slice(0, 16)}`, files, networks: parts.length, runtime, raw, unguarded };
+	return { hash: `${PROTOCOL_VERSION}-${hash.digest("hex").slice(0, 16)}`, files, networks: parts.length, runtime, raw, unguarded, compatFiles, compatLeaves };
+}
+
+/** `typetorch build`'s note for a game still on the Flamework compatibility layer (undefined when it isn't). */
+export function compatNote(info: Pick<ProtocolInfo, "compatFiles" | "compatLeaves">): string | undefined {
+	if (info.compatFiles.length === 0) return undefined;
+	return (
+		`Flamework compat layer in use (${info.compatLeaves} leaves, ${info.compatFiles.join(", ")}): it works, but move to ` +
+		"createNetwork over time (typetorch migrate --from flamework --net native; guides/from-flamework.md)"
+	);
 }
 
 export type ProtocolStatus = "first" | "unchanged" | "changed" | "unknown";

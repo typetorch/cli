@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalNetwork, describeProtocol, FRAMEWORK_NET_RUNTIME, findNetworkCalls, protocolHash, protocolStatus } from "../src/protocol";
+import { canonicalNetwork, compatNote, describeProtocol, FRAMEWORK_NET_RUNTIME, findNetworkCalls, protocolHash, protocolStatus } from "../src/protocol";
 
 // What roblox-ts + @typetorch/transformer emit for a net module (the template's, shortened).
 const NET = `-- Compiled with roblox-ts v3.0.0
@@ -125,5 +125,44 @@ describe("no network, unguarded calls, status", () => {
 		expect(describeProtocol({ hash: "p1-a", status: "unchanged", since: 3 })).toContain("protocol unchanged since #3");
 		expect(describeProtocol({ hash: "p1-a", status: "changed", since: 3 })).toContain("protocol changed since #3");
 		expect(describeProtocol({})).toContain("nothing stamped");
+	});
+});
+
+describe("the Flamework compatibility layer (createFlameworkCompat)", () => {
+	const COMPAT = `local TS = require(script.Parent.Parent.include.RuntimeLib)
+local t = TS.import(script, script.Parent.Parent, "include", "node_modules", "@rbxts", "t", "lib", "ts").t
+local createFlameworkCompat = TS.import(script, script.Parent.Parent, "include", "node_modules", "@typetorch", "framework", "out").createFlameworkCompat
+local GlobalFunctions = createFlameworkCompat({}, {}, {
+	Spin = {
+		requestSpin = t.strictArray(),
+	},
+}).GlobalFunctions
+local GlobalEvents = createFlameworkCompat({
+	requestArrest = t.strictArray(t.instanceIsA("Player")),
+}, {
+	notifyError = t.strictArray(t.string, t.optional(t.boolean)),
+}).GlobalEvents
+return { GlobalEvents = GlobalEvents, GlobalFunctions = GlobalFunctions }
+`;
+	test("compat calls are hashed and listed with their leaves; a game without them hashes as before", () => {
+		const root = game({ "out/shared/utils/network.helper.luau": COMPAT }, "-- net runtime v1");
+		const info = protocolHash(root, join(root, "out"));
+		expect(info.hash).toMatch(/^p1-[0-9a-f]{16}$/);
+		expect(info.networks).toBe(2);
+		expect(info.compatFiles).toEqual(["out/shared/utils/network.helper.luau"]);
+		expect(info.compatLeaves).toBe(3);
+		expect(findNetworkCalls(COMPAT, "createFlameworkCompat")).toHaveLength(2);
+		expect(findNetworkCalls(COMPAT)).toHaveLength(0);
+		// A leaf's guard changes the hash; the same leaves through createNetwork don't collide with compat's.
+		const changed = game({ "out/shared/utils/network.helper.luau": COMPAT.replace("t.optional(t.boolean)", "t.boolean") }, "-- net runtime v1");
+		expect(hashIn(changed)).not.toBe(info.hash);
+		const native = game({ "out/shared/net.luau": NET }, "-- net runtime v1");
+		expect(protocolHash(native, join(native, "out")).compatFiles).toEqual([]);
+		expect(compatNote(info)).toContain("Flamework compat layer in use (3 leaves, out/shared/utils/network.helper.luau)");
+		expect(compatNote(protocolHash(native, join(native, "out")))).toBeUndefined();
+	});
+	test("the hash of a createNetwork-only game is unchanged (no compat prefix in its parts)", () => {
+		// Pinned: computed with the protocol.ts of cli 0.7.5, before createFlameworkCompat existed.
+		expect(hashOf(NET)).toBe("p1-023cb0f86490d8bc");
 	});
 });
