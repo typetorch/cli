@@ -1,0 +1,17 @@
+{
+	"compilerOptions": {
+		"strict": true,
+		"target": "ESNext",
+		"module": "commonjs",
+		"moduleResolution": "Node",
+		"experimentalDecorators": true,
+		"lib": ["ES2020"],
+		"types": [],
+		"rootDir": "src",
+		"baseUrl": "src",
+		"outDir": "out",
+		"typeRoots": ["node_modules/@rbxts", "node_modules/@flamework"],
+		"plugins": [{ "transform": "rbxts-transformer-flamework" }]
+	},
+	"include": ["./src/**/*.ts"]
+}

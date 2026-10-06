@@ -33,6 +33,7 @@ import { ROLLOUT_USAGE, WIDEN_USAGE } from "./rollout.ts";
 import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history.ts";
 import { approveCommand, approveFlags, proposalsCommand, proposalsFlags, rejectCommand, rejectFlags } from "./commands/approve.ts";
 import { kernelCommand, kernelFlags } from "./commands/kernel.ts";
+import { MIGRATE_USAGE, migrateCommand, migrateFlags } from "./commands/migrate.ts";
 import { keysCommand, keysFlags } from "./commands/keys.ts";
 import { pinCommand, pinFlags } from "./commands/pin.ts";
 import { promoteCommand, promoteFlags } from "./commands/promote.ts";
@@ -358,6 +359,12 @@ typetorch assets list
 		raw: (argv) => remoteClaudeCommand(argv),
 		summary: "Claude Code from the in-game dev menu",
 		usage: REMOTE_CLAUDE_USAGE.replace("typetorch remote-claude --users", "typetorch dev (= remote-claude) --users"),
+	},
+	migrate: {
+		flags: migrateFlags,
+		run: (args) => migrateCommand(args),
+		summary: "rewrite a Flamework game for TypeTorch (local)",
+		usage: MIGRATE_USAGE,
 	},
 	update: {
 		flags: updateFlags,

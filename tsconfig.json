@@ -16,5 +16,7 @@
 		"skipLibCheck": true,
 		"noEmit": true
 	},
-	"include": ["src", "test"]
+	"include": ["src", "test"],
+	// Game fixtures are inputs (Flamework projects for the codemod), not CLI code.
+	"exclude": ["test/fixtures"]
 }

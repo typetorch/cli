@@ -33,7 +33,7 @@ import { checkPayloadContents } from "./rbxm.ts";
 import { payloadNotes, sourceChanges } from "./changes.ts";
 import { liveHeads, readLocalLog } from "./deployments.ts";
 import { stateDir } from "./state.ts";
-import { PROTOCOL_ATTRIBUTE, protocolHash, protocolStatus, type ProtocolStatus } from "./protocol.ts";
+import { compatNote, PROTOCOL_ATTRIBUTE, protocolHash, protocolStatus, type ProtocolStatus } from "./protocol.ts";
 import { effectiveHealth, healthAttributes, type EffectiveHealth } from "./health.ts";
 
 export const KERNEL_API = 1;
@@ -491,6 +491,8 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 	const protocol = protocolHash(root, layout.outDir);
 	if (protocol.unguarded) warn(`${protocol.unguarded} createNetwork() call(s) without generated guards (is @typetorch/transformer in the tsconfig plugins?)`);
 	if (protocol.raw) debug(`${protocol.raw} createNetwork call(s) hashed as text (not readable canonically)`);
+	const compat = compatNote(protocol);
+	if (compat) warn(compat);
 	const previous = notesInput.previous;
 	const previousProtocol = previous
 		? (previous.protocolHash ?? readLocalLog(stateDir(root), project.config.universeId).filter((d) => d.branch === target.branch && d.seq === previous.seq).at(-1)?.protocolHash)
