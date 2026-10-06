@@ -1,6 +1,6 @@
 {
 	"name": "@typetorch/cli",
-	"version": "0.7.3",
+	"version": "0.7.4",
 	"description": "TypeTorch CLI: build, upload and hot-swap roblox-ts game code on live Roblox servers, roll back, and list deployments.",
 	"license": "MIT",
 	"repository": {
