@@ -104,7 +104,7 @@ scripts, git) get an allowlisted environment without any key. Keys are never pri
 | Variable | Used for | Scopes |
 |---|---|---|
 | `OPENCLOUD_ASSETS_KEY` | payload uploads and moderation (`deploy`, `upload`); the cloud test (`test --cloud`, the prod gate); hot assets (`assets sync`, `assets status`); doctor's place check | `asset:read` (also on the place), `asset:write`; `universe.place.luau-execution-session:read` + `:write` for the cloud test, hot assets and doctor |
-| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the shared seq (`deploy`, `rollback`, `promote`, `keys resign`); the registry (`config push`, `deployments`); `fleet setup` | `universe-messaging-service:publish`; `universe-datastores.objects:read` (+ `:create` and `:update` to claim seqs and store the durable head; see "The shared seq" and "The durable head"); `universe:write` for `fleet setup`. The registry needs `universe:read`, which **can't be granted to API keys today** (OAuth only), so it is skipped |
+| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the shared seq (`deploy`, `rollback`, `promote`, `keys resign`); the signed settings record (`settings`, `access push`, `fleet setup`, `keys rotate` / `resign`) | `universe-messaging-service:publish`; `universe-datastores.objects:read` (+ `:create` and `:update` to claim seqs, store the durable head and write the settings; see "The shared seq", "The durable head" and "Settings"). No `universe:write` / `universe:read`: nothing is kept in ConfigService since CLI 0.8 / kernel 0.3.8 |
 | `OPENCLOUD_PLACE_KEY` | `kernel deploy`, `kernel restore` (manual only) | `universe.place:write` (publish), `asset:read` (place versions). Downloading the place needs `legacy-asset:manage`, which **can't be granted to API keys today**: pass `--place-file` (a copy downloaded in Studio) |
 | `TYPETORCH_API_KEY`, `OPENCLOUD_API_KEY` or `ROBLOX_API_KEY` | any job without its own key | all of the above |
 
@@ -137,7 +137,7 @@ message. Keep the deploy key away from agents. An old `signingPublicKey` (CLI 0.
 ### Signing prod deploys
 
 Releases (deploy, rollback, promote, re-sign) and pins to a **prod-channel** branch are signed with two Ed25519 keys
-when they are published; dev-channel ones never are. Every prod message and registry head carries `sig` (main key) and
+when they are published; dev-channel ones never are. Every prod message, durable head and the settings record carry `sig` (main key) and
 `sigF` (fallback key). The kernel's rule is strict: once the key asset has loaded on a server only `sig` counts; while
 it never loaded only `sigF` counts (rules: [Prod signing](https://github.com/typetorch/docs/blob/main/guides/prod-signing.md)).
 
@@ -156,7 +156,7 @@ it never loaded only `sigF` counts (rules: [Prod signing](https://github.com/typ
 4. `typetorch kernel deploy`: bakes `KeyAssetId`, `FallbackPublicKey` and `BootstrapHeads` (the current prod heads,
    which the kernel trusts unsigned: heads stored before signing have no signature) into the place's kernel (patched
    in; servers run it after a restart). It refuses to publish without the keys. Run it from the machine with the
-   latest deployment log (or a readable registry).
+   latest deployment log.
 5. `typetorch doctor`: both key files exist and match typetorch.json, the key asset (Approved, right owner, same
    lists) and the place's kernel attributes; any mismatch is a warning.
 
@@ -184,14 +184,15 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 |---|---|
 | `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs rbxtsc (`bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first |
 | `typetorch upload [--no-build]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
-| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--no-registry] [--require-shared-seq] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: registry, deploy message, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
+| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--require-shared-seq] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: deploy message, durable head, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
 | `typetorch deploy --widen <1-100> [--branch]` | re-send the branch's live deploy (same seq) to more servers; dev-channel branches only (see "Rollouts") |
 | `typetorch promote <branch> <artifactId\|assetId\|#seq\|commit> [--force] [--dry-run] [--test] [--skip-test <reason>] [--wait [s]] [--rollout <1-99>]` | point a branch at an already uploaded, approved payload (from the deployments or `uploads.jsonl`) with a new seq; no rebuild. A prod-channel branch only takes prod-channel artifacts, even with `--force` ("rebuild for prod"). `promote <artifact> <branch>` works too when only the second is a known branch |
 | `typetorch rollback [--branch] [--to <commit\|artifactId\|assetId\|#seq>] [--force] [--dry-run] [--test] [--wait [s]]` | point the branch at an earlier, already approved asset (no build or upload) and tell its servers; no cloud test unless `--test` (it is an earlier build) |
 | `typetorch deployments [--branch] [--limit n]` | deployment history with git identity; `*` = each branch's live head; lists uploads that never went out |
 | `typetorch branch ls` | branches, channels and live heads |
-| `typetorch config push [--dry-run]` | copy `defaultBranch`, `channels`, `members`, `devBadgeId` (and `revoked`) into the registry |
-| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--place-file <file>] [--engine splice\|lune] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build)\|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N); `--replace-place --yes` for the template/test place only; see below |
+| `typetorch settings status` / `get [field\|game.<key>]` / `set game.<key> <json\|->` / `set analytics -` / `unset <field>` / `push` | the signed settings record (see "Settings"); `push` writes `defaultBranch`, `channels` and dev access from typetorch.json. `--dry-run`, `--force`, `--no-ping` |
+| `typetorch access push [--dry-run]` / `access status` | typetorch.json `members`, `revoked`, `devBadgeId` into the settings record's `access` / compare it with typetorch.json |
+| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--place-file <file>] [--engine splice\|lune] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N); `--replace-place --yes` for the template/test place only; see below |
 | `typetorch kernel restore <file> [--dry-run] [--yes]` | publish a place file: a backup from `.typetorch/place-backups/`, or a dry run's patched file |
 | `typetorch approve [id] [--import <dir>] [--test] [--skip-test <reason>] [--rollout <1-99>] [--wait [s]]` | approve a proposal: details, y/N, publish (interactive terminal only); prod-channel ones are signed. A prod deploy or promote proposal without a passed (or skipped) cloud test runs it before the y/N. `--import`: a proposal state dir from automation you run yourself (see "No GitHub Actions") |
 | `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
@@ -235,7 +236,7 @@ the cursor comes back on exit and on Ctrl+C. Without a terminal (CI, agents, pip
 - **Sources:** the game commit (`template`), and for the framework and kernel `v<version>` of the installed npm
   package, or, with the template's optional local override (`bun run packages`, which packs sibling checkouts and
   writes `.typetorch/packages/manifest.json`), the checkouts' commits. `<commit>*` means a dirty checkout. Stamped as
-  payload attributes and as `SOURCES` in build.ts, logged, and put on the registry head.
+  payload attributes and as `SOURCES` in build.ts, and logged.
 - **Payload root attributes:** `ArtifactId`, `KernelApi` (1), `Channel`, `Commit`, `BuiltAt` (unix seconds),
   `SourceTemplate`, `SourceFramework`, `SourceKernel`, `Notes`, `ProtocolHash`, and `Assets` (also on the payload's
   `Server` folder; see "Hot assets").
@@ -299,26 +300,34 @@ The remote-claude dev-server points the deploys it runs from its worktree at the
 one log and one seq. If a deploy stops after the upload, `typetorch deployments` lists the upload with its
 `typetorch promote` command.
 
-### Registry (interim, until the backend exists)
+### Settings
 
-One ConfigService key, `TypeTorch`, in the experience's `InExperienceConfig` repository, written through the Open
-Cloud configs API (read the draft and the published config, PATCH the draft, publish with `deploymentStrategy:
-"Immediate"`). A write is refused when the draft holds unpublished changes to other keys (`--force` publishes them
-anyway). The value keeps each branch's head (with the message's `t`, `r`, `sig` and `sigF`, so a kernel can verify a
-prod head like the message) and the last 25 deployments, under the 10,000-character value limit.
+Kernel 0.3.8 reads ONE signed record instead of ConfigService (CLI 0.8 removed the ConfigService registry, `config
+push` and every `universe:write` / `universe:read` use): the game's DataStore `TypeTorch`, key `settings`,
+`{ v: 1, seq, at, body, sig, sigF }`. `body` is JSON text with `defaultBranch`, `channels`, `access` (`members`,
+`revoked`, `devBadgeId`), `fleet` (`{url, token}`), `analytics` (the sink settings) and `game` (the game's live values,
+`TypeTorch.liveConfig`); at most 32 KB, `game` at most 16 KB. `sig` and `sigF` are Ed25519 by the main and the fallback
+prod key over the lines `tt1settings`, `<seq>`, `<at>` and `<body>` joined with `\n`: the body is the exact text stored,
+so nothing is re-encoded before verifying.
 
-**The registry is optional, and with an API key it is never readable today:** its read scope, `universe:read`, can't
-be granted to API keys (OAuth only; with `universe:write` alone the GET still answers 403), and the CLI never writes a
-registry it can't read. `deploy`, `rollback` and `promote` then warn once and continue with the message; game servers
-keep the head from it. **When it can be read but not written, the deploy aborts** before the message (pass
-`--no-registry` to skip it).
+Every write (`settings set|unset|push`, `access push`, `fleet setup`, `keys rotate|resign`) reads the record, refuses
+one your keys didn't sign (`--force` replaces it and drops its fields: they're never re-signed), changes one field,
+raises `seq`, signs with both keys and writes it with `matchVersion` (or `exclusiveCreate`), starting over when
+another machine wrote in between. Then a ping on `TypeTorch/deploy`, `{"k":"settings","s":<seq>}`, makes 0.3.8 servers
+read it within seconds (`--no-ping`: within about a minute). All of them need both key files (else "run `typetorch keys
+init`"). `settings status` and `get` print no token; `set analytics -` reads the JSON from stdin so a token never sits
+in a command line. Servers verify by the same strict rule as prod deploys and refuse an older seq, so game code (which
+can write DataStores) can't change it; it can only put back an older signed copy, which running servers refuse (a
+fresh write fixes it).
+
+`--no-registry` (deploy, rollback, promote, approve, kernel deploy) is accepted and prints a one-line note.
+`--require-registry` now means `--require-shared-seq`.
 
 ### The shared seq
 
 Every machine (your PC, CI, the remote-claude dev-server) must take deploy numbers from one sequence: servers order
 heads by seq and ignore one at or below the seq they applied. The next seq is the highest of:
 - the state dir's `deployments.jsonl` (this machine);
-- the registry, when readable (not with an API key today, see above);
 - the game's DataStore `TypeTorch` (Open Cloud DataStores, the deploy key with `universe-datastores.objects:read`):
   the kernel's `heads` and `deployments` records (every live server records each deploy message it hears, so they lag
   only while no server runs) and `seq`, the CLI's own counter;
@@ -375,7 +384,7 @@ versions without a restart (the framework's `hotAsset`). Guide: [Hot assets](htt
      (`assets.jsonl`) and a placeholder it created. A newer published place with the same assets only updates
      `placeVersion`.
   6. **Report** and print the next step. `--dry-run` stops after the diff. `--deploy <branch>` then runs `typetorch
-     deploy --branch <branch>` (same approval policy; `--message`, `--propose`, `--proposed-by`, `--no-registry`,
+     deploy --branch <branch>` (same approval policy; `--message`, `--propose`, `--proposed-by`,
      `--moderation-timeout` and the key file flags are passed on) when the Assets attribute changes. A prod-channel
      branch only takes clean builds, so `--deploy` to one is refused while the sync changes the lockfile: sync, commit,
      then deploy.
@@ -442,10 +451,9 @@ Kernel 0.3.2+ posts a heartbeat per server, one report per deploy outcome per se
 `rolled_back`, `skipped`, `booted`) and alerts to the **fleet API**, a small service (`@typetorch/analytics`'s server)
 you host. The CLI reads it:
 
-- **Setup:** `typetorch fleet setup --url https://<host>` writes the ConfigService key `TypeTorchFleet` = `{url,
-  token}` for game servers, with the write-only ingest token from `TYPETORCH_FLEET_INGEST_TOKEN` (PATCH the draft with
-  that key only, then publish: `universe:write` on the deploy key; nothing is read back, and the publish ships the
-  whole draft), and sets typetorch.json `"fleet": { "url": ... }`. Reads use the admin token in
+- **Setup:** `typetorch fleet setup --url https://<host>` writes `fleet` = `{url, token}` into the signed settings
+  record (see "Settings"; kernel 0.3.8), with the write-only ingest token from `TYPETORCH_FLEET_INGEST_TOKEN`, pings
+  the servers, and sets typetorch.json `"fleet": { "url": ... }`. Reads use the admin token in
   `TYPETORCH_FLEET_TOKEN`. Both tokens come from the environment or the env file and are never printed or passed to a
   child process. Without them, `servers`, `report` and `alerts` say so in one line, and `--wait` is skipped with a note.
 - `typetorch servers [--branch <b>] [--watch]`: job, branch, artifact, applied seq, health (`ok`, `failed`,
@@ -481,8 +489,7 @@ of the JobId, mod 100) is below it swap; the others keep their artifact, and new
 percentage (100 = every server, sent without `ro`); it asks y/N when typetorch.json `approval` applies, and logs to
 `rollouts.jsonl`. **Dev-channel branches only:** `ro` isn't covered by the signature, so prod servers ignore it on
 signed messages, and the CLI refuses `--rollout` for prod-channel branches (to try a build on some prod servers, use
-signed A/B pins: `typetorch pin <artifact> --branch prod --pct <1-99>`). The registry head never carries the rollout
-(the kernel keeps a message's head with `ro` over a registry head of the same seq without one).
+signed A/B pins: `typetorch pin <artifact> --branch prod --pct <1-99>`).
 
 ### No GitHub Actions
 
@@ -500,7 +507,7 @@ any automation you choose to run yourself.
    tagged `v<version>` (`--allow-dirty`, `--allow-untagged`);
 3. builds `.typetorch/place.rbxl` with `KernelVersion`, `KernelHash` and `KernelCommit` attributes, plus the signing
    trust roots `KeyAssetId` and `FallbackPublicKey` from typetorch.json and `BootstrapHeads` (the JSON of the current
-   prod-channel heads, `{"<branch>":{"a","s","i"}}`, from the registry or the local log; `--no-registry`), on
+   prod-channel heads, `{"<branch>":{"a","s","i"}}`, from the local log), on
    `ServerScriptService.TypeTorchKernel` (publishing refuses without the keys, or when the fallback key file doesn't
    match), and (kernel 0.3.6) the **backup build**: the current prod head's payload, which `deploy` and `upload` keep in
    `<state dir>/payloads/<artifactId>.rbxm` (API keys can't download assets), checked (one Model, Folders and
