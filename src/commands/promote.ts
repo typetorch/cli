@@ -112,7 +112,10 @@ export async function promoteCommand(args: ParsedArgs) {
 		);
 	}
 	const head = history.heads.get(branch);
-	if (head && head.assetId === target.assetId) throw new Error(`${target.artifactId} (asset ${target.assetId}) is already live on ${branch}`);
+	// --force re-sends the live artifact with a new seq: for servers that missed it (e.g. none ran the branch at deploy).
+	if (head && head.assetId === target.assetId && !flagBool(args, "force")) {
+		throw new Error(`${target.artifactId} (asset ${target.assetId}) is already live on ${branch}; --force sends it again with a new seq (for servers that missed it)`);
+	}
 
 	const targetChannel = strictest(branchChannel(proj.config, branch), history.snapshot?.value.channels[branch]);
 	checkPromoteChannel({ branch, branchChannel: targetChannel, artifactId: target.artifactId, artifactChannel: target.channel });
