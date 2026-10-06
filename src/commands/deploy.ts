@@ -7,6 +7,7 @@
  * missing key fails before anything leaves the machine.
  */
 import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
+import { accessStatus, accessWarning } from "../access.ts";
 import { assertNoIdCollision, buildPayload, payloadBytes, readBuiltPayload, type PayloadMeta } from "../build.ts";
 import { appendUpload } from "../deployments.ts";
 import { gitInfo } from "../git.ts";
@@ -101,6 +102,10 @@ export function checkChannelGuard(input: {
 export async function deployCommand(args: ParsedArgs) {
 	if (flagString(args, "widen") !== undefined) return widenCommand(args);
 	const proj = project(args);
+	// Dev access lists reach servers only through `typetorch access push` (ConfigService TypeTorchAccess): say so when
+	// typetorch.json has members/revoked/devBadgeId that were never pushed, or changed since (a revoked dev stays a dev).
+	const accessProblem = accessWarning(accessStatus(proj.config, projectStateDir(proj)));
+	if (accessProblem) warn(accessProblem);
 	const rollout = parseRollout(flagString(args, "rollout"));
 	const skipTest = skipReason(flagString(args, "skip-test"));
 	const testFlag = flagBool(args, "test");

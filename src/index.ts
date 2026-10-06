@@ -6,6 +6,7 @@
  */
 import { readFileSync } from "node:fs";
 import { flagBool, flagString, parseArgs, UsageError, type FlagSpec, type ParsedArgs } from "./args.ts";
+import { ACCESS_USAGE, accessCommand, accessFlags } from "./commands/access.ts";
 import { assetsCommand, assetsFlags } from "./commands/assets.ts";
 import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands/build.ts";
 import { configCommand, configFlags } from "./commands/config.ts";
@@ -164,7 +165,14 @@ ${WAIT_USAGE}`,
 
   Writes defaultBranch, channels, members, devBadgeId (and revoked) into the registry, keeping branches and
   deployments. Needs universe:read and universe:write; universe:read can't be granted to API keys today (OAuth
-  only), so with an API key this fails until Roblox offers it.`,
+  only), so with an API key this fails until Roblox offers it. For members/revoked/devBadgeId use
+  \`typetorch access push\` instead (ConfigService TypeTorchAccess, written blind; kernel 0.3.6+).`,
+	},
+	access: {
+		flags: accessFlags,
+		run: (args) => accessCommand(args),
+		summary: "access push: publish members/revoked/devBadgeId to servers (ConfigService TypeTorchAccess)",
+		usage: ACCESS_USAGE,
 	},
 	kernel: {
 		flags: kernelFlags,

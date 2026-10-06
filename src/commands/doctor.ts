@@ -40,6 +40,9 @@ import { createHash } from "node:crypto";
 import { stateDir } from "../state.ts";
 import { gatherKeyFacts, keyChecks, type Check, type Status } from "../keycheck.ts";
 import { KEY_FILE_FLAGS, signingKeyPaths } from "./common.ts";
+import { ACCESS_CONFIG_KEY, accessStatus, accessWarning, describeAccess } from "../access.ts";
+import { declaresLoadstring } from "../kernelpatch.ts";
+import { resolveKernelDir } from "./kernel.ts";
 
 export const doctorFlags = { ...KEY_FILE_FLAGS } as const;
 
@@ -171,6 +174,38 @@ export async function doctorCommand(args: ParsedArgs) {
 		checks.push({ name: "approval", status: "ok", detail: `"${proj.config.approval}" (${proj.config.approval === "none" ? "deploys publish without approval" : "deploys wait for typetorch approve"})` });
 	}
 	if (proj) checks.push({ name: "state dir", status: "ok", detail: stateDir(proj.root) });
+
+	// Dev access lists (security audit 2026-10-06): typetorch.json's members/revoked/devBadgeId reach servers only through
+	// `typetorch access push` (ConfigService TypeTorchAccess). The registry key can't be written with an API key.
+	if (proj) {
+		const access = accessStatus(proj.config, stateDir(proj.root));
+		const problem = accessWarning(access);
+		if (!access.configured) checks.push({ name: "dev access", status: "info", detail: "typetorch.json lists no members, revoked users or dev badge: only the experience creator is a dev" });
+		else if (problem) checks.push({ name: "dev access", status: "warn", detail: problem });
+		else checks.push({ name: "dev access", status: "ok", detail: `${describeAccess(access.value)} pushed ${access.record?.at} (${ACCESS_CONFIG_KEY}${access.record?.configVersion !== undefined ? `, config v${access.record.configVersion}` : ""}); kernel 0.3.6+ reads it` });
+	}
+
+	// loadstring (security audit 2026-10-06): `kernel deploy` (patch) leaves the place's LoadStringEnabled alone, so
+	// installing the kernel never turns `loadstring` on in a real game; --replace-place still publishes whatever the
+	// kernel's place.project.json says. Only remote-claude's run_luau needs it.
+	if (proj) {
+		try {
+			const kernelDir = resolveKernelDir(proj);
+			const projectFile = join(kernelDir, "place.project.json");
+			if (existsSync(projectFile)) {
+				const declares = declaresLoadstring(JSON.parse(readFileSync(projectFile, "utf8")));
+				checks.push({
+					name: "loadstring",
+					status: declares ? "info" : "ok",
+					detail: declares
+						? `the kernel's place.project.json sets ServerScriptService.LoadStringEnabled = true: \`kernel deploy\` (patch) leaves the place's own value, so loadstring stays off unless the place already had it; \`--replace-place\` (template/test place) turns it on. Only remote-claude's run_luau needs it`
+						: "the kernel's place.project.json leaves LoadStringEnabled alone (loadstring stays off; remote-claude's run_luau then says so)",
+				});
+			}
+		} catch {
+			// no kernel dir: `kernel deploy` reports that itself
+		}
+	}
 
 	// Prod signing: key files, the key asset, the place (seeds are never printed; public keys are)
 	if (proj) {
