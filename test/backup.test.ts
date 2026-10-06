@@ -120,7 +120,7 @@ describe("the backup build", () => {
 		const root = mkdtempSync(join(tmpdir(), "tt-backup-"));
 		const state = join(root, ".typetorch");
 		const proj = { root, config: { defaultBranch: "prod", channels: {} } } as any;
-		const history = { heads: new Map([["prod", head("prod", 12, "a1b2c3d-111111")]]), snapshot: undefined };
+		const history = { heads: new Map([["prod", head("prod", 12, "a1b2c3d-111111")]]) };
 		const missing = prepareBackup(proj, history, { stateDir: state });
 		expect(missing.info).toBeUndefined();
 		expect(missing.skipped).toMatch(/a1b2c3d-111111 \(#12\) has no kept payload in \.typetorch\/payloads/);
@@ -129,7 +129,7 @@ describe("the backup build", () => {
 		expect(made.info).toEqual({ artifactId: "a1b2c3d-111111", seq: 12, branch: "prod", channel: "prod", at: "2026-10-06T12:00:00.000Z" });
 		expect(made.source).toBe(join(state, PAYLOADS_DIR, "a1b2c3d-111111.rbxm"));
 		expect(rootOf(new Uint8Array(readFileSync(made.model!))).attributes?.BackupSeq).toBe(12);
-		expect(prepareBackup(proj, { heads: new Map(), snapshot: undefined }, { stateDir: state }).skipped).toMatch(/no prod-channel head/);
+		expect(prepareBackup(proj, { heads: new Map() }, { stateDir: state }).skipped).toMatch(/no prod-channel head/);
 	});
 });
 

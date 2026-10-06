@@ -11,7 +11,7 @@
  *      FallbackPublicKey (string), from typetorch.json "keyAssetId" / "fallbackPublicKey". Publishing refuses without
  *      both (prod servers could not verify any deploy); a fallback key file that doesn't match is refused too.
  *      Also BootstrapHeads (string): the JSON of the current prod-channel heads at deploy time,
- *      {"<branch>":{"a":assetId,"s":seq,"i":"artifactId"}}, from the registry (when readable) and the local log. The
+ *      {"<branch>":{"a":assetId,"s":seq,"i":"artifactId"}}, from the local log. The
  *      kernel trusts exactly those heads unsigned (heads stored before signing have no sig); anything newer must be
  *      signed (plans/03 "Bootstrap heads").
  *      Kernel 0.3.6 (never an empty server): the BACKUP BUILD. The prod head's payload, kept locally at upload
@@ -48,9 +48,9 @@ import { bold, dim, emitJson, formatBytes, formatSeconds, info, isJson, Stopwatc
 import { ApiError, type OpenCloud } from "../opencloud.ts";
 import { patchPlace, PlaceFile, PlacePatchError, sha256Hex, summarizePlace, verifyPatch, type PatchReport, type SlotRef } from "../placepatch.ts";
 import { capture, query, run } from "../proc.ts";
-import { branchChannel, strictest } from "../naming.ts";
+import { branchChannel } from "../naming.ts";
 import { RbxmError } from "../rbxm.ts";
-import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, readHistory, registryApi, signingKeyPaths, warnRegistryFallback, type History } from "./common.ts";
+import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, noteRegistryFlags, readHistory, signingKeyPaths, type History } from "./common.ts";
 import { addBackupToProject, BACKUP_FILE, BACKUP_SLOT, BackupError, backupHead, backupRbxm, findKeptPayload, PAYLOADS_DIR, type BackupInfo } from "../payloads.ts";
 
 export const kernelFlags = {
@@ -84,11 +84,11 @@ export interface BootstrapHead {
 }
 
 /** The current head of every prod-channel branch, keyed by branch (sorted), for the BootstrapHeads attribute. */
-export function bootstrapHeads(proj: Pick<Project, "config">, history: Pick<History, "heads" | "snapshot">): Record<string, BootstrapHead> {
+export function bootstrapHeads(proj: Pick<Project, "config">, history: Pick<History, "heads">): Record<string, BootstrapHead> {
 	const out: Record<string, BootstrapHead> = {};
 	for (const branch of [...history.heads.keys()].sort()) {
 		const head = history.heads.get(branch)!;
-		if (strictest(branchChannel(proj.config, branch), history.snapshot?.value.channels[branch]) !== "prod") continue;
+		if (branchChannel(proj.config, branch) !== "prod") continue;
 		out[branch] = { a: head.assetId, s: head.seq, i: head.artifactId };
 	}
 	return out;
@@ -364,14 +364,12 @@ async function prepareKernel(args: ParsedArgs): Promise<PreparedKernel> {
 	for (const problem of signing.problems) warn(problem);
 	info(`  keys     KeyAssetId ${signing.attributes.KeyAssetId ?? "(none)"}  FallbackPublicKey ${signing.attributes.FallbackPublicKey ?? "(none)"}`);
 	// The prod heads stored before signing (no sig): the kernel trusts exactly these unsigned.
-	const noRegistry = flagBool(args, "no-registry");
-	const registry = registryApi(openCloud("deploy", true), proj, noRegistry);
-	const history = await readHistory(proj, registry, noRegistry ? "--no-registry" : "no deploy key");
-	if (!history.snapshot && registry) warnRegistryFallback(history.unavailable ?? "unknown");
+	noteRegistryFlags(args);
+	const history = await readHistory(proj);
 	const heads = bootstrapHeads(proj, history);
 	attributes.BootstrapHeads = JSON.stringify(heads);
 	const listed = Object.entries(heads).map(([branch, head]) => `${branch}=#${head.s} ${head.i} (asset ${head.a})`);
-	info(`  heads    BootstrapHeads ${listed.length ? listed.join(", ") : "{} (no prod-channel heads yet)"}  (${history.snapshot ? "registry + local log" : "local log only: deploys made from another machine are missing"})`);
+	info(`  heads    BootstrapHeads ${listed.length ? listed.join(", ") : "{} (no prod-channel heads yet)"}  (this machine's log: deploys made from another machine are missing)`);
 	mkdirSync(join(proj.root, OUT_DIR), { recursive: true });
 	const placeProject = parseJsonc(readFileSync(join(kernelDir, "place.project.json"), "utf8"));
 	const stampedKernel = stampKernelProject(placeProject, kernelDir, attributes);
@@ -409,10 +407,10 @@ async function prepareKernel(args: ParsedArgs): Promise<PreparedKernel> {
  */
 export function prepareBackup(
 	proj: Pick<Project, "root" | "config">,
-	history: Pick<History, "heads" | "snapshot">,
+	history: Pick<History, "heads">,
 	options: { stateDir?: string; now?: Date } = {},
 ): { info?: BackupInfo; model?: string; source?: string; skipped?: string } {
-	const head = backupHead(proj.config, history.heads, history.snapshot?.value.channels);
+	const head = backupHead(proj.config, history.heads);
 	if (!head) return { skipped: "no prod-channel head is known on this machine (deploy prod first)" };
 	const stateDir = options.stateDir ?? projectStateDir(proj as Project);
 	const source = findKeptPayload(stateDir, head.artifactId);

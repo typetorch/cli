@@ -10,6 +10,7 @@ import { ACCESS_USAGE, accessCommand, accessFlags } from "./commands/access.ts";
 import { assetsCommand, assetsFlags } from "./commands/assets.ts";
 import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands/build.ts";
 import { configCommand, configFlags } from "./commands/config.ts";
+import { SETTINGS_USAGE, settingsCommand, settingsFlags } from "./commands/settings.ts";
 import { deployCommand, deployFlags } from "./commands/deploy.ts";
 import { doctorCommand, doctorFlags } from "./commands/doctor.ts";
 import {
@@ -77,7 +78,7 @@ const COMMANDS: Record<string, Command> = {
 		usage: `typetorch upload [--branch <b>] [--channel prod|dev] [--no-build] [--moderation-timeout <s>]
 
   Uploads the payload as a NEW private Model asset named tt-<branch>-<commit>[-dirty] and waits for moderation.
-  Does not touch the registry or live servers.`,
+  Does not touch live servers.`,
 	},
 	deploy: {
 		flags: deployFlags,
@@ -87,20 +88,19 @@ const COMMANDS: Record<string, Command> = {
                  [--no-registry] [--moderation-timeout <s>] [--propose] [--proposed-by <who>]
                  [--key-file <path>] [--fallback-key-file <path>]
 
-  clean build -> upload (new Model asset) -> moderation = Approved -> "uploaded" record -> approval -> registry ->
+  clean build -> upload (new Model asset) -> moderation = Approved -> "uploaded" record -> approval ->
   deploy message -> deployments.jsonl (in the state dir: TYPETORCH_STATE_DIR, default .typetorch/)
   Approval (typetorch.json "approval": "all" by default, "prod", or "none"): a person at a terminal approves right
   after the upload (y/N). Anyone else (an agent, the dev-server, --propose) only writes a proposal:
   approve it with \`typetorch approve <id>\`.
   --propose            write a proposal even when you could approve now
   --proposed-by <who>  who prepares it: cli, agent, dev-server/claude... (default: cli at a terminal, else agent)
-  --dry-run      build and show what would be uploaded and sent; nothing leaves the machine except registry reads
+  --dry-run      build and show what would be uploaded and sent; nothing leaves the machine except the seq read
   --no-build     deploy the last build (.typetorch/payload.rbxm)
-  --force        allow a dev-channel or dirty artifact on a prod-channel branch, or publish a config draft that has
-                 other unpublished changes
-  --no-registry  skip the ConfigService registry (servers persist the head from the deploy message anyway)
+  --force        allow a dev-channel or dirty artifact on a prod-channel branch
+  --no-registry  does nothing since CLI 0.8 (there is no ConfigService registry; accepted for old scripts)
   --require-shared-seq  stop before the upload when no shared seq source is readable (CI: no local log to take a seq
-                 from): the DataStore (universe-datastores.objects:read) or the registry. --require-registry: old name
+                 from): the DataStore (universe-datastores.objects:read). --require-registry: old name
   Prod-channel branches: the message is signed with both keys (sig + sigF) when it is published; the key files are
   checked before the upload. Dev-channel messages are unsigned. See \`typetorch keys\`.
 ${GATE_USAGE}
@@ -136,7 +136,7 @@ ${ROLLOUT_USAGE}`,
                    [--key-file <path>] [--fallback-key-file <path>]
 
   No build, upload or moderation wait. Without --to: the newest earlier deployment on the branch whose artifact
-  differs from the live one. Searches the registry (when readable) and the local log.
+  differs from the live one. Searches the local log.
   Approval (typetorch.json "approval": "all" by default, "prod", or "none"): a person at a terminal approves right
   after the upload (y/N). Anyone else (an agent, the dev-server, --propose) only writes a proposal:
   approve it with \`typetorch approve <id>\`.
@@ -161,18 +161,22 @@ ${WAIT_USAGE}`,
 	config: {
 		flags: configFlags,
 		run: configCommand,
-		summary: "push settings to the registry (needs universe:read)",
-		usage: `typetorch config push [--dry-run] [--force]
+		summary: "gone: use settings push",
+		usage: `typetorch config push   (gone in CLI 0.8)
 
-  Writes defaultBranch, channels, members, devBadgeId (and revoked) into the registry, keeping branches and
-  deployments. Needs universe:read and universe:write; universe:read can't be granted to API keys today (OAuth
-  only), so with an API key this fails until Roblox offers it. For members/revoked/devBadgeId use
-  \`typetorch access push\` instead (ConfigService TypeTorchAccess, written blind; kernel 0.3.6+).`,
+  Wrote the ConfigService registry key, which needed universe:read (never grantable to API keys). Kernel 0.3.8 reads
+  one signed settings record instead: \`typetorch settings push\`.`,
+	},
+	settings: {
+		flags: settingsFlags,
+		run: (args) => settingsCommand(args),
+		summary: "the signed settings record (branches, dev access, game values)",
+		usage: SETTINGS_USAGE,
 	},
 	access: {
 		flags: accessFlags,
 		run: (args) => accessCommand(args),
-		summary: "publish members and revoked to servers",
+		summary: "push members and revoked into the signed settings",
 		usage: ACCESS_USAGE,
 	},
 	kernel: {

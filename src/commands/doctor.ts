@@ -4,9 +4,9 @@
  * and Open Cloud scopes, each probed with its job's key through harmless calls:
  *   assets       GET an operation that doesn't exist        404 = scope ok, 401/403 = missing
  *   messaging    publish to topic "TypeTorch/doctor"          200 = ok (no server listens to that topic)
- *   configs read GET the InExperienceConfig repository       200/404 = ok, 401/403 = info: universe:read can't be granted
- *                                                             to API keys today (OAuth only), so the registry is skipped
- *   configs write not probed (needs universe:write; a probe would have to touch the draft)
+ *   settings     GET DataStore TypeTorch entry "settings"    the signed settings record (kernel 0.3.8, plans/20): seq, age,
+ *                                                             fields, and whether it verifies with your keys; missing or
+ *                                                             not signed by your keys = warn
  *   datastore    GET DataStore TypeTorch entry "heads"         200/404 = ok, 401/403 = missing universe-datastores.objects:read
  *                                                             (the shared seq; :create/:update are checked by a deploy)
  *   datastore write SET DataStore TypeTorch entry "doctor"     200 = ok (a tiny {doctor, t} value), 401/403 = missing
@@ -34,14 +34,15 @@ import { withJob } from "../progress.ts";
 import { capture } from "../proc.ts";
 import { hasZstd, isBun, runtimeName } from "../runtime.ts";
 import { rojoBinary } from "../build.ts";
-import { REPOSITORY } from "../registry.ts";
+import { describeFields, readSettings, verifySettingsRecord } from "../settings.ts";
 import { DS_READ_SCOPE, DS_WRITE_SCOPES, HEADS_KEY, SEQ_DATASTORE } from "../seqstore.ts";
 import { DURABLE_SCOPES, NOT_DURABLE } from "../durablehead.ts";
 import { createHash } from "node:crypto";
 import { stateDir } from "../state.ts";
 import { gatherKeyFacts, keyChecks, type Check, type Status } from "../keycheck.ts";
 import { KEY_FILE_FLAGS, signingKeyPaths } from "./common.ts";
-import { ACCESS_CONFIG_KEY, accessStatus, accessWarning, describeAccess } from "../access.ts";
+import { accessStatus, accessWarning, describeAccess } from "../access.ts";
+import { loadSigner } from "../keyfiles.ts";
 import { declaresLoadstring } from "../kernelpatch.ts";
 import { resolveKernelDir } from "./kernel.ts";
 
@@ -49,6 +50,32 @@ export const doctorFlags = { ...KEY_FILE_FLAGS } as const;
 
 function mark(status: Status): string {
 	return status === "ok" ? green("ok  ") : status === "info" ? "info" : status === "warn" ? yellow("warn") : red("FAIL");
+}
+
+/**
+ * The signed settings record (kernel 0.3.8, plans/20): read with the deploy key, verified with your keys (when they load).
+ * Never shows a value (tokens).
+ */
+async function settingsCheck(oc: OpenCloud, proj: Project, args: ParsedArgs): Promise<Check> {
+	const name = "settings";
+	const read = await withJob(name, () => readSettings(oc, proj.config.universeId));
+	if (read.scopeMissing) return { name, status: "warn", detail: `can't read the settings record: the deploy key needs ${DS_READ_SCOPE} (${short(read.error ?? "")})` };
+	if (read.error) return { name, status: "warn", detail: `reading the settings record failed: ${short(read.error)}` };
+	if (read.missing) {
+		return { name, status: "warn", detail: "no settings record: servers (kernel 0.3.8) use the defaults. Run typetorch settings push (and fleet setup, access push)" };
+	}
+	if (!read.record) return { name, status: "warn", detail: `the settings entry isn't a usable record (${read.problem}); servers ignore it. typetorch settings push --force replaces it` };
+	const fields = describeFields(read.body ?? {}).map((line) => line.split(/\s+/)[0]).join(", ") || "none";
+	let verified = "";
+	try {
+		const signer = loadSigner(proj, signingKeyPaths(proj, args));
+		const by = verifySettingsRecord(read.record, { main: signer.main.publicKey, fallback: signer.fallback.publicKey });
+		if (!by) return { name, status: "warn", detail: `#${read.record.seq} (${read.record.at}) is NOT signed by your keys: servers that trust other keys refuse it. Rewrite it (typetorch settings push --force)` };
+		verified = `, verified by your ${by === "sig" ? "main" : "fallback"} key`;
+	} catch {
+		verified = ", not checked (your signing keys don't load here)";
+	}
+	return { name, status: "ok", detail: `#${read.record.seq} written ${read.record.at}${verified}; fields: ${fields}` };
 }
 
 async function probe(
@@ -196,13 +223,13 @@ export async function doctorCommand(args: ParsedArgs) {
 	}
 
 	// Dev access lists (security audit 2026-10-06): typetorch.json's members/revoked/devBadgeId reach servers only through
-	// `typetorch access push` (ConfigService TypeTorchAccess). The registry key can't be written with an API key.
+	// `typetorch access push` (CLI 0.8: the signed settings record's `access`; kernel 0.3.8).
 	if (proj) {
 		const access = accessStatus(proj.config, stateDir(proj.root));
 		const problem = accessWarning(access);
 		if (!access.configured) checks.push({ name: "dev access", status: "info", detail: "typetorch.json lists no members, revoked users or dev badge: only the experience creator is a dev" });
 		else if (problem) checks.push({ name: "dev access", status: "warn", detail: problem });
-		else checks.push({ name: "dev access", status: "ok", detail: `${describeAccess(access.value)} pushed ${access.record?.at} (${ACCESS_CONFIG_KEY}${access.record?.configVersion !== undefined ? `, config v${access.record.configVersion}` : ""}); kernel 0.3.6+ reads it` });
+		else checks.push({ name: "dev access", status: "ok", detail: `${describeAccess(access.value)} pushed ${access.record?.at}${access.record?.settingsSeq !== undefined ? ` (settings #${access.record.settingsSeq})` : ""}; kernel 0.3.8+ reads it` });
 	}
 
 	// loadstring (security audit 2026-10-06): `kernel deploy` (patch) leaves the place's LoadStringEnabled alone, so
@@ -261,7 +288,6 @@ export async function doctorCommand(args: ParsedArgs) {
 	if (proj && (assetsKey || deployKey || placeKey)) {
 		const client = (key: typeof assetsKey) => new OpenCloud(key?.key ?? "");
 		const { universeId, placeId } = proj.config;
-		const configsBase = `/creator-configs-public-api/v1/configs/universes/${universeId}/repositories/${REPOSITORY}`;
 		const scopeMissing = (status: number) => status === 401 || status === 403;
 		const skipped = (name: string, job: KeyJob): Promise<Check> => Promise.resolve({ name, status: "warn", detail: `not probed: no ${job} key` });
 		const probes = await Promise.all([
@@ -299,16 +325,7 @@ export async function doctorCommand(args: ParsedArgs) {
 							? ["fail", `missing universe.place.luau-execution-session:read/:write on the assets key: the cloud test (always on for prod deploys) can't run (${status} ${short(text)})`]
 							: ["warn", `unexpected ${status} ${short(text)}`],
 			),
-			!deployKey ? skipped("scope configs read", "deploy") : probe(
-				"scope configs read",
-				() => client(deployKey).request("GET", configsBase),
-				(status, text) =>
-					status === 200 || status === 404
-						? ["ok", `universe:read (${status === 404 ? "no published config yet" : "repository readable"})`]
-						: scopeMissing(status)
-							? ["info", `registry not readable (${status}): its read scope, universe:read, can't be granted to API keys today, so deploys skip the registry; servers keep heads from the deploy messages, and the seq comes from the DataStore (see scope datastore)`]
-							: ["warn", `unexpected ${status} ${short(text)}`],
-			),
+			!deployKey ? skipped("settings", "deploy") : settingsCheck(client(deployKey), proj, args),
 			!deployKey ? skipped("scope datastore", "deploy") : probe(
 				"scope datastore",
 				() => client(deployKey).request("GET", `/cloud/v2/universes/${universeId}/data-stores/${SEQ_DATASTORE}/entries/${HEADS_KEY}`),
@@ -337,11 +354,6 @@ export async function doctorCommand(args: ParsedArgs) {
 							? ["warn", `missing universe-datastores.objects:create/:update on the deploy key: ${NOT_DURABLE}, and the seq counter isn't claimed (${status} ${short(text)})`]
 							: ["warn", `unexpected ${status} ${short(text)}`],
 			),
-			Promise.resolve<Check>({
-				name: "scope configs write",
-				status: "info",
-				detail: "not probed: registry writes need universe:write, and the CLI only writes a registry it can read (universe:read, OAuth only today)",
-			}),
 			!placeKey ? skipped("scope place publish", "place") : probe(
 				"scope place publish",
 				() =>

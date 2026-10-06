@@ -45,22 +45,21 @@ import { bold, dim, emitJson, formatSeconds, green, info, isJson, red, table, wa
 import { branchNameError, type Channel } from "../naming.ts";
 import type { OpenCloud } from "../opencloud.ts";
 import { progress } from "../progress.ts";
-import { publishConfigKey } from "../registry.ts";
 import { sleep } from "../runtime.ts";
-import { openCloud, project, readHistory, registryApi } from "./common.ts";
+import { KEY_FILE_FLAGS, openCloud, project, readHistory } from "./common.ts";
+import { changeSettings, reportChange, settingsSigner } from "./settings.ts";
+import type { DualSigner } from "../signing.ts";
 
 export const serversFlags = { branch: "string", watch: "boolean" } as const;
 export const reportFlags = { branch: "string", "no-registry": "boolean" } as const;
 export const alertsFlags = { follow: "boolean", level: "string", since: "string" } as const;
-export const fleetFlags = { url: "string", "dry-run": "boolean" } as const;
+export const fleetFlags = { url: "string", "dry-run": "boolean", "no-ping": "boolean", ...KEY_FILE_FLAGS } as const;
 /** The flags releasing commands take for the wait. */
 export const WAIT_FLAGS = { wait: "optional", "no-wait": "boolean", "no-auto-rollback": "boolean", "rollback-at": "string" } as const;
 export const DEFAULT_WAIT_SECONDS = 90;
 export const DEFAULT_ROLLBACK_AT = DEFAULT_FAILED_PCT;
 /** Seconds after the message when a still-waiting fleet gets the same message again. */
 export const RESEND_AFTER_SECONDS = 30;
-/** The ConfigService key game servers read the fleet API's URL and ingest token from. */
-export const FLEET_CONFIG_KEY = "TypeTorchFleet";
 
 export interface FleetDeps {
 	fleet?: FleetClient;
@@ -168,8 +167,7 @@ export async function reportCommand(args: ParsedArgs, deps: FleetDeps = {}) {
 	if (branchFlag && branchNameError(branchFlag)) throw new UsageError(branchNameError(branchFlag)!);
 	const fleet = requireFleet(proj, deps);
 	if (!fleet) return;
-	const oc = openCloud("deploy", true);
-	const history = await readHistory(proj, registryApi(oc, proj, args.flags["no-registry"] === true), "--no-registry");
+	const history = await readHistory(proj);
 	const rows = history.rows.filter((d) => !branchFlag || d.branch === branchFlag);
 	const isSeq = /^#?\d{1,7}$/.test(wanted);
 	const deployment =
@@ -231,7 +229,7 @@ export async function alertsCommand(args: ParsedArgs, deps: FleetDeps = {}) {
 	}
 }
 
-export async function fleetCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "call"> } = {}) {
+export async function fleetCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner } = {}) {
 	const [sub, extra] = args.positionals;
 	if (sub !== "setup") throw new UsageError(`unknown fleet subcommand "${sub ?? ""}" (setup)`);
 	if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
@@ -243,19 +241,25 @@ export async function fleetCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud
 	const ingest = settings().get(FLEET_INGEST_TOKEN_VAR);
 	if (!ingest) throw new Error(`${FLEET_INGEST_TOKEN_VAR} isn't set: game servers post with the fleet API's write-only ingest token (put it in the environment or the env file; it is never printed)`);
 	const dryRun = flagBool(args, "dry-run");
-	const value = { url, token: ingest.value };
 	if (dryRun) {
-		if (isJson()) return emitJson({ dryRun: true, key: FLEET_CONFIG_KEY, value: { url, token: "<ingest token>" } });
-		info(bold(`dry run: would write ConfigService key ${FLEET_CONFIG_KEY} = {"url":"${url}","token":"<${FLEET_INGEST_TOKEN_VAR}>"} and publish it`));
+		if (isJson()) return emitJson({ dryRun: true, field: "fleet", value: { url, token: "<ingest token>" } });
+		info(bold(`dry run: would write settings.fleet = {"url":"${url}","token":"<${FLEET_INGEST_TOKEN_VAR}>"} into the signed settings record and ping servers`));
 		return;
 	}
-	const oc = deps.oc ?? openCloud("deploy")!;
-	const result = await publishConfigKey(oc, proj.config.universeId, FLEET_CONFIG_KEY, value, `typetorch fleet setup ${new URL(url).host}`);
+	const signer = deps.signer ?? settingsSigner(proj, args);
+	const token = ingest.value;
+	const result = await changeSettings({
+		proj,
+		oc: deps.oc ?? openCloud("deploy")!,
+		signer,
+		what: `fleet setup ${new URL(url).host}`,
+		noPing: flagBool(args, "no-ping"),
+		mutate: (body) => ({ ...body, fleet: { url, token } }),
+	});
 	if (proj.config.fleet?.url !== url) updateProjectConfig(proj, { fleet: { url } });
-	if (isJson()) return emitJson({ key: FLEET_CONFIG_KEY, url, configVersion: result.configVersion ?? null });
-	info(bold(`game servers now post to ${url} (ConfigService ${FLEET_CONFIG_KEY}${result.configVersion !== undefined ? `, config v${result.configVersion}` : ""}; the token isn't read back)`));
-	info(dim(`  typetorch.json fleet.url = ${url}; reads use ${FLEET_TOKEN_VAR}. Running servers pick it up when ConfigService pushes the update.`));
-	info(dim("  note: the publish ships the whole ConfigService draft; an API key can't read it to check for other unpublished edits"));
+	if (isJson()) return emitJson({ field: "fleet", url, settingsSeq: result.seq ?? null, outcome: result.outcome ?? null });
+	reportChange(result, `fleet setup: game servers post to ${url}`);
+	info(dim(`  typetorch.json fleet.url = ${url}; reads use ${FLEET_TOKEN_VAR}. The token sits in the signed settings record, never printed.`));
 }
 
 // --wait ----------------------------------------------------------------------------------------------------------------
@@ -453,9 +457,10 @@ export const ALERTS_USAGE = `typetorch alerts [--follow] [--level info|warning|c
   Alerts from the fleet API (servers, deploys, auto-rollbacks), the last --since minutes (default 60). --follow keeps
   printing new ones (polls every 5 s).`;
 
-export const FLEET_USAGE = `typetorch fleet setup --url <https url> [--dry-run]
+export const FLEET_USAGE = `typetorch fleet setup --url <https url> [--dry-run] [--no-ping] [--key-file <path>] [--fallback-key-file <path>]
 
-  Points game servers at the fleet API: writes the ConfigService key ${FLEET_CONFIG_KEY} = {url, token} with the
-  write-only ingest token from ${FLEET_INGEST_TOKEN_VAR} (PATCH the draft with that key only, then publish; needs
-  universe:write on the deploy key; nothing is read back, the token is never printed), and typetorch.json fleet.url.
+  Points game servers at the fleet API: writes settings.fleet = {url, token} into the signed settings record (kernel
+  0.3.8; \`typetorch settings\`) with the write-only ingest token from ${FLEET_INGEST_TOKEN_VAR} (never printed),
+  signed with both prod keys, pings servers, and sets typetorch.json fleet.url. Needs both signing keys and the deploy
+  key's DataStore read/create/update scopes.
   Reads (servers, report, alerts, --wait) use the admin token in ${FLEET_TOKEN_VAR}.`;

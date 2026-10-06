@@ -14,14 +14,11 @@ import { deployMessage, encodeDeployMessage } from "../src/opencloud";
 import {
 	applyProjectConfig,
 	emptyRegistry,
-	foreignDraftChanges,
 	MAX_VALUE_CHARS,
 	nextSeq,
 	normalizeRegistry,
 	recordDeployment,
-	sameConfigValue,
 	trimRegistry,
-	unwrapDraftEntries,
 	type RegistryDeployment,
 } from "../src/registry";
 import { validateConfig } from "../src/config";
@@ -89,33 +86,6 @@ describe("registry value", () => {
 		expect(next.revoked).toEqual({});
 		expect(next.branches).toEqual(value.branches);
 		expect(next.deployments).toEqual(value.deployments);
-	});
-});
-
-describe("draft safety", () => {
-	test("unwrapDraftEntries", () => {
-		expect(unwrapDraftEntries({ a: { value: 1, description: "d" }, b: 2 })).toEqual({ a: 1, b: 2 });
-	});
-	test("our key never counts; equal values don't count", () => {
-		expect(
-			foreignDraftChanges({
-				draftEntries: { TypeTorch: { x: 1 }, Speed: 5, Name: "same" },
-				publishedEntries: { TypeTorch: {}, Speed: 4, Name: "same" },
-			}),
-		).toEqual(["Speed"]);
-	});
-	test("deletions (null) and new keys count", () => {
-		expect(foreignDraftChanges({ draftEntries: { Gone: null, New: 1 }, publishedEntries: { Gone: 3 } })).toEqual(["Gone", "New"]);
-	});
-	test("JSON-string vs object encodings of the same value are equal", () => {
-		expect(sameConfigValue('{"a":1}', { a: 1 })).toBe(true);
-		expect(foreignDraftChanges({ draftEntries: { Cfg: '{"a":1}' }, publishedEntries: { Cfg: { a: 1 } } })).toEqual([]);
-	});
-	test("conditional rules in the draft count", () => {
-		expect(
-			foreignDraftChanges({ draftEntries: {}, publishedEntries: {}, draftRules: { rules: { r1: { tokens: [] } }, rulesOrder: ["r1"] } }),
-		).toEqual(["(conditional rules)"]);
-		expect(foreignDraftChanges({ draftEntries: {}, publishedEntries: {}, draftRules: {} })).toEqual([]);
 	});
 });
 

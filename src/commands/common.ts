@@ -12,12 +12,11 @@ import {
 	type UploadRecord,
 } from "../deployments.ts";
 import { settings, type KeyJob } from "../env.ts";
-import { debug, warn } from "../log.ts";
+import { dim, info, warn } from "../log.ts";
 import { isChannel, type Channel } from "../naming.ts";
 import { OpenCloud } from "../opencloud.ts";
-import { REGISTRY_FALLBACK_NOTE, RegistryApi, tryReadRegistry, type RegistrySnapshot } from "../registry.ts";
 import { stateDir } from "../state.ts";
-import { keyFilePaths, loadSigner, type KeyRole } from "../keyfiles.ts";
+import { keyFilePaths, loadSigner, SigningSetupError, type KeyRole } from "../keyfiles.ts";
 import { keyFingerprint, type DualSigner } from "../signing.ts";
 
 export function project(args: ParsedArgs): Project {
@@ -50,10 +49,8 @@ export function projectStateDir(proj: Project): string {
 	return stateDir(proj.root);
 }
 
+/** The local log (and what it knows of each branch). CLI 0.8: there is no ConfigService registry to merge any more. */
 export interface History {
-	snapshot?: RegistrySnapshot;
-	/** Why the registry wasn't read (no key, --no-registry, missing scope...). */
-	unavailable?: string;
 	local: LocalDeployment[];
 	rows: DeploymentRow[];
 	heads: Map<string, LiveHead>;
@@ -61,51 +58,35 @@ export interface History {
 	stateDir: string;
 }
 
-let fallbackWarned = false;
+let registryFlagNoted = false;
 
-/** Warns once per run that deploys continue without the registry. */
-export function warnRegistryFallback(reason: string) {
-	if (fallbackWarned) return;
-	fallbackWarned = true;
-	warn(REGISTRY_FALLBACK_NOTE);
-	debug(`registry unavailable: ${reason}`);
+/**
+ * CLI 0.8: `--no-registry` and `--require-registry` are accepted and do nothing (scripts pass them); one note per run.
+ * There is no ConfigService registry any more (kernel 0.3.8 reads the signed settings record; plans/20).
+ */
+export function noteRegistryFlags(args: ParsedArgs) {
+	const used = ["no-registry", "require-registry"].filter((flag) => args.flags[flag] !== undefined);
+	if (used.length === 0 || registryFlagNoted) return;
+	registryFlagNoted = true;
+	info(dim(`note: --${used.join(" and --")} ${used.length > 1 ? "do" : "does"} nothing since CLI 0.8 (no ConfigService registry; settings live in the signed settings record)`));
 }
 
-/** Registry (when readable) + local log, merged, with each branch's live head. */
-export async function readHistory(
-	proj: Project,
-	api: RegistryApi | undefined,
-	reasonIfNoApi = "no API key",
-): Promise<History> {
-	let snapshot: RegistrySnapshot | undefined;
-	let unavailable: string | undefined;
-	if (api) {
-		const read = await tryReadRegistry(api);
-		snapshot = read.snapshot;
-		unavailable = read.unavailable;
-	} else {
-		unavailable = reasonIfNoApi;
-	}
-	return withLocal(proj, snapshot, unavailable);
+/** The local log, with each branch's live head. */
+export async function readHistory(proj: Project): Promise<History> {
+	return withLocal(proj);
 }
 
-export function withLocal(proj: Project, snapshot: RegistrySnapshot | undefined, unavailable?: string): History {
+export function withLocal(proj: Project): History {
 	const dir = projectStateDir(proj);
 	const local = readLocalLog(dir, proj.config.universeId);
-	const rows = mergeDeployments(snapshot?.value.deployments ?? [], local);
+	const rows = mergeDeployments([], local);
 	return {
-		snapshot,
-		unavailable,
 		local,
 		rows,
-		heads: liveHeads(snapshot?.value, rows),
+		heads: liveHeads(undefined, rows),
 		uploads: readUploads(dir, proj.config.universeId),
 		stateDir: dir,
 	};
-}
-
-export function registryApi(oc: OpenCloud | undefined, proj: Project, disabled: boolean): RegistryApi | undefined {
-	return oc && !disabled ? new RegistryApi(oc, proj.config.universeId) : undefined;
 }
 
 // Signing (prod-channel branches only) -------------------------------------------------------------------------------
@@ -116,6 +97,19 @@ export const KEY_FILE_FLAGS = { "key-file": "string", "fallback-key-file": "stri
 /** The key files for this command: --key-file / --fallback-key-file, else the real environment, else the defaults. */
 export function signingKeyPaths(proj: Project, args?: ParsedArgs): Record<KeyRole, string> {
 	return keyFilePaths(proj, { keyFile: args ? flagString(args, "key-file") : undefined, fallbackKeyFile: args ? flagString(args, "fallback-key-file") : undefined });
+}
+
+/**
+ * Both keys for something that is always signed (the settings record, plans/20): throws SigningSetupError that starts
+ * with `why` and says to run `typetorch keys init` (+ `--fallback`) when they aren't set up.
+ */
+export function loadSignerOrExplain(proj: Project, paths: Record<KeyRole, string>, why: string): DualSigner {
+	try {
+		return loadSigner(proj, paths);
+	} catch (error) {
+		if (!(error instanceof SigningSetupError)) throw error;
+		throw new SigningSetupError(`${why}: ${error.message}. Set them up with \`typetorch keys init\` and \`typetorch keys init --fallback\``);
+	}
 }
 
 /** Both keys for a prod-channel branch (throws SigningSetupError with what to do); undefined for a dev-channel one. */

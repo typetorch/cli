@@ -59,7 +59,7 @@ export interface TestTarget {
 
 /** What `typetorch test` tests: the given artifact, else the branch's newest upload, else its live head. */
 export function resolveTestTarget(proj: Project, wanted: string | undefined, branchFlag: string | undefined): TestTarget {
-	const history = withLocal(proj, undefined, "not read");
+	const history = withLocal(proj);
 	const git = gitInfo(proj.root);
 	const branch = branchFlag ?? (git.gitBranch ? branchFromGit(git.gitBranch, proj.config.branches) : proj.config.defaultBranch);
 	if (wanted !== undefined) {

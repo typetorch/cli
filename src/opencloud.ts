@@ -72,7 +72,6 @@ export interface RequestOptions {
 export function describeRequest(method: string, path: string): string {
 	const bare = path.replace(/^https?:\/\/[^/]+/, "").split("?")[0];
 	if (bare.endsWith(":publishMessage")) return "publish message";
-	if (bare.includes("/creator-configs-public-api/")) return "registry (ConfigService)";
 	const map = /memory-store\/sorted-maps\/([^/]+)/.exec(bare);
 	if (map) return `MemoryStore ${decodeURIComponent(map[1])}`;
 	if (bare.includes("luau-execution")) return method === "POST" ? "create Luau Execution task" : "Luau Execution task";

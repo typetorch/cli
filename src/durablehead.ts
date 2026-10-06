@@ -6,8 +6,8 @@
  *     sigF? } } (prod heads carry the message's signatures, so prod servers can check them);
  *   - `deployments`: { list: [...] }, newest first, at most 100: the history entry of this deploy.
  *
- * Why: only a server that hears a deploy message records the head, and the ConfigService registry can't be written
- * with an API key, so a deploy made while no server of that branch ran reached nobody (new servers booted the old
+ * Why: only a server that hears a deploy message records the head, and the ConfigService registry (gone in CLI 0.8)
+ * couldn't be written with an API key, so a deploy made while no server of that branch ran reached nobody (new servers booted the old
  * head). Kernel 0.3.5 reads this copy at boot and about every 60 s, follows a newer head, and writes the MemoryStore
  * copy back when it is behind.
  *

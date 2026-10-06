@@ -1,13 +1,8 @@
 /**
- * The dev access list (typetorch.json `members`, `revoked`, `devBadgeId`) as the server-only ConfigService key
- * `TypeTorchAccess` (security audit 2026-10-06, plans/18).
- *
- * Why a key of its own: the registry key `TypeTorch` can only be written after a read (`config push` needs
- * universe:read, which API keys can't get), so typetorch.json's members never reached servers and only the creator
- * was a dev. This key is written blind with publishConfigKey (universe:write only), like `TypeTorchFleet`.
- * Why ConfigService and not a DataStore: any code in the universe (a backdoored free model) can write DataStores and
- * would add itself as an owner on every server; nothing in-game can write ConfigService.
- * Kernel 0.3.6+ (Access.luau) reads the key and, when it exists, takes its lists instead of the registry's.
+ * The dev access list (typetorch.json `members`, `revoked`, `devBadgeId`), as `typetorch access push` writes it into
+ * the signed settings record's `access` field (kernel 0.3.8, plans/20). The record is signed with both prod keys, so
+ * in-universe code (which can write DataStores) can't add itself as an owner. (CLI 0.7.3-0.7.5 wrote the ConfigService
+ * key TypeTorchAccess for kernels 0.3.6-0.3.7.)
  *
  * `access.json` in the state dir remembers what was last pushed (a hash, never the lists), so `deploy` and `doctor`
  * can warn when typetorch.json changed since (a revoked dev would still be a dev until the next push).
@@ -18,10 +13,9 @@ import { join } from "node:path";
 import type { ProjectConfig, Role } from "./config.ts";
 import { isRecord } from "./json.ts";
 
-export const ACCESS_CONFIG_KEY = "TypeTorchAccess";
 export const ACCESS_RECORD = "access.json";
 
-/** The published value (kernel Access.luau reads exactly these fields; `v` lets the shape change later). */
+/** The lists (kernel Access.luau reads members, revoked and devBadgeId from settings.access). */
 export interface AccessValue {
 	v: 1;
 	members: Record<string, Role>;
@@ -35,7 +29,10 @@ export interface AccessRecord {
 	universeId: number;
 	sha256: string;
 	at: string;
+	/** CLI 0.7.x: the ConfigService config version of the push. */
 	configVersion?: number;
+	/** CLI 0.8: the settings record's seq written by the push. */
+	settingsSeq?: number;
 }
 
 /** The value for a project's typetorch.json, with sorted keys (stable hashes). */
@@ -48,7 +45,7 @@ export function accessValue(config: Pick<ProjectConfig, "members" | "revoked" | 
 	return { v: 1, members, revoked, devBadgeId: config.devBadgeId ?? null };
 }
 
-/** Whether there is anything to publish (an empty list needs no key: servers then fall back to the registry). */
+/** Whether typetorch.json lists anyone (with nothing listed, only the experience creator is a dev). */
 export function accessConfigured(value: AccessValue): boolean {
 	return Object.keys(value.members).length > 0 || Object.keys(value.revoked).length > 0 || value.devBadgeId !== null;
 }
@@ -64,7 +61,14 @@ export function readAccessRecord(stateDir: string, universeId: number): AccessRe
 	try {
 		const raw = JSON.parse(readFileSync(path, "utf8")) as unknown;
 		if (!isRecord(raw) || raw.v !== 1 || raw.universeId !== universeId || typeof raw.sha256 !== "string" || typeof raw.at !== "string") return undefined;
-		return { v: 1, universeId, sha256: raw.sha256, at: raw.at, ...(typeof raw.configVersion === "number" ? { configVersion: raw.configVersion } : {}) };
+		return {
+			v: 1,
+			universeId,
+			sha256: raw.sha256,
+			at: raw.at,
+			...(typeof raw.configVersion === "number" ? { configVersion: raw.configVersion } : {}),
+			...(typeof raw.settingsSeq === "number" ? { settingsSeq: raw.settingsSeq } : {}),
+		};
 	} catch {
 		return undefined;
 	}
@@ -109,7 +113,7 @@ export function accessWarning(status: AccessStatus): string | undefined {
 	if (!status.configured) return undefined;
 	const counts = describeAccess(status.value);
 	if (!status.published) {
-		return `typetorch.json lists ${counts}, but servers can't see them until they are published: run \`typetorch access push\` (ConfigService ${ACCESS_CONFIG_KEY}; kernel 0.3.6+). Until then only the experience creator is a dev`;
+		return `typetorch.json lists ${counts}, but servers can't see them until they are pushed: run \`typetorch access push\` (the signed settings record; kernel 0.3.8+). Until then only the experience creator is a dev`;
 	}
 	if (status.stale) {
 		return `typetorch.json's members/revoked/devBadgeId changed since the last \`typetorch access push\` (${status.record?.at ?? "?"}): run it again, or servers keep the old lists (a revoked dev stays a dev)`;

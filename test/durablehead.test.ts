@@ -221,7 +221,7 @@ describe("release stores the head", () => {
 				cloud.calls.push("PUBLISH");
 			},
 		} as unknown as OpenCloud;
-		const result = await silenced(() => release({ proj, oc, history: withLocal(proj, undefined), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" }));
+		const result = await silenced(() => release({ proj, oc, history: withLocal(proj), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" }));
 		expect(result.entry.seq).toBe(45);
 		expect(published).toHaveLength(1);
 		const message = JSON.parse(published[0]);
@@ -237,7 +237,7 @@ describe("release stores the head", () => {
 		const proj = project();
 		const cloud = fakeCloud({}, { v1Status: 403 });
 		const oc = { ...cloud.oc, publishMessage: async () => {} } as unknown as OpenCloud;
-		const result = await silenced(() => release({ proj, oc, history: withLocal(proj, undefined), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" }));
+		const result = await silenced(() => release({ proj, oc, history: withLocal(proj), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" }));
 		expect(result.entry.seq).toBeGreaterThan(0);
 		expect(result.durable?.heads.scopeMissing).toBe(true);
 	});

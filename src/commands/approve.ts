@@ -43,7 +43,6 @@ import {
 	type ProposalKind,
 	type ProposalState,
 } from "../proposals.ts";
-import type { RegistryApi } from "../registry.ts";
 import type { KeyRole } from "../keyfiles.ts";
 import type { DualSigner } from "../signing.ts";
 import {
@@ -52,18 +51,16 @@ import {
 	project,
 	projectStateDir,
 	readHistory,
-	registryApi,
 	signerFor,
 	signingKeyPaths,
 	signingStatus,
-	warnRegistryFallback,
 	type History,
 } from "./common.ts";
 import { checkChannelGuard, checkPromoteChannel } from "./deploy.ts";
 import { describeRollbackSetting, fleetFor, rollbackSetting, waitSeconds, waitForFleet, WAIT_FLAGS, type FleetDeps, type RollbackSetting, type WaitResult } from "./fleet.ts";
 import { autoRollbackHook } from "./autorollback.ts";
 import { encodeDeployMessage } from "../opencloud.ts";
-import { makeEntry, messageFor, registryMessage, release, type ReleaseResult } from "./release.ts";
+import { makeEntry, messageFor, release, type ReleaseResult } from "./release.ts";
 import { describeTest, GATE_FLAGS, gateRelease, type TestDeps } from "./test.ts";
 import { gatePolicy, skipReason, type TestSummary } from "../cloudtest.ts";
 import { checkRollout, parseRollout } from "../rollout.ts";
@@ -144,7 +141,6 @@ export async function approveProposal(
 	state: ProposalState,
 	options: {
 		io?: Interaction;
-		noRegistry?: boolean;
 		approver?: string;
 		oc?: OpenCloud;
 		keyPaths?: Record<KeyRole, string>;
@@ -164,14 +160,12 @@ export async function approveProposal(
 	if (state.status !== "pending") throw new Error(`proposal ${p.id} is ${state.status}`);
 	const dir = projectStateDir(proj);
 	const deployer = options.oc ?? openCloud("deploy")!;
-	const api = registryApi(deployer, proj, options.noRegistry ?? false);
 	const watch = new Stopwatch();
-	const history = await watch.stage("read", () => readHistory(proj, api, "--no-registry"));
-	if (!history.snapshot && api) warnRegistryFallback(history.unavailable ?? "unknown");
+	const history = await watch.stage("read", () => readHistory(proj));
 	const head = history.heads.get(p.branch);
 	for (const line of describeProposal(state, head)) info(line);
 
-	const targetChannel = strictest(branchChannel(proj.config, p.branch), history.snapshot?.value.channels[p.branch], p.branchChannel);
+	const targetChannel = strictest(branchChannel(proj.config, p.branch), undefined, p.branchChannel);
 	if (p.kind === "resign") {
 		// Re-signing republishes exactly what is live (keys rotate); it never moves a branch.
 		if (!head || head.assetId !== p.artifact.assetId) {
@@ -223,7 +217,6 @@ export async function approveProposal(
 		result = await release({
 			proj,
 			oc: deployer,
-			api: history.snapshot ? api : undefined,
 			history,
 			action: p.kind,
 			branch: p.branch,
@@ -311,10 +304,8 @@ export async function finishRelease(input: {
 	request: ReleaseRequest;
 	/** A client with the deploy key (not needed to propose). */
 	oc?: OpenCloud;
-	api?: RegistryApi;
 	history: History;
 	watch: Stopwatch;
-	noRegistry?: boolean;
 	assetName?: string;
 	extra?: Record<string, unknown>;
 	io?: Interaction;
@@ -329,7 +320,7 @@ export async function finishRelease(input: {
 		const proposal = propose(proj, request, input.proposer);
 		if (mode.kind === "propose") return { kind: "proposed", proposal };
 		info(`proposal ${proposal.id} written; approve it now (or later: typetorch approve ${proposal.id})`);
-		const result = await approveProposal(proj, { proposal, status: "pending" }, { io, noRegistry: input.noRegistry, oc: input.oc, keyPaths: input.keyPaths, signer: input.signer });
+		const result = await approveProposal(proj, { proposal, status: "pending" }, { io, oc: input.oc, keyPaths: input.keyPaths, signer: input.signer });
 		return result ? { kind: "published", result } : { kind: "declined", proposal };
 	}
 	if (!input.oc) settings().requireApiKey("deploy"); // throws the "no key" message
@@ -342,7 +333,6 @@ export async function finishRelease(input: {
 	const result = await release({
 		proj,
 		oc: input.oc!,
-		api: input.api,
 		history: input.history,
 		action: request.kind,
 		branch: request.branch,
@@ -374,7 +364,6 @@ export async function releaseExisting(input: {
 	changes?: string[];
 	history: History;
 	oc: OpenCloud | undefined;
-	api?: RegistryApi;
 	watch: Stopwatch;
 	force: boolean;
 	by: string;
@@ -393,7 +382,7 @@ export async function releaseExisting(input: {
 	const rollback = rollbackSetting(args, proj.config);
 	if (input.dryRun) {
 		const ending = modeFor(proj, args, input.branchChannel).mode.kind;
-		const entry = makeEntry({ action: kind, branch, artifact: input.artifact, by: input.by }, history.snapshot?.value, history.local);
+		const entry = makeEntry({ action: kind, branch, artifact: input.artifact, by: input.by }, undefined, history.local);
 		const data = messageFor(entry, undefined, { placeholders: input.branchChannel === "prod", rollout });
 		const signing = signingStatus(proj, input.branchChannel, keyPaths);
 		const test = gatePolicy({ kind, branchChannel: input.branchChannel, test: testFlag, skipTest });
@@ -408,9 +397,6 @@ export async function releaseExisting(input: {
 			wait: wait ?? null,
 			autoRollback: wait !== undefined && kind !== "rollback" ? { failedPct: rollback.threshold ?? null, source: rollback.source } : null,
 			signing,
-			registry: history.snapshot
-				? { readable: true, message: registryMessage(kind, branch, input.artifact.artifactId, note) }
-				: { readable: false, reason: history.unavailable },
 			message: { topic: DEPLOY_TOPIC, data },
 		};
 		if (isJson()) return emitJson(plan);
@@ -420,7 +406,6 @@ export async function releaseExisting(input: {
 		info(`  wait      ${wait !== undefined ? `up to ${wait} s for the servers' reports` : "no (--wait)"}`);
 		if (plan.autoRollback) info(`  rollback  ${describeRollbackSetting(rollback)}`);
 		info(`  signing   ${describeSigning(signing)}`);
-		info(`  registry  ${history.snapshot ? `would publish "${plan.registry.message}"` : `not used (${history.unavailable})`}`);
 		info(`  message   ${DEPLOY_TOPIC} ${JSON.stringify(data)}`);
 		return;
 	}
@@ -434,10 +419,8 @@ export async function releaseExisting(input: {
 		proposer,
 		request: { kind, branch, branchChannel: input.branchChannel, artifact: input.artifact, message: note, changes: input.changes, force: input.force, by: input.by, from: head, test, rollout },
 		oc: input.oc,
-		api: input.api,
 		history,
 		watch: input.watch,
-		noRegistry: flagBool(args, "no-registry"),
 		assetName: input.artifact.assetName,
 		extra: { ...(input.artifact.sha256 ? { sha256: input.artifact.sha256 } : {}), ...(input.artifact.protocolHash ? { protocolHash: input.artifact.protocolHash } : {}) },
 		keyPaths,
@@ -563,7 +546,6 @@ export async function approveCommand(args: ParsedArgs) {
 	const rollback = rollbackSetting(args, proj.config);
 	const result = await approveProposal(proj, state, {
 		io,
-		noRegistry: flagBool(args, "no-registry"),
 		keyPaths: signingKeyPaths(proj, args),
 		test: flagBool(args, "test"),
 		skipTest,

@@ -8,10 +8,9 @@ import { flagBool, flagString, UsageError, type ParsedArgs } from "../args.ts";
 import { matchDeployment, previousDifferent } from "../deployments.ts";
 import { gitInfo } from "../git.ts";
 import { Stopwatch } from "../log.ts";
-import { branchChannel, branchFromGit, branchNameError, strictest } from "../naming.ts";
-import { assertNoForeignDraft } from "../registry.ts";
+import { branchChannel, branchFromGit, branchNameError } from "../naming.ts";
 import { releaseExisting } from "./approve.ts";
-import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common.ts";
+import { KEY_FILE_FLAGS, noteRegistryFlags, openCloud, project, readHistory } from "./common.ts";
 import { WAIT_FLAGS } from "./fleet.ts";
 import { GATE_FLAGS } from "./test.ts";
 import { checkChannelGuard } from "./deploy.ts";
@@ -34,7 +33,7 @@ export async function rollbackCommand(args: ParsedArgs) {
 	const proj = project(args);
 	const dryRun = flagBool(args, "dry-run");
 	const force = flagBool(args, "force");
-	const noRegistry = flagBool(args, "no-registry");
+	noteRegistryFlags(args); // CLI 0.8: --no-registry does nothing
 	const git = gitInfo(proj.root);
 	const branch = flagString(args, "branch") ?? args.positionals[0] ?? (git.gitBranch ? branchFromGit(git.gitBranch, proj.config.branches) : undefined);
 	if (!branch) throw new UsageError("which branch? pass --branch <name>");
@@ -42,16 +41,13 @@ export async function rollbackCommand(args: ParsedArgs) {
 
 	// Optional: proposing needs no key; publishing (finishRelease) does.
 	const oc = openCloud("deploy", true);
-	const api = registryApi(oc, proj, noRegistry);
 	const watch = new Stopwatch();
-	const history = await watch.stage("read", () => readHistory(proj, api, noRegistry ? "--no-registry" : "no API key (dry run)"));
-	if (!history.snapshot && api) warnRegistryFallback(history.unavailable ?? "unknown");
-	if (history.snapshot) assertNoForeignDraft(history.snapshot, force);
+	const history = await watch.stage("read", () => readHistory(proj));
 
 	const head = history.heads.get(branch);
 	if (!head) {
 		throw new Error(
-			`branch "${branch}" has no deployments in the ${history.snapshot ? "registry or the " : ""}local log (${history.stateDir}/deployments.jsonl)`,
+			`branch "${branch}" has no deployments in the local log (${history.stateDir}/deployments.jsonl)`,
 		);
 	}
 	const wanted = flagString(args, "to");
@@ -65,7 +61,7 @@ export async function rollbackCommand(args: ParsedArgs) {
 	}
 	if (target.assetId === head.assetId) throw new Error(`${target.artifactId} (asset ${target.assetId}) is already live on ${branch}`);
 
-	const targetChannel = strictest(branchChannel(proj.config, branch), history.snapshot?.value.channels[branch]);
+	const targetChannel = branchChannel(proj.config, branch);
 	checkChannelGuard({ branch, branchChannel: targetChannel, artifactChannel: target.channel, dirty: target.dirty, force });
 
 	await releaseExisting({
@@ -89,7 +85,6 @@ export async function rollbackCommand(args: ParsedArgs) {
 		changes: [`rollback to #${target.seq} (${target.artifactId})`],
 		history,
 		oc,
-		api: history.snapshot ? api : undefined,
 		watch,
 		force,
 		by: git.userName,

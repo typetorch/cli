@@ -12,12 +12,11 @@ import { flagBool, UsageError, type ParsedArgs } from "../args.ts";
 import { matchDeployment, type UploadRecord } from "../deployments.ts";
 import { gitInfo } from "../git.ts";
 import { Stopwatch } from "../log.ts";
-import { branchChannel, branchNameError, strictest } from "../naming.ts";
-import { assertNoForeignDraft } from "../registry.ts";
+import { branchChannel, branchNameError } from "../naming.ts";
 import type { ProposalArtifact } from "../proposals.ts";
 import { releaseExisting } from "./approve.ts";
 import type { Project } from "../config.ts";
-import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback, type History } from "./common.ts";
+import { KEY_FILE_FLAGS, noteRegistryFlags, openCloud, project, readHistory, type History } from "./common.ts";
 import { WAIT_FLAGS } from "./fleet.ts";
 import { GATE_FLAGS } from "./test.ts";
 import { checkChannelGuard, checkPromoteChannel } from "./deploy.ts";
@@ -36,10 +35,9 @@ export const promoteFlags = {
 } as const;
 
 /** Branch names this project knows: the default branch, channels, git-branch mappings and the deployed heads. */
-export function knownBranches(proj: Project, history: Pick<History, "heads" | "snapshot">): Set<string> {
+export function knownBranches(proj: Project, history: Pick<History, "heads">): Set<string> {
 	const known = new Set<string>([proj.config.defaultBranch, ...Object.keys(proj.config.channels), ...Object.values(proj.config.branches)]);
 	for (const branch of history.heads.keys()) known.add(branch);
-	for (const branch of Object.keys(history.snapshot?.value.channels ?? {})) known.add(branch);
 	return known;
 }
 
@@ -88,16 +86,13 @@ export async function promoteCommand(args: ParsedArgs) {
 	const proj = project(args);
 	const dryRun = flagBool(args, "dry-run");
 	const force = flagBool(args, "force");
-	const noRegistry = flagBool(args, "no-registry");
+	noteRegistryFlags(args); // CLI 0.8: --no-registry does nothing
 	const git = gitInfo(proj.root);
 
 	// Optional: proposing needs no key; publishing (finishRelease) does.
 	const oc = openCloud("deploy", true);
-	const api = registryApi(oc, proj, noRegistry);
 	const watch = new Stopwatch();
-	const history = await watch.stage("read", () => readHistory(proj, api, noRegistry ? "--no-registry" : "no API key (dry run)"));
-	if (!history.snapshot && api) warnRegistryFallback(history.unavailable ?? "unknown");
-	if (history.snapshot) assertNoForeignDraft(history.snapshot, force);
+	const history = await watch.stage("read", () => readHistory(proj));
 	const { branch, wanted } = promoteArguments(first, second, knownBranches(proj, history));
 	if (branchNameError(branch)) throw new UsageError(branchNameError(branch)!);
 
@@ -117,7 +112,7 @@ export async function promoteCommand(args: ParsedArgs) {
 		throw new Error(`${target.artifactId} (asset ${target.assetId}) is already live on ${branch}; --force sends it again with a new seq (for servers that missed it)`);
 	}
 
-	const targetChannel = strictest(branchChannel(proj.config, branch), history.snapshot?.value.channels[branch]);
+	const targetChannel = branchChannel(proj.config, branch);
 	checkPromoteChannel({ branch, branchChannel: targetChannel, artifactId: target.artifactId, artifactChannel: target.channel });
 	checkChannelGuard({ branch, branchChannel: targetChannel, artifactChannel: target.channel, dirty: target.dirty, force });
 
@@ -153,7 +148,6 @@ export async function promoteCommand(args: ParsedArgs) {
 		changes,
 		history,
 		oc,
-		api: history.snapshot ? api : undefined,
 		watch,
 		force,
 		by: git.userName,

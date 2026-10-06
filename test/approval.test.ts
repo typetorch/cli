@@ -114,7 +114,7 @@ describe("approve", () => {
 		const p = propose(proj, request(), { name: "dev-server/claude", explicit: true });
 		const { oc, published } = fakeOc();
 		const io = scriptedInteraction({ answers: ["y"] });
-		const result = await approveProposal(proj, { proposal: p, status: "pending" }, { io, oc, noRegistry: true });
+		const result = await approveProposal(proj, { proposal: p, status: "pending" }, { io, oc });
 		expect(result?.entry.seq).toBe(1);
 		const message = JSON.parse(published[0]);
 		expect(Object.keys(message)).toEqual(["b", "a", "i", "s", "c", "ch", "t"]);
@@ -128,7 +128,7 @@ describe("approve", () => {
 		const p = propose(proj, request(), { name: "agent", explicit: false });
 		const { oc, published } = fakeOc();
 		for (const answer of ["n", "", "maybe"]) {
-			expect(await approveProposal(proj, { proposal: p, status: "pending" }, { io: scriptedInteraction({ answers: [answer] }), oc, noRegistry: true })).toBeUndefined();
+			expect(await approveProposal(proj, { proposal: p, status: "pending" }, { io: scriptedInteraction({ answers: [answer] }), oc })).toBeUndefined();
 		}
 		expect(published).toEqual([]);
 		expect(readProposals(dir(proj))[0].status).toBe("pending");
@@ -137,7 +137,7 @@ describe("approve", () => {
 		const proj = project();
 		const p = propose(proj, request({ kind: "rollback" }), { name: "agent", explicit: false });
 		const { oc, published } = fakeOc();
-		await approveProposal(proj, { proposal: p, status: "pending" }, { io: scriptedInteraction({ answers: ["yes"] }), oc, noRegistry: true });
+		await approveProposal(proj, { proposal: p, status: "pending" }, { io: scriptedInteraction({ answers: ["yes"] }), oc });
 		expect(JSON.parse(published[0]).r).toBe(1);
 	});
 });
@@ -146,10 +146,10 @@ describe("finishRelease", () => {
 	test("propose writes a proposal and publishes nothing; approve-now asks at once", async () => {
 		const proj = project();
 		const { oc, published } = fakeOc();
-		const proposed = await finishRelease({ proj, mode: { kind: "propose" }, proposer: { name: "agent", explicit: false }, request: request(), history: withLocal(proj, undefined), watch: new Stopwatch(), io: scriptedInteraction({ interactive: false }) });
+		const proposed = await finishRelease({ proj, mode: { kind: "propose" }, proposer: { name: "agent", explicit: false }, request: request(), history: withLocal(proj), watch: new Stopwatch(), io: scriptedInteraction({ interactive: false }) });
 		expect(proposed.kind).toBe("proposed");
 		expect(published).toEqual([]);
-		const now = await finishRelease({ proj, mode: { kind: "approve-now" }, proposer: { name: "cli", explicit: false }, request: request({ branch: "feature-y" }), oc, history: withLocal(proj, undefined), watch: new Stopwatch(), noRegistry: true, io: scriptedInteraction({ answers: ["y"] }) });
+		const now = await finishRelease({ proj, mode: { kind: "approve-now" }, proposer: { name: "cli", explicit: false }, request: request({ branch: "feature-y" }), oc, history: withLocal(proj), watch: new Stopwatch(), io: scriptedInteraction({ answers: ["y"] }) });
 		expect(now.kind).toBe("published");
 		expect(published).toHaveLength(1);
 		expect(readProposals(dir(proj)).map((s) => s.status).sort()).toEqual(["approved", "pending"]);
@@ -157,7 +157,7 @@ describe("finishRelease", () => {
 	test("publish (approval none) goes out at once", async () => {
 		const proj = project({ approval: "none" });
 		const { oc, published } = fakeOc();
-		const out = await finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "agent", explicit: false }, request: request(), oc, history: withLocal(proj, undefined), watch: new Stopwatch(), io: scriptedInteraction({ interactive: false }) });
+		const out = await finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "agent", explicit: false }, request: request(), oc, history: withLocal(proj), watch: new Stopwatch(), io: scriptedInteraction({ interactive: false }) });
 		expect(out.kind).toBe("published");
 		expect(JSON.parse(published[0]).sig).toBeUndefined();
 		expect(readLocalLog(dir(proj))[0]).toMatchObject({ proposedBy: "agent" });

@@ -22,7 +22,7 @@ import type { Channel } from "../naming.ts";
 import type { OpenCloud } from "../opencloud.ts";
 import { progress } from "../progress.ts";
 import type { DualSigner } from "../signing.ts";
-import { projectStateDir, readHistory, registryApi, signerFor } from "./common.ts";
+import { projectStateDir, readHistory, signerFor } from "./common.ts";
 import type { AutoRollbackHook } from "./fleet.ts";
 import { release, type ReleaseResult } from "./release.ts";
 
@@ -72,9 +72,7 @@ export function autoRollbackHook(input: AutoRollbackInput, threshold: number): A
 		threshold,
 		run: async ({ reason }) => {
 			const { proj, deployed } = input;
-			// The registry, when this client can read it (an API key can't today: universe:read).
-			const api = typeof (input.oc as Partial<OpenCloud>).request === "function" ? registryApi(input.oc, proj, false) : undefined;
-			const history = await readHistory(proj, api, "auto-rollback");
+			const history = await readHistory(proj);
 			const target =
 				(deployed.fromAssetId !== undefined ? matchDeployment(history.rows.filter((d) => d.assetId === deployed.fromAssetId), String(deployed.fromAssetId), deployed.branch) : undefined) ??
 				previousDifferent(history.rows, deployed.branch, deployed);
@@ -99,7 +97,6 @@ export function autoRollbackHook(input: AutoRollbackInput, threshold: number): A
 			const result = await release({
 				proj,
 				oc: input.oc,
-				api: history.snapshot ? api : undefined,
 				history,
 				action: "rollback",
 				branch: deployed.branch,

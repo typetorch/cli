@@ -117,7 +117,7 @@ describe("release takes the shared seq", () => {
 		const store = fakeStore({ heads: LIVE_HEADS, deployments: LIVE_DEPLOYMENTS });
 		const published: string[] = [];
 		const oc = { ...store.oc, publishMessage: async (_u: number, _t: string, m: string) => void published.push(m) } as unknown as OpenCloud;
-		const result = await release({ proj, oc, history: withLocal(proj, undefined), action: "deploy", branch: "dev", artifact, by: "ci", force: false, watch: new Stopwatch(), branchChannel: "dev" });
+		const result = await release({ proj, oc, history: withLocal(proj), action: "deploy", branch: "dev", artifact, by: "ci", force: false, watch: new Stopwatch(), branchChannel: "dev" });
 		expect(result.entry.seq).toBe(37);
 		expect(JSON.parse(published[0]).s).toBe(37);
 		expect(store.values.seq).toBe(37);
@@ -128,7 +128,7 @@ describe("release takes the shared seq", () => {
 		appendLocalLog(join(proj.root, ".typetorch"), { seq: 60, at: new Date().toISOString(), action: "deploy", branch: "dev", channel: "dev", artifactId: "x", assetId: 1, commit: "x", commitHash: "", dirty: false, by: "me", universeId: 42 });
 		const store = fakeStore({ heads: LIVE_HEADS, seq: 36 });
 		const oc = { ...store.oc, publishMessage: async () => {} } as unknown as OpenCloud;
-		const result = await release({ proj, oc, history: withLocal(proj, undefined), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" });
+		const result = await release({ proj, oc, history: withLocal(proj), action: "deploy", branch: "dev", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev" });
 		expect(result.entry.seq).toBe(61);
 		expect(store.values.seq).toBe(61);
 	});

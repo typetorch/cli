@@ -73,7 +73,7 @@ describe("releases with a rollout", () => {
 	test("finishRelease sends `ro` and logs the rollout (the registry head never carries it)", async () => {
 		const proj = project();
 		const { oc, published } = fakeOc();
-		await finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "cli", explicit: false }, request: request({ rollout: 10 }), oc, history: withLocal(proj, undefined), watch: new Stopwatch() });
+		await finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "cli", explicit: false }, request: request({ rollout: 10 }), oc, history: withLocal(proj), watch: new Stopwatch() });
 		expect(JSON.parse(published[0])).toMatchObject({ b: "dev", s: 1, ro: 10 });
 		expect(readLocalLog(join(proj.root, ".typetorch"))[0].rollout).toBe(10);
 	});
@@ -81,11 +81,11 @@ describe("releases with a rollout", () => {
 		const proj = project({ approval: "all" });
 		const p = propose(proj, request({ rollout: 10 }), { name: "agent", explicit: false });
 		const { oc, published } = fakeOc();
-		await approveProposal(proj, { proposal: p, status: "pending" }, { io: scriptedInteraction({ answers: ["y"] }), oc, noRegistry: true, rollout: 30 });
+		await approveProposal(proj, { proposal: p, status: "pending" }, { io: scriptedInteraction({ answers: ["y"] }), oc, rollout: 30 });
 		expect(JSON.parse(published[0]).ro).toBe(30);
 		const prod = propose(proj, request({ branch: "prod", branchChannel: "prod", artifact: { ...artifact, channel: "prod" }, rollout: 10 }), { name: "agent", explicit: false });
 		const io = scriptedInteraction({ answers: ["y"] });
-		await expect(approveProposal(proj, { proposal: prod, status: "pending" }, { io, oc, noRegistry: true })).rejects.toThrow(RolloutError);
+		await expect(approveProposal(proj, { proposal: prod, status: "pending" }, { io, oc })).rejects.toThrow(RolloutError);
 		expect(io.asked).toEqual([]);
 	});
 });

@@ -1,25 +1,20 @@
-/** `typetorch deployments` and `typetorch branch ls`: registry (when readable) + the local log. */
+/**
+ * `typetorch deployments` and `typetorch branch ls`: this machine's deployment log (CLI 0.8: the ConfigService registry
+ * is gone; it was never readable with an API key).
+ */
 import { flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
 import { formatDeploymentsTable, unpublishedUploads } from "../deployments.ts";
 import { dim, emitJson, info, isJson, table } from "../log.ts";
 import { branchChannel } from "../naming.ts";
-import { openCloud, project, readHistory, registryApi } from "./common.ts";
+import { project, readHistory } from "./common.ts";
 
 export const deploymentsFlags = { branch: "string", limit: "string" } as const;
 
-function sourceNote(unavailable: string | undefined): string {
-	if (!unavailable) return "registry + local log";
-	// The usual cause: the configs API needs universe:read, which API keys can't get.
-	if (/universe:read|Scope not authorized/.test(unavailable)) return "local log only (the registry needs universe:read, which API keys can't get)";
-	const first = unavailable.split("\n")[0];
-	const short = first.length <= 120 ? first : `${first.slice(0, 120).replace(/\s+\S*$/, "")}...`;
-	return `registry not read (${short}); local log only`;
-}
+const SOURCE_NOTE = "this machine's deployment log";
 
 export async function deploymentsCommand(args: ParsedArgs) {
 	const proj = project(args);
-	const oc = openCloud("deploy", true);
-	const history = await readHistory(proj, registryApi(oc, proj, false));
+	const history = await readHistory(proj);
 	const branch = flagString(args, "branch");
 	const limit = flagInt(args, "limit", 20);
 	let rows = history.rows;
@@ -31,8 +26,7 @@ export async function deploymentsCommand(args: ParsedArgs) {
 		.slice(-5);
 	if (isJson()) {
 		return emitJson({
-			source: history.snapshot ? "registry+local" : "local",
-			registryUnavailable: history.unavailable,
+			source: "local",
 			stateDir: history.stateDir,
 			heads: Object.fromEntries(history.heads),
 			deployments: rows,
@@ -40,11 +34,11 @@ export async function deploymentsCommand(args: ParsedArgs) {
 		});
 	}
 	if (rows.length === 0) {
-		info(`no deployments${branch ? ` on ${branch}` : ""} yet (${sourceNote(history.unavailable)})`);
+		info(`no deployments${branch ? ` on ${branch}` : ""} yet (${SOURCE_NOTE})`);
 		return;
 	}
 	info(formatDeploymentsTable([...rows].reverse(), history.heads)); // newest first (--json keeps oldest first)
-	info(dim(`* = live head of its branch; # = deploy number (seq); times UTC; ${sourceNote(history.unavailable)}`));
+	info(dim(`* = live head of its branch; # = deploy number (seq); times UTC; ${SOURCE_NOTE}`));
 	for (const upload of pending) {
 		info(
 			`uploaded, never published: ${upload.artifactId} (asset ${upload.assetId}, ${upload.moderation}, ${upload.at.replace("T", " ").slice(0, 19)}): typetorch promote ${upload.branch} ${upload.assetId}`,
@@ -58,21 +52,14 @@ export async function branchCommand(args: ParsedArgs) {
 	const sub = args.positionals[0] ?? "ls";
 	if (sub !== "ls" && sub !== "list") throw new UsageError(`unknown branch subcommand "${sub}" (only "ls" for now)`);
 	const proj = project(args);
-	const oc = openCloud("deploy", true);
-	const history = await readHistory(proj, registryApi(oc, proj, false));
-	const registry = history.snapshot?.value;
-	const names = new Set<string>([
-		proj.config.defaultBranch,
-		...Object.keys(proj.config.channels),
-		...Object.keys(registry?.channels ?? {}),
-		...history.heads.keys(),
-	]);
+	const history = await readHistory(proj);
+	const names = new Set<string>([proj.config.defaultBranch, ...Object.keys(proj.config.channels), ...history.heads.keys()]);
 	const branches = [...names].sort().map((name) => {
 		const head = history.heads.get(name);
-		const channel = registry?.channels[name] ?? branchChannel(proj.config, name);
+		const channel = branchChannel(proj.config, name);
 		return { branch: name, channel, default: name === proj.config.defaultBranch, head: head ?? null };
 	});
-	if (isJson()) return emitJson({ source: registry ? "registry+local" : "local", registryUnavailable: history.unavailable, branches });
+	if (isJson()) return emitJson({ source: "local", branches });
 	info(
 		table(
 			["branch", "channel", "artifact", "commit", "seq", "deployed (UTC)", "asset"],
@@ -87,5 +74,5 @@ export async function branchCommand(args: ParsedArgs) {
 			]),
 		),
 	);
-	info(dim(sourceNote(history.unavailable)));
+	info(dim(SOURCE_NOTE));
 }

@@ -40,7 +40,6 @@ import {
 } from "../src/keyfiles";
 import { setOutputMode, Stopwatch } from "../src/log";
 import type { OpenCloud } from "../src/opencloud";
-import { readRegistry, type RegistryApi } from "../src/registry";
 import { generateSigningKey, TEST_VECTOR_MAIN_SEED, verifySigned } from "../src/signing";
 
 const FAKE_API_KEY = "test-api-key-not-real-0000";
@@ -404,7 +403,7 @@ describe("keys rotate re-signs the current prod heads; keys resign", () => {
 		const published: string[] = [];
 		const oc = { publishMessage: async (_u: number, _t: string, m: string) => void published.push(m) } as unknown as OpenCloud;
 		const fresh = reload(proj);
-		await captureOutput(() => approveProposal(fresh, pending[0], { io: scriptedInteraction({ answers: ["y"] }), oc, noRegistry: true, keyPaths: paths(dir) }));
+		await captureOutput(() => approveProposal(fresh, pending[0], { io: scriptedInteraction({ answers: ["y"] }), oc, keyPaths: paths(dir) }));
 		const message = JSON.parse(published[0]);
 		expect(message).toMatchObject({ b: "prod", a: 900000004, r: "resign", s: 5 });
 		expect(verifySigned({ assetLoaded: true, publicKeys: fresh.config.signingPublicKeys!, revokedKeys: fresh.config.revokedKeys! }, message, message)).toBe("sig");
@@ -416,7 +415,7 @@ describe("keys rotate re-signs the current prod heads; keys resign", () => {
 		const pending = readProposals(state).find((p) => p.status === "pending" && p.proposal.branch === "prod")!;
 		appendLocalLog(state, head("prod", 9));
 		const oc = { publishMessage: async () => {} } as unknown as OpenCloud;
-		await expect(approveProposal(reload(proj), pending, { io: scriptedInteraction({ answers: ["y"] }), oc, noRegistry: true, keyPaths: paths(dir) })).rejects.toThrow(/moved since/);
+		await expect(approveProposal(reload(proj), pending, { io: scriptedInteraction({ answers: ["y"] }), oc, keyPaths: paths(dir) })).rejects.toThrow(/moved since/);
 	});
 	test("keys resign alone re-signs the live prod heads with the current keys", async () => {
 		const { dir, main, proj } = withHeads("none");
@@ -515,41 +514,25 @@ describe("prod-only signing in releases", () => {
 	}
 	const request = (patch: Partial<ReleaseRequest> = {}): ReleaseRequest => ({ kind: "deploy", branch: "prod", branchChannel: "prod", artifact, force: false, by: "me", ...patch });
 
-	test("a prod-channel release is signed with both keys; the registry head carries sig/sigF, the list doesn't", async () => {
+	test("a prod-channel release is signed with both keys; the local log keeps sig", async () => {
 		const { dir, proj, oc, published, trust } = signedProject();
-		let written: any;
-		const api = {
-			getPublished: async () => ({ entries: {}, exists: true, configVersion: 1 }),
-			getDraft: async () => ({ exists: true, entries: {} }),
-			patchDraft: async (entries: Record<string, unknown>) => {
-				written = entries.TypeTorch;
-				return "hash";
-			},
-			publish: async () => 2,
-		} as unknown as RegistryApi;
-		const snapshot = await readRegistry(api);
 		const signer = loadSigner(proj, paths(dir));
-		await captureOutput(() => release({ proj, oc, api, history: withLocal(proj, snapshot), action: "deploy", branch: "prod", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "prod", signer }));
+		await captureOutput(() => release({ proj, oc, history: withLocal(proj), action: "deploy", branch: "prod", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "prod", signer }));
 		const message = JSON.parse(published[0]);
 		expect(Object.keys(message)).toEqual(["b", "a", "i", "s", "c", "ch", "t", "sig", "sigF"]);
 		expect(verifySigned(trust, message, message)).toBe("sig");
 		expect(verifySigned({ ...trust, assetLoaded: false, publicKeys: [] }, message, message)).toBe("sigF");
-		const head = written.branches.prod;
-		expect(head).toMatchObject({ sig: message.sig, sigF: message.sigF, t: message.t });
-		// the head verifies exactly like the message: b = its key, a/i/s/c/ch/t/r from the head
-		expect(verifySigned(trust, { b: "prod", a: head.assetId, i: head.artifactId, s: head.seq, c: head.commit, ch: head.channel, t: head.t }, head)).toBe("sig");
-		expect(written.deployments[0].sig).toBeUndefined();
 		expect(readLocalLog(join(proj.root, ".typetorch"))[0].sig).toBe(message.sig);
 	});
 	test("prod without a signer is refused before anything is published", async () => {
 		const { proj, oc, published } = signedProject();
-		await expect(release({ proj, oc, history: withLocal(proj, undefined), action: "deploy", branch: "prod", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "prod" })).rejects.toThrow(SigningRequiredError);
+		await expect(release({ proj, oc, history: withLocal(proj), action: "deploy", branch: "prod", artifact, by: "me", force: false, watch: new Stopwatch(), branchChannel: "prod" })).rejects.toThrow(SigningRequiredError);
 		expect(published).toEqual([]);
 	});
 	test("a dev-channel release is unsigned even when a signer is around", async () => {
 		const { dir, proj, oc, published } = signedProject();
 		await captureOutput(() =>
-			release({ proj, oc, history: withLocal(proj, undefined), action: "deploy", branch: "dev", artifact: { ...artifact, channel: "dev" }, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev", signer: loadSigner(proj, paths(dir)) }),
+			release({ proj, oc, history: withLocal(proj), action: "deploy", branch: "dev", artifact: { ...artifact, channel: "dev" }, by: "me", force: false, watch: new Stopwatch(), branchChannel: "dev", signer: loadSigner(proj, paths(dir)) }),
 		);
 		expect(JSON.parse(published[0]).sig).toBeUndefined();
 		expect(JSON.parse(published[0]).sigF).toBeUndefined();
@@ -557,16 +540,16 @@ describe("prod-only signing in releases", () => {
 	test("finishRelease (approval none): prod reads the key files and signs; dev never reads them", async () => {
 		const { dir, proj, oc, published, trust } = signedProject();
 		const missing = paths(keyDir()); // no files there
-		await captureOutput(() => finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "cli", explicit: false }, request: request({ branch: "dev", branchChannel: "dev", artifact: { ...artifact, channel: "dev" } }), oc, history: withLocal(proj, undefined), watch: new Stopwatch(), keyPaths: missing }));
+		await captureOutput(() => finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "cli", explicit: false }, request: request({ branch: "dev", branchChannel: "dev", artifact: { ...artifact, channel: "dev" } }), oc, history: withLocal(proj), watch: new Stopwatch(), keyPaths: missing }));
 		expect(JSON.parse(published[0]).sig).toBeUndefined();
-		await expect(finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "cli", explicit: false }, request: request(), oc, history: withLocal(proj, undefined), watch: new Stopwatch(), keyPaths: missing })).rejects.toThrow(SigningSetupError);
+		await expect(finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "cli", explicit: false }, request: request(), oc, history: withLocal(proj), watch: new Stopwatch(), keyPaths: missing })).rejects.toThrow(SigningSetupError);
 		expect(published).toHaveLength(1);
-		await captureOutput(() => finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "agent", explicit: false }, request: request(), oc, history: withLocal(proj, undefined), watch: new Stopwatch(), keyPaths: paths(dir) }));
+		await captureOutput(() => finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "agent", explicit: false }, request: request(), oc, history: withLocal(proj), watch: new Stopwatch(), keyPaths: paths(dir) }));
 		expect(verifySigned(trust, JSON.parse(published[1]), JSON.parse(published[1]))).toBe("sig");
 	});
 	test("the dev-server never publishes to a prod-channel branch", async () => {
 		const { dir, proj, oc, published } = signedProject();
-		await expect(finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "dev-server/claude", explicit: true }, request: request(), oc, history: withLocal(proj, undefined), watch: new Stopwatch(), keyPaths: paths(dir) })).rejects.toThrow(/dev-server never publishes/);
+		await expect(finishRelease({ proj, mode: { kind: "publish" }, proposer: { name: "dev-server/claude", explicit: true }, request: request(), oc, history: withLocal(proj), watch: new Stopwatch(), keyPaths: paths(dir) })).rejects.toThrow(/dev-server never publishes/);
 		expect(published).toEqual([]);
 	});
 	test("approve: a prod proposal is signed at publish; missing keys fail before the y/N", async () => {
@@ -574,9 +557,9 @@ describe("prod-only signing in releases", () => {
 		// (the cloud test is recorded as skipped: this test is about signing; test/cloudtest.test.ts covers the gate)
 		const p = propose(proj, { ...request(), test: { skipped: "signing test", at: new Date().toISOString() } }, { name: "agent", explicit: false });
 		const early = scriptedInteraction({ answers: ["y"] });
-		await expect(approveProposal(proj, { proposal: p, status: "pending" }, { io: early, oc, noRegistry: true, keyPaths: paths(keyDir()) })).rejects.toThrow(SigningSetupError);
+		await expect(approveProposal(proj, { proposal: p, status: "pending" }, { io: early, oc, keyPaths: paths(keyDir()) })).rejects.toThrow(SigningSetupError);
 		expect(early.asked).toEqual([]);
-		await captureOutput(() => approveProposal(proj, { proposal: p, status: "pending" }, { io: scriptedInteraction({ answers: ["y"] }), oc, noRegistry: true, keyPaths: paths(dir) }));
+		await captureOutput(() => approveProposal(proj, { proposal: p, status: "pending" }, { io: scriptedInteraction({ answers: ["y"] }), oc, keyPaths: paths(dir) }));
 		const message = JSON.parse(published[0]);
 		expect(verifySigned(trust, message, message)).toBe("sig");
 		// the proposal itself never holds a signature
@@ -615,7 +598,7 @@ describe("promote: prod branches take only prod-channel artifacts", () => {
 		const proj = project({ approval: "all" });
 		const p = propose(proj, { kind: "promote", branch: "prod", branchChannel: "prod", artifact: { artifactId: "12b63b9-3fa91c", assetId: 5, channel: "dev", commit: "12b63b9", commitHash: "", dirty: false }, force: true, by: "me" }, { name: "agent", explicit: false });
 		const oc = { publishMessage: async () => {} } as unknown as OpenCloud;
-		await expect(approveProposal(proj, { proposal: p, status: "pending" }, { io: scriptedInteraction({ answers: ["y"] }), oc, noRegistry: true })).rejects.toThrow(/rebuild for prod/);
+		await expect(approveProposal(proj, { proposal: p, status: "pending" }, { io: scriptedInteraction({ answers: ["y"] }), oc })).rejects.toThrow(/rebuild for prod/);
 	});
 	test("promote <artifact> <branch> works when only the second argument is a known branch", () => {
 		const known = new Set(["prod", "dev"]);

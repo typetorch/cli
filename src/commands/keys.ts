@@ -29,10 +29,13 @@ import { interaction, NotInteractiveError, type Interaction } from "../interact.
 import { contentFromConfig, createKeyAsset, mergeKeys, publishRekey, REKEY_TOPIC, updateKeyAsset, type KeyAssetContent } from "../keyasset.ts";
 import { assertOutsideRepos, KeyFileError, keyFilePaths, newKeyFile, readKeyFile, writeKeyFile, type KeyRole } from "../keyfiles.ts";
 import { bold, dim, emitJson, info, isJson, Stopwatch, warn } from "../log.ts";
-import { branchChannel, strictest } from "../naming.ts";
+import { branchChannel } from "../naming.ts";
 import type { OpenCloud } from "../opencloud.ts";
 import { finishRelease, modeFor, type ReleaseRequest } from "./approve.ts";
-import { KEY_FILE_FLAGS, openCloud, project, readHistory, registryApi, warnRegistryFallback } from "./common.ts";
+import { KEY_FILE_FLAGS, noteRegistryFlags, openCloud, project, readHistory } from "./common.ts";
+import { loadSigner } from "../keyfiles.ts";
+import { readSettings } from "../settings.ts";
+import { changeSettings } from "./settings.ts";
 
 export const keysFlags = {
 	fallback: "boolean",
@@ -299,10 +302,12 @@ export async function rotateMain(ctx: KeysContext) {
 	info(`  key asset    ${asset.assetId}: PublicKeys = the new key; RevokedKeys = ${revokedKeys.length} key(s)${asset.revisionId ? `; revision ${asset.revisionId}` : ""}`);
 	info(`  rekey        ${hint.published ? `${REKEY_TOPIC} published: servers re-read the key asset now` : "not sent (servers re-read the key asset within 10 minutes)"}`);
 	info(`  typetorch.json  "signingPublicKeys" and "revokedKeys" updated (${proj.configPath}); commit it`);
-	// Heads signed by the revoked key are no longer valid once servers reload the key asset: re-sign the live ones.
+	// Heads signed by the revoked key are no longer valid once servers reload the key asset: re-sign the live ones, and
+	// the settings record (kernel 0.3.8, plans/20).
 	const resigned = await resignHeads(ctx);
+	const settings = await resignSettings(ctx);
 	if (isJson()) {
-		return emitJson({ status: "rotated", keyFile: path, publicKey: fresh.publicKey, revokedKeys, keyAsset: asset, rekey: hint, resigned, config: proj.configPath });
+		return emitJson({ status: "rotated", keyFile: path, publicKey: fresh.publicKey, revokedKeys, keyAsset: asset, rekey: hint, resigned, settings, config: proj.configPath });
 	}
 	info(dim("  no restart needed"));
 }
@@ -329,11 +334,9 @@ export interface ResignResult {
 export async function resignHeads(ctx: KeysContext): Promise<ResignResult[]> {
 	const { proj } = ctx;
 	const oc = deployClient(ctx);
-	const api = registryApi(oc, proj, ctx.noRegistry);
-	const history = await readHistory(proj, api, ctx.noRegistry ? "--no-registry" : "no deploy key");
-	if (!history.snapshot && api) warnRegistryFallback(history.unavailable ?? "unknown");
+	const history = await readHistory(proj);
 	const heads = [...history.heads.values()]
-		.filter((head) => strictest(branchChannel(proj.config, head.branch), history.snapshot?.value.channels[head.branch]) === "prod")
+		.filter((head) => branchChannel(proj.config, head.branch) === "prod")
 		.sort((a, b) => a.branch.localeCompare(b.branch));
 	if (heads.length === 0) {
 		info("  resign       no prod-channel heads to re-sign");
@@ -364,7 +367,7 @@ export async function resignHeads(ctx: KeysContext): Promise<ResignResult[]> {
 		};
 		try {
 			const { mode, proposer } = modeFor(proj, ctx.args, "prod", io);
-			const outcome = await finishRelease({ proj, mode, proposer, request, oc, api: history.snapshot ? api : undefined, history, watch: new Stopwatch(), noRegistry: ctx.noRegistry, keyPaths: ctx.paths, io });
+			const outcome = await finishRelease({ proj, mode, proposer, request, oc, history, watch: new Stopwatch(), keyPaths: ctx.paths, io });
 			if (outcome.kind === "published") {
 				results.push({ ...base, outcome: "published", seq: outcome.result.entry.seq });
 				info(`  resign       ${head.branch}: ${head.artifactId} (asset ${head.assetId}) #${head.seq} -> #${outcome.result.entry.seq}, signed with the current keys`);
@@ -380,10 +383,38 @@ export async function resignHeads(ctx: KeysContext): Promise<ResignResult[]> {
 	return results;
 }
 
+/**
+ * Kernel 0.3.8 (plans/20): re-signs the settings record with the current keys (same body, seq + 1), so servers whose
+ * key asset loaded (only `sig` counts there) keep trusting it after a rotation. No record: nothing to do. Failures are
+ * reported, not thrown (`typetorch keys resign` retries).
+ */
+export async function resignSettings(ctx: KeysContext): Promise<{ outcome: "resigned" | "none" | "failed"; seq?: number; error?: string }> {
+	const oc = deployClient(ctx);
+	if (!oc) {
+		warn("the settings record wasn't re-signed (no deploy key); run `typetorch keys resign` with one");
+		return { outcome: "failed", error: "no deploy key" };
+	}
+	try {
+		const read = await readSettings(oc, ctx.proj.config.universeId);
+		if (read.missing) {
+			info("  settings     no settings record to re-sign");
+			return { outcome: "none" };
+		}
+		const signer = loadSigner(ctx.proj, ctx.paths);
+		const result = await changeSettings({ proj: ctx.proj, oc, signer, what: "re-sign the settings", mutate: (body) => body, resign: true });
+		info(`  settings     re-signed with the current keys as #${result.seq}${result.pinged ? " (servers pinged)" : ""}`);
+		return { outcome: "resigned", seq: result.seq };
+	} catch (error) {
+		warn(`could not re-sign the settings record (${(error as Error).message}); run \`typetorch keys resign\` again`);
+		return { outcome: "failed", error: (error as Error).message };
+	}
+}
+
 export async function resignCommand(ctx: KeysContext) {
 	const results = await resignHeads(ctx);
-	if (isJson()) return emitJson({ resigned: results });
-	const failed = results.filter((r) => r.outcome === "failed").length;
+	const settings = await resignSettings(ctx);
+	if (isJson()) return emitJson({ resigned: results, settings });
+	const failed = results.filter((r) => r.outcome === "failed").length + (settings.outcome === "failed" ? 1 : 0);
 	if (failed) process.exitCode = 1;
 }
 
@@ -397,7 +428,7 @@ export async function keysCommand(args: ParsedArgs, deps: KeysDeps = {}) {
 		paths: keyFilePaths(proj, { keyFile: flagString(args, "key-file"), fallbackKeyFile: flagString(args, "fallback-key-file") }),
 		force: flagBool(args, "force"),
 		yes: flagBool(args, "yes"),
-		noRegistry: flagBool(args, "no-registry"),
+		noRegistry: (noteRegistryFlags(args), false),
 		moderationTimeout: flagInt(args, "moderation-timeout", 600),
 		deps,
 	};

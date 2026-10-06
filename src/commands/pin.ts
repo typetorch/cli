@@ -22,7 +22,7 @@ import { matchDeployment, type UploadRecord } from "../deployments.ts";
 import { gitInfo } from "../git.ts";
 import { interaction, NotInteractiveError, type Interaction } from "../interact.ts";
 import { bold, emitJson, info, isJson, yellow } from "../log.ts";
-import { branchChannel, branchNameError, strictest, type Channel } from "../naming.ts";
+import { branchChannel, branchNameError, type Channel } from "../naming.ts";
 import { encodePinMessage, PIN_TOPIC, pinMessage, type OpenCloud, type PinMessage } from "../opencloud.ts";
 import { JOB_ID_PATTERN, type DualSigner, type PinFields } from "../signing.ts";
 import { modeFor } from "./approve.ts";
@@ -32,12 +32,11 @@ import {
 	openCloud,
 	project,
 	projectStateDir,
+	noteRegistryFlags,
 	readHistory,
-	registryApi,
 	signerFor,
 	signingKeyPaths,
 	signingStatus,
-	warnRegistryFallback,
 	type History,
 } from "./common.ts";
 import { SIGNATURE_PLACEHOLDER } from "./release.ts";
@@ -171,12 +170,10 @@ export async function pinCommand(args: ParsedArgs, deps: PinDeps = {}) {
 	const target = pinTarget({ unpin, servers: flagString(args, "servers"), pct: flagString(args, "pct"), all: flagBool(args, "all") });
 	const by = pinBy(proj, flagString(args, "by"));
 
-	const noRegistry = flagBool(args, "no-registry");
+	noteRegistryFlags(args); // CLI 0.8: --no-registry does nothing
 	const oc = deps.oc ?? openCloud("deploy", true);
-	const api = registryApi(oc, proj, noRegistry);
-	const history = await readHistory(proj, api, noRegistry ? "--no-registry" : "no API key");
-	if (!history.snapshot && api) warnRegistryFallback(history.unavailable ?? "unknown");
-	const channel = strictest(branchChannel(proj.config, branch), history.snapshot?.value.channels[branch]);
+	const history = await readHistory(proj);
+	const channel = branchChannel(proj.config, branch);
 
 	let artifact: Candidate | undefined;
 	if (wanted) {

@@ -4,8 +4,7 @@
  *
  * Sources, all read through Open Cloud with the deploy key (API keys CAN have these scopes):
  *   1. the state dir's deployments.jsonl (this machine);
- *   2. the ConfigService registry, when readable (its read scope, universe:read, isn't grantable to API keys today, so
- *      in practice it isn't);
+ *   2. (CLI 0.7: the ConfigService registry, never readable with an API key; gone in CLI 0.8);
  *   3. the game's DataStore "TypeTorch" (Open Cloud DataStores v2, `universe-datastores.objects:read`), written by the
  *      kernel's live servers: `heads` ({ [branch]: { seq, ... } }) and `deployments` ({ list: [{ seq, ... }] }). A
  *      server that hears a deploy message records it, so these lag only while NO server runs in the universe;
@@ -136,7 +135,7 @@ export interface SeqDecision {
 }
 
 /**
- * The seq for a release: `localNext` (log + registry) and the shared sources, claimed through the counter when the key
+ * The seq for a release: `localNext` (the local log) and the shared sources, claimed through the counter when the key
  * may write it. `oc` undefined (tests, dry runs without a key): local only.
  */
 export async function nextSharedSeq(oc: Requester | undefined, universeId: number, localNext: number, read?: SharedSeq): Promise<SeqDecision> {

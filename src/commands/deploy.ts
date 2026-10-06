@@ -1,9 +1,8 @@
 /**
  * `typetorch deploy`: clean build (with the Notes attribute) -> upload (new Model asset) -> moderation = Approved ->
  * "uploaded" record -> then, by the approval policy (approve.ts): a proposal for `typetorch approve` (agents, the
- * dev-server), the y/N right here (a person at a terminal), or registry -> deploy message -> "published"
- * record. The registry is read in parallel with the build so a conflict (or a missing scope) is known before anything
- * is uploaded. A prod-channel deploy that will be published here loads both signing keys before the upload, so a
+ * dev-server), the y/N right here (a person at a terminal), or deploy message -> "published" record. The shared seq
+ * sources are read in parallel with the build. A prod-channel deploy that will be published here loads both signing keys before the upload, so a
  * missing key fails before anything leaves the machine.
  */
 import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
@@ -12,9 +11,8 @@ import { assertNoIdCollision, buildPayload, payloadBytes, readBuiltPayload, type
 import { appendUpload } from "../deployments.ts";
 import { gitInfo } from "../git.ts";
 import { bold, dim, emitJson, formatBytes, formatSeconds, formatTimings, info, isJson, Stopwatch, warn } from "../log.ts";
-import { branchChannel, branchNameError, formatSources, strictest, type Channel } from "../naming.ts";
+import { branchChannel, branchNameError, formatSources, type Channel } from "../naming.ts";
 import { DEPLOY_TOPIC } from "../opencloud.ts";
-import { assertNoForeignDraft, tryReadRegistry, type RegistrySnapshot } from "../registry.ts";
 import { keepPayload } from "../payloads.ts";
 import { assetNaming, fixCensoredName, uploadPayload } from "../upload.ts";
 import { finishRelease, modeFor, reportProposal, waitAfterRelease } from "./approve.ts";
@@ -31,17 +29,16 @@ import {
 	channelFlag,
 	describeSigning,
 	KEY_FILE_FLAGS,
+	noteRegistryFlags,
 	openCloud,
 	project,
 	projectStateDir,
-	registryApi,
 	signerFor,
 	signingKeyPaths,
 	signingStatus,
-	warnRegistryFallback,
 	withLocal,
 } from "./common.ts";
-import { makeEntry, messageFor, registryMessage } from "./release.ts";
+import { makeEntry, messageFor } from "./release.ts";
 
 export const deployFlags = {
 	branch: "string",
@@ -113,7 +110,7 @@ export async function deployCommand(args: ParsedArgs) {
 	const testFlag = flagBool(args, "test");
 	const dryRun = flagBool(args, "dry-run");
 	const force = flagBool(args, "force");
-	const noRegistry = flagBool(args, "no-registry");
+	noteRegistryFlags(args); // CLI 0.8: --no-registry does nothing (no ConfigService registry)
 	const note = flagString(args, "message");
 	const branchFlag = flagString(args, "branch");
 	const channelOverride = channelFlag(args);
@@ -122,25 +119,13 @@ export async function deployCommand(args: ParsedArgs) {
 
 	const builtBefore = noBuild ? readBuiltPayload(proj.root) : undefined;
 
-	// One client per job (each with its own key when configured): uploads, and messaging + registry.
+	// One client per job (each with its own key when configured): uploads, and messaging + DataStores.
 	const assets = openCloud("assets", dryRun);
 	const deployer = openCloud("deploy", dryRun);
-	const api = registryApi(deployer, proj, noRegistry);
 	const watch = new Stopwatch();
 
-	// The registry read runs while we build; the build awaits it (after rbxtsc) for the Notes' previous head.
-	const registryRead: Promise<{ snapshot?: RegistrySnapshot; unavailable?: string; error?: unknown }> = api
-		? tryReadRegistry(api).catch((error) => ({ error }))
-		: Promise.resolve({ unavailable: noRegistry ? "--no-registry" : "no API key (dry run)" });
 	// The shared seq sources (seqstore.ts: the kernel's DataStore heads and the CLI's counter), read while we build too.
 	const sharedRead: Promise<SharedSeq | undefined> = deployer ? readSharedSeq(deployer, proj.config.universeId) : Promise.resolve(undefined);
-	const readRegistryOrThrow = async () => {
-		const read = await registryRead;
-		if (read.error) {
-			throw new Error(`could not read the registry: ${(read.error as Error).message ?? read.error} (pass --no-registry to deploy without it)`);
-		}
-		return read;
-	};
 
 	let meta: PayloadMeta;
 	let bytes: Uint8Array;
@@ -153,10 +138,7 @@ export async function deployCommand(args: ParsedArgs) {
 		by = gitInfo(proj.root).userName;
 		info(`using ${describeBuild(meta)}`);
 	} else {
-		const notes = async (branch: string) => {
-			const read = await readRegistryOrThrow();
-			return { message: note, previous: withLocal(proj, read.snapshot, read.unavailable).heads.get(branch) };
-		};
+		const notes = async (branch: string) => ({ message: note, previous: withLocal(proj).heads.get(branch) });
 		const built = await watch.stage("build", () => buildPayload(proj, { branch: branchFlag, channel: channelOverride, clean: true, notes }));
 		meta = built.meta;
 		by = built.target.git.userName;
@@ -169,24 +151,20 @@ export async function deployCommand(args: ParsedArgs) {
 	if (meta.health) info(dim(`  health      ${describeHealth(meta.health)}`));
 	const branch = branchFlag ?? meta.branch;
 
-	const read = await readRegistryOrThrow();
-	const snapshot = read.snapshot;
 	// CI: a machine without the deployment log must not guess a seq (servers ignore a seq below the one they applied).
 	const shared = await sharedRead;
 	const requireShared = flagBool(args, "require-shared-seq") || flagBool(args, "require-registry");
-	if (flagBool(args, "require-registry")) warn("--require-registry is now --require-shared-seq (the registry or the DataStore seq)");
-	if (requireShared && !snapshot && !shared?.readable) {
+	if (flagBool(args, "require-registry")) warn("--require-registry is now --require-shared-seq (the DataStore seq)");
+	if (requireShared && !shared?.readable) {
 		throw new Error(
-			`--require-shared-seq: no shared seq source is readable, so this machine can't know the next seq (servers ignore a seq at or below the one they applied). Give the deploy key ${DS_READ_SCOPE} (and ${DS_WRITE_SCOPES} to claim seqs atomically). DataStore: ${shared?.error ?? "no deploy key"}; registry: ${read.unavailable ?? "unknown"}`,
+			`--require-shared-seq: no shared seq source is readable, so this machine can't know the next seq (servers ignore a seq at or below the one they applied). Give the deploy key ${DS_READ_SCOPE} (and ${DS_WRITE_SCOPES} to claim seqs atomically). DataStore: ${shared?.error ?? "no deploy key"}`,
 		);
 	}
-	if (!snapshot && api && !shared?.readable) warnRegistryFallback(read.unavailable ?? "unknown");
-	if (snapshot) assertNoForeignDraft(snapshot, force);
-	const history = withLocal(proj, snapshot, read.unavailable);
+	const history = withLocal(proj);
 	// Two payloads with the same id but other bytes (a hash6 collision) must not both go out.
 	assertNoIdCollision(meta, [...history.rows, ...history.uploads]);
 
-	const targetChannel = strictest(branchChannel(proj.config, branch), snapshot?.value.channels[branch]);
+	const targetChannel = branchChannel(proj.config, branch);
 	checkChannelGuard({ branch, branchChannel: targetChannel, artifactChannel: meta.channel, dirty: meta.dirty, force });
 	checkRollout(branch, targetChannel, rollout);
 	const wait = waitSeconds(args, targetChannel);
@@ -212,7 +190,7 @@ export async function deployCommand(args: ParsedArgs) {
 	const keyPaths = signingKeyPaths(proj, args);
 	if (dryRun) {
 		const ending = modeFor(proj, args, targetChannel).mode.kind;
-		const entry = makeEntry({ action: "deploy", branch, artifact: { ...artifact, assetId: 0 }, by }, snapshot?.value, history.local, (shared?.highest ?? 0) + 1);
+		const entry = makeEntry({ action: "deploy", branch, artifact: { ...artifact, assetId: 0 }, by }, undefined, history.local, (shared?.highest ?? 0) + 1);
 		const data = messageFor(entry, undefined, { placeholders: targetChannel === "prod", rollout });
 		const signing = signingStatus(proj, targetChannel, keyPaths);
 		const test = gatePolicy({ kind: "deploy", branchChannel: targetChannel, test: testFlag, skipTest });
@@ -233,9 +211,6 @@ export async function deployCommand(args: ParsedArgs) {
 			autoRollback: wait !== undefined ? { failedPct: rollback.threshold ?? null, source: rollback.source } : null,
 			health: meta.health ?? null,
 			signing,
-			registry: snapshot
-				? { readable: true, configVersion: snapshot.configVersion, exists: snapshot.exists, message: registryMessage("deploy", branch, meta.artifactId, note) }
-				: { readable: false, reason: read.unavailable },
 			seq: entry.seq,
 			sharedSeq: shared ?? null,
 			from: entry.fromArtifactId ? { artifactId: entry.fromArtifactId, assetId: entry.fromAssetId } : undefined,
@@ -257,9 +232,6 @@ export async function deployCommand(args: ParsedArgs) {
 		for (const line of changes) info(`  change       ${line}`);
 		info(`  assets       ${meta.assets?.placeVersion !== undefined ? `${meta.assets.count} hot asset(s) from place v${meta.assets.placeVersion}` : "none (no typetorch.assets.lock.json)"}`);
 		info(`  creator      ${JSON.stringify(proj.config.creator)}`);
-		info(
-			`  registry     ${snapshot ? `readable (config v${snapshot.configVersion ?? "?"}${snapshot.exists ? "" : ", no TypeTorch key yet"}); would publish "${plan.registry.message}"` : `not used (${read.unavailable})`}`,
-		);
 		info(`  seq          #${entry.seq} (at least; claimed when published). Shared: ${describeShared(shared)}`);
 		if (entry.fromArtifactId) info(`  replaces     ${entry.fromArtifactId} (asset ${entry.fromAssetId})`);
 		info(`  message      ${DEPLOY_TOPIC} ${JSON.stringify({ ...data, a: "<assetId>" })}`);
@@ -342,10 +314,8 @@ export async function deployCommand(args: ParsedArgs) {
 			...(rollout !== undefined ? { rollout } : {}),
 		},
 		oc: deployer!,
-		api: snapshot ? api : undefined,
 		history,
 		watch,
-		noRegistry,
 		assetName: displayName,
 		extra: { sha256: meta.sha256, ...(meta.protocolHash ? { protocolHash: meta.protocolHash } : {}) },
 		keyPaths,

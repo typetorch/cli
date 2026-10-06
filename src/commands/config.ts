@@ -1,37 +1,15 @@
-/** `typetorch config push`: copy typetorch.json's project settings into the registry value. */
-import { flagBool, UsageError, type ParsedArgs } from "../args.ts";
-import { jsonEqual } from "../json.ts";
-import { bold, emitJson, info, isJson } from "../log.ts";
-import { applyProjectConfig, RegistryApi, writeRegistry, type RegistryValue } from "../registry.ts";
-import { openCloud, project } from "./common.ts";
+/**
+ * `typetorch config push`: gone in CLI 0.8. It wrote the ConfigService registry key, which needed universe:read (never
+ * grantable to API keys). Kernel 0.3.8 reads one signed settings record instead (plans/20): `typetorch settings push`
+ * writes defaultBranch, channels and dev access from typetorch.json. The command stays so scripts get a clear message.
+ */
+import { UsageError, type ParsedArgs } from "../args.ts";
 
 export const configFlags = { "dry-run": "boolean", force: "boolean" } as const;
 
-const FIELDS = ["defaultBranch", "channels", "members", "revoked", "devBadgeId"] as const;
-
-export function configDiff(before: RegistryValue, after: RegistryValue): string[] {
-	return FIELDS.filter((field) => !jsonEqual(before[field], after[field])).map(
-		(field) => `${field}: ${JSON.stringify(before[field])} -> ${JSON.stringify(after[field])}`,
-	);
-}
-
 export async function configCommand(args: ParsedArgs) {
 	const sub = args.positionals[0];
-	if (sub !== "push") throw new UsageError(`unknown config subcommand "${sub ?? ""}" (only "push")`);
-	const proj = project(args);
-	const dryRun = flagBool(args, "dry-run");
-	const api = new RegistryApi(openCloud("deploy")!, proj.config.universeId);
-	const result = await writeRegistry(
-		api,
-		{ message: `typetorch config push ${proj.config.project}`, force: flagBool(args, "force"), dryRun },
-		(current) => applyProjectConfig(current, proj.config),
+	throw new UsageError(
+		`\`typetorch config${sub ? ` ${sub}` : ""}\` is gone (CLI 0.8): kernel 0.3.8 reads the signed settings record. Run \`typetorch settings push\` (defaultBranch, channels, dev access from typetorch.json)`,
 	);
-	const diff = configDiff(result.before, result.after);
-	if (isJson()) return emitJson({ ...result, diff });
-	if (!result.changed) {
-		info("registry already matches typetorch.json");
-		return;
-	}
-	info(bold(dryRun ? "dry run: would publish" : `published${result.configVersion !== undefined ? ` (config v${result.configVersion})` : ""}`));
-	for (const line of diff.length > 0 ? diff : ["(creates the TypeTorch key)"]) info(`  ${line}`);
 }

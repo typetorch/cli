@@ -171,7 +171,6 @@ describe("wiring", () => {
 		expect(describeRequest("GET", "/assets/v1/assets/123456?readMask=moderationResult")).toBe("asset 123456");
 		expect(describeRequest("GET", "/assets/v1/assets/102504202680447/versions?maxPageSize=50")).toBe("place versions");
 		expect(describeRequest("POST", "/assets/v1/assets")).toBe("upload asset");
-		expect(describeRequest("PATCH", "/creator-configs-public-api/v1/configs/universes/1/repositories/InExperienceConfig/draft")).toBe("registry (ConfigService)");
 		expect(describeRequest("DELETE", "/x/v1/things/123456")).toBe("DELETE /x/v1/things/…");
 	});
 	test("unicode detection: braille except on legacy Windows consoles", () => {

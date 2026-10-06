@@ -229,19 +229,7 @@ describe("commands", () => {
 		expect(() => parseArgs(["--level", "loud"], alertsFlags)).not.toThrow();
 		await expect(inProject(proj, () => alertsCommand(parseArgs(["--level", "loud"], alertsFlags), { fleet }))).rejects.toThrow(/--level/);
 	});
-	test("fleet setup: PATCH the draft with only TypeTorchFleet, publish, never read; typetorch.json fleet.url; the token never printed", async () => {
-		const proj = project();
-		useSettings(new Settings({ startDir: proj.root, env: { TYPETORCH_FLEET_INGEST_TOKEN: "ingest-secret-1234567890" } }));
-		const calls: { method: string; path: string; json?: any }[] = [];
-		const oc = { call: async (method: string, path: string, options: { json?: unknown } = {}) => (calls.push({ method, path, json: options.json }), method === "PATCH" ? { draftHash: "h1" } : { configVersion: 7 }) };
-		const text = await inProject(proj, () => capture(() => fleetCommand(parseArgs(["setup", "--url", "https://fleet.example"], fleetFlags), { oc })));
-		expect(calls.map((c) => `${c.method} ${c.path.replace(/.*repositories/, "")}`)).toEqual(["PATCH /InExperienceConfig/draft", "POST /InExperienceConfig/publish"]);
-		expect(calls[0].json).toEqual({ entries: { TypeTorchFleet: { url: "https://fleet.example", token: "ingest-secret-1234567890" } } });
-		expect(calls[1].json).toMatchObject({ draftHash: "h1", deploymentStrategy: "Immediate" });
-		expect(text).not.toContain("ingest-secret");
-		expect(JSON.parse(readFileSync(proj.configPath, "utf8")).fleet).toEqual({ url: "https://fleet.example" });
-		await expect(inProject(proj, () => fleetCommand(parseArgs(["setup", "--url", "http://fleet.example"], fleetFlags), { oc }))).rejects.toThrow(/https/);
-	});
+	// fleet setup: test/settings.test.ts (it writes the signed settings record since CLI 0.8).
 });
 
 describe("--wait", () => {

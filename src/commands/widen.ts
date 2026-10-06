@@ -11,12 +11,12 @@ import { join } from "node:path";
 import { gitInfo } from "../git.ts";
 import { interaction, NotInteractiveError, type Interaction } from "../interact.ts";
 import { bold, dim, emitJson, info, isJson } from "../log.ts";
-import { branchChannel, branchFromGit, branchNameError, strictest } from "../naming.ts";
+import { branchChannel, branchFromGit, branchNameError } from "../naming.ts";
 import { DEPLOY_TOPIC, deployMessage, encodeDeployMessage, type OpenCloud } from "../opencloud.ts";
 import { appendRollout, checkRollout, parseWiden, ROLLOUTS_LOG, type RolloutRecord } from "../rollout.ts";
 import { reportDurableHead, storeDurableHead } from "../durablehead.ts";
 import { modeFor } from "./approve.ts";
-import { openCloud, project, projectStateDir, readHistory, registryApi, warnRegistryFallback } from "./common.ts";
+import { noteRegistryFlags, openCloud, project, projectStateDir, readHistory } from "./common.ts";
 import { fleetFor, waitForFleet, waitSeconds } from "./fleet.ts";
 
 /** The newest rollout % recorded for (branch, seq): a widen, else the deploy's own; undefined = every server. */
@@ -54,12 +54,10 @@ export async function widenCommand(args: ParsedArgs, deps: WidenDeps = {}) {
 	const branch = flagString(args, "branch") ?? (git.gitBranch ? branchFromGit(git.gitBranch, proj.config.branches) : undefined);
 	if (!branch) throw new UsageError("which branch? pass --branch <name>");
 	if (branchNameError(branch)) throw new UsageError(branchNameError(branch)!);
-	const noRegistry = flagBool(args, "no-registry");
+	noteRegistryFlags(args); // CLI 0.8: --no-registry does nothing
 	const oc = deps.oc ?? openCloud("deploy", true);
-	const api = registryApi(oc, proj, noRegistry);
-	const history = await readHistory(proj, api, noRegistry ? "--no-registry" : "no API key");
-	if (!history.snapshot && api) warnRegistryFallback(history.unavailable ?? "unknown");
-	const channel = strictest(branchChannel(proj.config, branch), history.snapshot?.value.channels[branch]);
+	const history = await readHistory(proj);
+	const channel = branchChannel(proj.config, branch);
 	checkRollout(branch, channel, pct, "--widen");
 	const wait = waitSeconds(args, channel);
 	const head = history.heads.get(branch);

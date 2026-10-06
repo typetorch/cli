@@ -246,11 +246,11 @@ describe("approve and the gate", () => {
 		const p = propose(proj, request({ branch: "staging" }), { name: "agent", explicit: false });
 		const { oc, published } = fakeOc();
 		const io = scriptedInteraction({ answers: ["y"] });
-		await expect(approveProposal(proj, { proposal: p, status: "pending" }, { io, oc, noRegistry: true, test: true, gate: { runner: async () => fakeRun(false) } })).rejects.toThrow(GateFailedError);
+		await expect(approveProposal(proj, { proposal: p, status: "pending" }, { io, oc, test: true, gate: { runner: async () => fakeRun(false) } })).rejects.toThrow(GateFailedError);
 		expect(io.asked).toEqual([]); // no y/N after a failed test
 		expect(published).toEqual([]);
 		expect(readProposals(join(proj.root, ".typetorch"))[0]).toMatchObject({ status: "pending", lastError: expect.stringContaining("cloud test") });
-		await approveProposal(proj, { proposal: p, status: "pending" }, { io, oc, noRegistry: true, test: true, gate: { runner: async () => fakeRun(true) } });
+		await approveProposal(proj, { proposal: p, status: "pending" }, { io, oc, test: true, gate: { runner: async () => fakeRun(true) } });
 		expect(published).toHaveLength(1);
 		expect(readLocalLog(join(proj.root, ".typetorch"))[0].test).toMatchObject({ ok: true });
 	});
@@ -259,7 +259,7 @@ describe("approve and the gate", () => {
 		const passed = propose(proj, request({ test: { ok: true, at: new Date().toISOString(), seconds: 9 } }), { name: "agent", explicit: false });
 		const { oc, published } = fakeOc();
 		const never = { runner: async (): Promise<GateRun> => { throw new Error("must not run"); } };
-		await approveProposal(proj, { proposal: passed, status: "pending" }, { io: scriptedInteraction({ answers: ["y"] }), oc, noRegistry: true, gate: never });
+		await approveProposal(proj, { proposal: passed, status: "pending" }, { io: scriptedInteraction({ answers: ["y"] }), oc, gate: never });
 		expect(published).toHaveLength(1);
 	});
 });

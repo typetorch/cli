@@ -104,7 +104,7 @@ describe("kernel deploy: signing stamps and BootstrapHeads (plans/03)", () => {
 		appendLocalLog(state, row(3, "prod", "prod"));
 		appendLocalLog(state, row(4, "staging", "prod"));
 		const proj = { root, config: { universeId: 42, defaultBranch: "prod", channels: { prod: "prod", staging: "prod" }, branches: {} } } as unknown as Project;
-		const heads = bootstrapHeads(proj, withLocal(proj, undefined));
+		const heads = bootstrapHeads(proj, withLocal(proj));
 		expect(heads).toEqual({ prod: { a: 900000003, s: 3, i: "12b63b9-000003" }, staging: { a: 900000004, s: 4, i: "12b63b9-000004" } });
 		const json = JSON.stringify(heads);
 		expect(json).toBe('{"prod":{"a":900000003,"s":3,"i":"12b63b9-000003"},"staging":{"a":900000004,"s":4,"i":"12b63b9-000004"}}');
