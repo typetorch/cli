@@ -133,7 +133,8 @@ export async function publishRekey(oc: OpenCloud, universeId: number, t = Date.n
 /**
  * Luau for a Luau Execution task (doctor): reads the kernel's KeyAssetId / FallbackPublicKey / KernelVersion
  * attributes in the place, and loads the key asset the way servers do. Also reports ServerStorage.TypeTorchDev
- * (`devFolder`: the Studio local payload of kernel 0.3.1, which a place shouldn't ship). Returns one table.
+ * (`devFolder`: the Studio local payload of kernel 0.3.1, which a place shouldn't ship) and ServerStorage.TypeTorchBackup
+ * (`backup`: kernel 0.3.6's backup build). Returns one table.
  */
 export function placeKeysScript(keyAssetId: number | undefined): string {
 	return `
@@ -141,6 +142,24 @@ local result = {}
 local dev = game:GetService("ServerStorage"):FindFirstChild("TypeTorchDev")
 if dev then
 	result.devFolder = { payload = dev:FindFirstChild("Payload") ~= nil, descendants = #dev:GetDescendants() }
+end
+-- Kernel 0.3.6: the backup build kernel deploy bakes in (artifact, seq, branch, channel, when, ModuleScripts).
+local backup = game:GetService("ServerStorage"):FindFirstChild("TypeTorchBackup")
+if backup then
+	local modules = 0
+	for _, descendant in backup:GetDescendants() do
+		if descendant:IsA("ModuleScript") then
+			modules += 1
+		end
+	end
+	result.backup = {
+		artifactId = backup:GetAttribute("BackupArtifactId") or backup:GetAttribute("ArtifactId"),
+		seq = backup:GetAttribute("BackupSeq"),
+		branch = backup:GetAttribute("BackupBranch"),
+		channel = backup:GetAttribute("BackupChannel") or backup:GetAttribute("Channel"),
+		at = backup:GetAttribute("BackupAt"),
+		modules = modules,
+	}
 end
 local slot = game:GetService("ServerScriptService"):FindFirstChild("TypeTorchKernel")
 if slot then

@@ -172,13 +172,17 @@ ${WAIT_USAGE}`,
 		summary: "kernel deploy: patch the kernel into the live place (backup, verify, y/N); kernel restore <file>",
 		usage: `typetorch kernel deploy [--patch] [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>]
                         [--engine splice|lune] [--kernel <dir>] [--allow-dirty] [--allow-untagged] [--fallback-key-file <path>]
-typetorch kernel deploy --replace-place [--dry-run] [--yes]      (template/test place only: wipes Studio content)
+                        [--no-backup]
+typetorch kernel deploy --replace-place [--dry-run] [--yes] [--no-backup]      (template/test place only: wipes Studio content)
 typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
 
   1. lune run scripts/check.luau in the kernel dir  2. version (package.json = Constants.luau) + content hash, printed;
   a git checkout must be clean and tagged v<version>  3. rojo build <kernel>/place.project.json -> .typetorch/place.rbxl
   with KernelVersion/KernelHash/KernelCommit, KeyAssetId + FallbackPublicKey (typetorch.json; publishing refuses
-  without them) and BootstrapHeads on ServerScriptService.TypeTorchKernel.
+  without them) and BootstrapHeads on ServerScriptService.TypeTorchKernel. Kernel 0.3.6: the prod head's payload (kept
+  in <state dir>/payloads/<artifactId>.rbxm by every upload; API keys can't download assets) becomes the backup build,
+  ServerStorage.TypeTorchBackup (a kernel slot, refreshed by every kernel deploy, both modes); servers run it only when
+  nothing else can run. No kept payload: the place keeps its backup, with a warning. --no-backup skips it.
   4. Patch (default): download the place's newest version (it must be published; --base published|latest|<n>),
   back it up to .typetorch/place-backups/<placeId>-v<n>.rbxl, replace ONLY the kernel slots (the TypeTorch* children
   of services in place.project.json) and its service settings (LoadStringEnabled, HttpEnabled), verify (binary + Lune:

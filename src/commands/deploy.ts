@@ -14,6 +14,7 @@ import { bold, dim, emitJson, formatBytes, formatSeconds, formatTimings, info, i
 import { branchChannel, branchNameError, formatSources, strictest, type Channel } from "../naming.ts";
 import { DEPLOY_TOPIC } from "../opencloud.ts";
 import { assertNoForeignDraft, tryReadRegistry, type RegistrySnapshot } from "../registry.ts";
+import { keepPayload } from "../payloads.ts";
 import { assetNaming, fixCensoredName, uploadPayload } from "../upload.ts";
 import { finishRelease, modeFor, reportProposal, waitAfterRelease } from "./approve.ts";
 import { gatePolicy, skipReason } from "../cloudtest.ts";
@@ -265,7 +266,10 @@ export async function deployCommand(args: ParsedArgs) {
 		moderationTimeout: flagInt(args, "moderation-timeout", 600),
 		onStage: (stage, s, detail) => info(`  ${stage.padEnd(10)}  ${formatSeconds(s)}  ${detail}`),
 		// The "uploaded" record, before anything is published: a failed publish can be finished with `promote`.
-		onUploaded: ({ assetId, moderation }) =>
+		onUploaded: ({ assetId, moderation }) => {
+			// Kernel 0.3.6: the exact bytes stay in <state dir>/payloads (API keys can't download assets), so `kernel deploy`
+			// can bake the prod head's payload into the place as the backup build.
+			keepPayload(stateDir, meta.artifactId, bytes);
 			appendUpload(stateDir, {
 				artifactId: meta.artifactId,
 				assetId,
@@ -286,7 +290,8 @@ export async function deployCommand(args: ParsedArgs) {
 				universeId: proj.config.universeId,
 				project: proj.config.project,
 				by,
-			}),
+			});
+		},
 	});
 	watch.set("upload", upload.uploadSeconds);
 	watch.set("moderation", upload.moderationSeconds);

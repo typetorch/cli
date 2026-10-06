@@ -14,6 +14,11 @@
  *      {"<branch>":{"a":assetId,"s":seq,"i":"artifactId"}}, from the registry (when readable) and the local log. The
  *      kernel trusts exactly those heads unsigned (heads stored before signing have no sig); anything newer must be
  *      signed (plans/03 "Bootstrap heads").
+ *      Kernel 0.3.6 (never an empty server): the BACKUP BUILD. The prod head's payload, kept locally at upload
+ *      (payloads.ts: `<state dir>/payloads/<artifactId>.rbxm`), stamped with BackupArtifactId/Seq/Branch/Channel/At,
+ *      goes in as `ServerStorage.TypeTorchBackup`: a slot of the stamped project, so the patch replaces it (refreshed by
+ *      every kernel deploy) and `--replace-place` ships it too. Without a kept payload the slot isn't declared: the
+ *      place keeps the backup it has, with a warning (`doctor` shows its artifact and age). `--no-backup` skips it.
  *   4. Publish, in one of two modes:
  *      - PATCH (default, `--patch`; plans/13 "Kernel deploy = patch, not replace", spike S12): download the place's
  *        current version (`--place-file`, a copy downloaded in Studio; or Open Cloud Asset Delivery, whose scope
@@ -46,6 +51,7 @@ import { capture, query, run } from "../proc.ts";
 import { branchChannel, strictest } from "../naming.ts";
 import { RbxmError } from "../rbxm.ts";
 import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, readHistory, registryApi, signingKeyPaths, warnRegistryFallback, type History } from "./common.ts";
+import { addBackupToProject, BACKUP_FILE, BACKUP_SLOT, BackupError, backupHead, backupRbxm, findKeptPayload, PAYLOADS_DIR, type BackupInfo } from "../payloads.ts";
 
 export const kernelFlags = {
 	kernel: "string",
@@ -61,6 +67,8 @@ export const kernelFlags = {
 	"allow-untagged": "boolean",
 	"fallback-key-file": KEY_FILE_FLAGS["fallback-key-file"],
 	"no-registry": "boolean",
+	/** Kernel 0.3.6: don't bake the backup build (patch mode keeps the place's current one). */
+	"no-backup": "boolean",
 } as const;
 
 /** One bootstrap head: what the kernel trusts unsigned for that branch (plans/03 "Bootstrap heads"). */
@@ -293,6 +301,8 @@ interface PreparedKernel {
 	bytes: Uint8Array;
 	watch: Stopwatch;
 	where: string;
+	/** Kernel 0.3.6: the backup build baked into the place (null: none this time). */
+	backup: BackupInfo | null;
 }
 
 /** Steps 1-3: check, identify, build the stamped kernel place (.typetorch/place.rbxl). */
@@ -345,7 +355,16 @@ async function prepareKernel(args: ParsedArgs): Promise<PreparedKernel> {
 	info(`  heads    BootstrapHeads ${listed.length ? listed.join(", ") : "{} (no prod-channel heads yet)"}  (${history.snapshot ? "registry + local log" : "local log only: deploys made from another machine are missing"})`);
 	mkdirSync(join(proj.root, OUT_DIR), { recursive: true });
 	const placeProject = parseJsonc(readFileSync(join(kernelDir, "place.project.json"), "utf8"));
-	const { project: stamped, stamped: didStamp } = stampKernelProject(placeProject, kernelDir, attributes);
+	const stampedKernel = stampKernelProject(placeProject, kernelDir, attributes);
+	// Kernel 0.3.6: the prod head's kept payload becomes ServerStorage.TypeTorchBackup (a kernel slot, refreshed by
+	// every kernel deploy). Without one the place keeps the backup it has.
+	const backup = flagBool(args, "no-backup") ? { skipped: "--no-backup" } : prepareBackup(proj, history);
+	if (backup.info) {
+		info(`  backup   ${backup.info.artifactId} (#${backup.info.seq}, ${backup.info.branch}) from ${relative(proj.root, backup.source!).replace(/\\/g, "/")} -> ServerStorage.${BACKUP_SLOT.name}`);
+	} else {
+		warn(`no backup build baked: ${backup.skipped}. ${backup.skipped === "--no-backup" ? "" : "The place keeps the backup it has (doctor shows its age); "}a server that can load nothing else then has no backup and moves its players to another server`);
+	}
+	const { project: stamped, stamped: didStamp } = backup.model ? { project: addBackupToProject(stampedKernel.project, backup.model), stamped: stampedKernel.stamped } : stampedKernel;
 	if (!didStamp) warn(`place.project.json has no ${KERNEL_SLOT.join(".")}; the kernel identity attributes were not stamped`);
 	const genPath = join(proj.root, PLACE_GEN_PROJECT);
 	writeFileSync(genPath, JSON.stringify(stamped, null, "\t"));
@@ -356,7 +375,37 @@ async function prepareKernel(args: ParsedArgs): Promise<PreparedKernel> {
 	}
 	const bytes = new Uint8Array(readFileSync(join(proj.root, PLACE_FILE)));
 	info(`  build    ${formatSeconds(watch.timings.build)}  ${relative(proj.root, join(kernelDir, "place.project.json"))} -> ${PLACE_FILE}  ${formatBytes(bytes.length)}`);
-	return { proj, kernelDir, identity, signing, heads, stamped, bytes, watch, where };
+	return { proj, kernelDir, identity, signing, heads, stamped, bytes, watch, where, backup: backup.info ?? null };
+}
+
+/**
+ * Kernel 0.3.6: the backup build for the place. The prod head (the default branch's, else the newest prod-channel head)
+ * whose payload this machine kept (`<state dir>/payloads/<artifactId>.rbxm`, written at upload), stamped with the
+ * Backup* attributes into `.typetorch/backup.rbxm`. `skipped` says why there is none.
+ */
+export function prepareBackup(
+	proj: Pick<Project, "root" | "config">,
+	history: Pick<History, "heads" | "snapshot">,
+	options: { stateDir?: string; now?: Date } = {},
+): { info?: BackupInfo; model?: string; source?: string; skipped?: string } {
+	const head = backupHead(proj.config, history.heads, history.snapshot?.value.channels);
+	if (!head) return { skipped: "no prod-channel head is known on this machine (deploy prod first)" };
+	const stateDir = options.stateDir ?? projectStateDir(proj as Project);
+	const source = findKeptPayload(stateDir, head.artifactId);
+	if (!source) {
+		return { skipped: `the prod head ${head.artifactId} (#${head.seq}) has no kept payload in ${relative(proj.root, join(stateDir, PAYLOADS_DIR)).replace(/\\/g, "/") || PAYLOADS_DIR} (it was uploaded from another machine, or by a CLI before 0.3.6: deploy prod from here once)` };
+	}
+	const info: BackupInfo = { artifactId: head.artifactId, seq: head.seq, branch: head.branch, channel: "prod", at: (options.now ?? new Date()).toISOString() };
+	try {
+		const bytes = backupRbxm(new Uint8Array(readFileSync(source)), info);
+		const model = join(proj.root, OUT_DIR, BACKUP_FILE);
+		mkdirSync(join(proj.root, OUT_DIR), { recursive: true });
+		writeFileSync(model, bytes);
+		return { info, model, source };
+	} catch (error) {
+		if (error instanceof BackupError) return { skipped: `the kept payload of ${head.artifactId} can't be the backup: ${error.message}` };
+		throw error;
+	}
 }
 
 async function kernelDeploy(args: ParsedArgs) {
@@ -504,6 +553,7 @@ async function patchFlow(args: ParsedArgs, prepared: PreparedKernel, engine: "sp
 		verification: { ok: problems.length === 0, problems, binary: ts, lune: luneResult },
 		output,
 		bootstrapHeads: heads,
+		backupBuild: prepared.backup,
 	};
 	writeFileSync(join(outDir, PATCH_DIR, `${stem}.json`), JSON.stringify(record, null, "\t"));
 	if (!isJson()) {
@@ -554,7 +604,7 @@ async function patchFlow(args: ParsedArgs, prepared: PreparedKernel, engine: "sp
 	if (latest !== base.newest) {
 		throw new KernelCheckError(`the place changed since the patch was made (newest version then v${base.newest}, now v${latest}); nothing published. Run the deploy again to patch the new version`);
 	}
-	await publishPatched({ args, proj, identity, heads, watch, where, bytes: patched, base: base.version, extra: { mode: "patch", engine, backup, firstInstall, patchedSha256: output.sha256, patchedFile: output.path, oldKernelVersion: before.kernel.version ?? null } });
+	await publishPatched({ args, proj, identity, heads, watch, where, bytes: patched, base: base.version, extra: { mode: "patch", engine, backup, backupBuild: prepared.backup, firstInstall, patchedSha256: output.sha256, patchedFile: output.path, oldKernelVersion: before.kernel.version ?? null } });
 	if (backup) info(dim(`  restore the previous version: typetorch kernel restore ${backup}`));
 }
 
@@ -625,6 +675,7 @@ async function replacePlaceFlow(args: ParsedArgs, prepared: PreparedKernel) {
 		keyAssetId: proj.config.keyAssetId ?? null,
 		fallbackPublicKey: proj.config.fallbackPublicKey ?? null,
 		bootstrapHeads: heads,
+		backupBuild: prepared.backup,
 	};
 	warn(`--replace-place REPLACES THE WHOLE PLACE (${where}) with the kernel place: every Studio/Team Create edit (maps, UI, builders' work) is wiped from the live version. It stays in the place's version history. Real games: use the default patch mode.`);
 	if (dryRun) {
@@ -664,6 +715,7 @@ async function replacePlaceFlow(args: ParsedArgs, prepared: PreparedKernel) {
 		keyAssetId: proj.config.keyAssetId ?? null,
 		fallbackPublicKey: proj.config.fallbackPublicKey ?? null,
 		bootstrapHeads: heads,
+		backupBuild: prepared.backup,
 		placeVersionBefore: before ?? null,
 		...(beforeError ? { placeVersionBeforeError: beforeError.slice(0, 300) } : {}),
 		by,

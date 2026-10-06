@@ -12,6 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ProjectConfig } from "./config.ts";
 import { parseKeyList, placeKeysScript } from "./keyasset.ts";
+import { BACKUP_STALE_DAYS, backupAge, backupFromPlace } from "./payloads.ts";
 import { inspectKeyFile, type KeyFileInfo, type KeyRole } from "./keyfiles.ts";
 import { isRecord } from "./json.ts";
 import { keyFingerprint } from "./signing.ts";
@@ -44,6 +45,8 @@ export interface KeyFacts {
 	place?: { keyAssetId?: number; fallbackPublicKey?: string; source: string } | { error: string; source: string };
 	/** ServerStorage.TypeTorchDev in the place (Luau Execution only; undefined when the task didn't run). */
 	devFolder?: { present: boolean; payload?: boolean; descendants?: number };
+	/** Kernel 0.3.6: ServerStorage.TypeTorchBackup in the place (or the last kernel deploy's record of it). */
+	backup?: ReturnType<typeof backupFromPlace> & { source: string };
 }
 
 /** Keys are shown by fingerprint, like the kernel's dev menu (first 8 hex of the SHA-256 of the raw key). */
@@ -167,7 +170,29 @@ export function keyChecks(facts: KeyFacts): Check[] {
 	} else if (dev) {
 		checks.push({ name: "place dev folder", status: "ok", detail: "no ServerStorage.TypeTorchDev in the place" });
 	}
+	checks.push(...backupChecks(facts.backup));
 	return checks;
+}
+
+/**
+ * Kernel 0.3.6: the backup build baked into the place (ServerStorage.TypeTorchBackup), which servers run when nothing
+ * else can. Missing: warn (a server that can load nothing moves its players away). Older than BACKUP_STALE_DAYS: warn
+ * (it would serve old code against newer player data; the game's data version guard must refuse or migrate).
+ */
+export function backupChecks(backup: KeyFacts["backup"], now = Date.now()): Check[] {
+	if (!backup) return [];
+	if (!backup.present) {
+		return [{ name: "place backup", status: "warn", detail: `${backup.source}: no ServerStorage.TypeTorchBackup (kernel 0.3.6+): a server that can load nothing moves its players to another server. Deploy prod from this machine, then \`typetorch kernel deploy\`` }];
+	}
+	const age = backupAge(backup.at, now);
+	const what = `${backup.artifactId ?? "?"}${backup.seq !== undefined ? ` #${backup.seq}` : ""}${backup.branch ? ` (${backup.branch})` : ""}, baked ${age ? `${age.text} ago` : "at an unknown time"}${backup.modules !== undefined ? `, ${backup.modules} modules` : ""}`;
+	if (backup.channel !== undefined && backup.channel !== "prod") {
+		return [{ name: "place backup", status: "warn", detail: `${backup.source}: ${what} is ${backup.channel}-channel: servers refuse it (it must be a prod build); run \`typetorch kernel deploy\`` }];
+	}
+	if (!age || age.days > BACKUP_STALE_DAYS) {
+		return [{ name: "place backup", status: "warn", detail: `${backup.source}: ${what}: older than ${BACKUP_STALE_DAYS} days, it would serve old code against newer player data (your data version guard must refuse or migrate); refresh it with \`typetorch kernel deploy\`` }];
+	}
+	return [{ name: "place backup", status: "ok", detail: `${backup.source}: ${what}` }];
 }
 
 /** An asset id from the place: a number, or a decimal string (how the Luau script returns it). */
@@ -178,7 +203,7 @@ function assetIdOf(value: unknown): number | undefined {
 }
 
 /** The newest published kernel deploy recorded in the state dir. */
-export function lastKernelDeploy(stateDir: string): { keyAssetId?: number; fallbackPublicKey?: string; at?: string; placeVersionAfter?: number } | undefined {
+export function lastKernelDeploy(stateDir: string): { keyAssetId?: number; fallbackPublicKey?: string; at?: string; placeVersionAfter?: number; backupBuild?: unknown } | undefined {
 	const file = join(stateDir, "kernel-deploys.jsonl");
 	if (!existsSync(file)) return undefined;
 	let last: any;
@@ -194,6 +219,8 @@ export function lastKernelDeploy(stateDir: string): { keyAssetId?: number; fallb
 		fallbackPublicKey: typeof last.fallbackPublicKey === "string" ? last.fallbackPublicKey : undefined,
 		at: last.at,
 		placeVersionAfter: typeof last.placeVersionAfter === "number" ? last.placeVersionAfter : undefined,
+		// Kernel 0.3.6: the backup build that deploy baked (undefined for older records, null when it baked none).
+		backupBuild: "backupBuild" in last ? last.backupBuild : undefined,
 	};
 }
 
@@ -218,9 +245,16 @@ export async function gatherKeyFacts(input: {
 		recorded
 			? { keyAssetId: recorded.keyAssetId, fallbackPublicKey: recorded.fallbackPublicKey, source: `last kernel deploy recorded here (${recorded.at ?? "?"}; ${why})` }
 			: { error: `${why}; no kernel deploy recorded here either`, source: "place" };
+	// Kernel 0.3.6: without the Luau task, the backup the last kernel deploy recorded here (it baked none: unknown, since
+	// the place may still hold an older one).
+	const backupFromRecord = () => {
+		const backup = backupFromPlace(recorded?.backupBuild);
+		if (backup.present) facts.backup = { ...backup, source: `last kernel deploy recorded here (${recorded?.at ?? "?"})` };
+	};
 	if (!input.assets) {
 		if (c.keyAssetId) facts.asset = { error: "no assets key (OPENCLOUD_ASSETS_KEY or the shared key)" };
 		facts.place = fromRecord("no assets key for Luau Execution");
+		backupFromRecord();
 		return facts;
 	}
 	if (c.keyAssetId) {
@@ -246,6 +280,7 @@ export async function gatherKeyFacts(input: {
 		facts.devFolder = isRecord(result.devFolder)
 			? { present: true, payload: result.devFolder.payload === true, descendants: Number(result.devFolder.descendants) || 0 }
 			: { present: false };
+		facts.backup = { ...backupFromPlace(result.backup), source: "the place (Luau Execution)" };
 		if (c.keyAssetId) {
 			facts.asset = isRecord(result.asset)
 				? { publicKeys: parseKeyList(result.asset.publicKeys), revokedKeys: parseKeyList(result.asset.revokedKeys), children: Number(result.asset.children) || 0 }
@@ -255,6 +290,7 @@ export async function gatherKeyFacts(input: {
 		const why = `Luau Execution failed (the assets key needs universe.place.luau-execution-session:read/:write): ${(error as Error).message.slice(0, 200)}`;
 		facts.place = fromRecord(why);
 		if (c.keyAssetId) facts.asset = { error: why };
+		backupFromRecord();
 	}
 	return facts;
 }

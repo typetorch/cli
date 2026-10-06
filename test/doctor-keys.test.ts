@@ -102,6 +102,7 @@ describe("doctor: signing checks", () => {
 describe("doctor: gathering", () => {
 	test("reads the key files, the asset metadata and one Luau Execution task (mocked Open Cloud)", async () => {
 		const { paths, config, main, fallback } = setup();
+		const backupAt = new Date(Date.now() - 3600_000).toISOString();
 		const requests: string[] = [];
 		let script = "";
 		globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -116,7 +117,16 @@ describe("doctor: gathering", () => {
 			if (url.pathname.endsWith("/luau-execution-session-tasks/t1")) {
 				return json({
 					state: "COMPLETE",
-					output: { results: [{ kernel: { keyAssetId: "555", fallbackPublicKey: fallback.publicKey, version: "0.3.0" }, asset: { publicKeys: `${main.publicKey}`, revokedKeys: "", children: 0 } }] },
+					output: {
+						results: [
+							{
+								kernel: { keyAssetId: "555", fallbackPublicKey: fallback.publicKey, version: "0.3.0" },
+								asset: { publicKeys: `${main.publicKey}`, revokedKeys: "", children: 0 },
+								// Kernel 0.3.6: the backup build kernel deploy baked in.
+								backup: { artifactId: "a1b2c3d-111111", seq: 12, branch: "prod", channel: "prod", at: backupAt, modules: 40 },
+							},
+						],
+					},
 				});
 			}
 			return new Response("{}", { status: 404 });
@@ -126,9 +136,11 @@ describe("doctor: gathering", () => {
 		expect(script).toContain("local id = 555");
 		expect(script).toContain('string.format("%d", keyAssetId)');
 		expect(script).toContain('FindFirstChild("TypeTorchDev")');
+		expect(script).toContain('FindFirstChild("TypeTorchBackup")');
 		expect(facts.place).toEqual({ keyAssetId: 555, fallbackPublicKey: fallback.publicKey, source: "the place (Luau Execution)" });
 		expect(facts.asset).toEqual({ publicKeys: [main.publicKey], revokedKeys: [], children: 0 });
 		expect(facts.devFolder).toEqual({ present: false });
+		expect(facts.backup).toEqual({ present: true, artifactId: "a1b2c3d-111111", seq: 12, branch: "prod", channel: "prod", at: backupAt, modules: 40, source: "the place (Luau Execution)" });
 		expect(keyChecks(facts).every((c) => c.status === "ok")).toBe(true);
 		expect(requests[0]).toBe("GET /assets/v1/assets/555");
 	});

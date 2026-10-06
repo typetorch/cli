@@ -6,6 +6,7 @@ import { gitInfo } from "../git.ts";
 import { dim, emitJson, formatBytes, formatSeconds, formatTimings, info, isJson, Stopwatch } from "../log.ts";
 import { branchNameError, formatSources } from "../naming.ts";
 import { describeProtocol } from "../protocol.ts";
+import { keepPayload } from "../payloads.ts";
 import { fixCensoredName, uploadPayload } from "../upload.ts";
 import { channelFlag, openCloud, project, projectStateDir } from "./common.ts";
 
@@ -61,7 +62,10 @@ export async function uploadCommand(args: ParsedArgs) {
 	const result = await uploadPayload(oc, proj.config, meta, bytes, branch, {
 		moderationTimeout: flagInt(args, "moderation-timeout", 600),
 		onStage: (stage, s, detail) => info(`  ${stage.padEnd(10)}  ${formatSeconds(s)}  ${detail}`),
-		onUploaded: ({ assetId, displayName, moderation }) =>
+		onUploaded: ({ assetId, displayName, moderation }) => {
+			// Kernel 0.3.6: the exact bytes stay in <state dir>/payloads (API keys can't download assets), so `kernel deploy`
+			// can bake the prod head's payload into the place as the backup build.
+			keepPayload(stateDir, meta.artifactId, bytes);
 			appendUpload(stateDir, {
 				artifactId: meta.artifactId,
 				assetId,
@@ -81,7 +85,8 @@ export async function uploadCommand(args: ParsedArgs) {
 				universeId: proj.config.universeId,
 				project: proj.config.project,
 				by,
-			}),
+			});
+		},
 	});
 	watch.set("upload", result.uploadSeconds);
 	watch.set("moderation", result.moderationSeconds);
