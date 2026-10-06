@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { placeFileName } from "../src/commands/kernel";
 import { placeDownloadProbe } from "../src/commands/doctor";
-import { chooseBase, kernelLayout, runLunePatch, runLuneVerify, summaryLines, writeLuneScript } from "../src/kernelpatch";
+import { chooseBase, declaresLoadstring, kernelLayout, runLunePatch, runLuneVerify, summaryLines, writeLuneScript } from "../src/kernelpatch";
 import { encodeChunk, rawChunks, readRbxm, writeRbxm } from "../src/rbxm";
 import { patchPlace, PlaceFile, PlacePatchError, summarizePlace, verifyPatch, type SlotRef } from "../src/placepatch";
 
@@ -65,10 +65,15 @@ describe("kernelLayout and chooseBase", () => {
 				ReplicatedFirst: { $className: "ReplicatedFirst", TypeTorchKernelClient: { $path: "src/client/KernelClient.client.luau" } },
 			},
 		};
-		const layout = kernelLayout(project);
+		const layout = kernelLayout(project, { loadstring: true });
 		expect(layout.slots).toEqual(SLOTS);
 		expect(layout.serviceProps.sort((a, b) => a.service.localeCompare(b.service))).toEqual(SETTINGS);
 		expect(kernelLayout({ tree: { $className: "DataModel", Workspace: { $className: "Workspace", Baseplate: {} } } })).toEqual({ slots: [], serviceProps: [] });
+		// Security audit 2026-10-06: by default a patch leaves the place's LoadStringEnabled alone (loadstring stays off).
+		expect(kernelLayout(project).serviceProps).toEqual([{ service: "HttpService", prop: "HttpEnabled" }]);
+		expect(kernelLayout(project).slots).toEqual(SLOTS);
+		expect(declaresLoadstring(project)).toBe(true);
+		expect(declaresLoadstring({ tree: { $className: "DataModel", ServerScriptService: { $className: "ServerScriptService", TypeTorchKernel: {} } } })).toBe(false);
 	});
 	test("base version: newest published by default; saves refuse; published/latest/number", () => {
 		const v = (version: number, published: boolean) => ({ version, published, hasPublishedField: true });
