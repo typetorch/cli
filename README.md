@@ -137,7 +137,7 @@ it never loaded only `sigF` counts (rules: [Prod signing](https://github.com/typ
 4. `typetorch kernel deploy`: bakes `KeyAssetId`, `FallbackPublicKey` and `BootstrapHeads` (the current prod heads,
    which the kernel trusts unsigned: heads stored before signing have no signature) into the place's kernel (patched
    in; servers run it after a restart). It refuses to publish without the keys. Run it from the machine with the
-   latest deployment log (or a readable registry).
+   | `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>] [--engine splice|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N) deployment log (or a readable registry).
 5. `typetorch doctor`: both key files exist and match typetorch.json, the key asset (Approved, right owner, same
    lists) and the place's kernel attributes; any mismatch is a warning.
 
@@ -172,22 +172,22 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch deployments [--branch] [--limit n]` | deployment history with git identity; `*` = each branch's live head; lists uploads that never went out |
 | `typetorch branch ls` | branches, channels and live heads |
 | `typetorch config push [--dry-run]` | copy `defaultBranch`, `channels`, `members`, `devBadgeId` (and `revoked`) into the registry |
-| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--place-file <file>] [--engine splice\|lune] [--kernel <dir>]` | patch the kernel into the live place (backup, verify, y/N); `--replace-place --yes` for the template/test place only; see below |
+| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>] [--engine splice|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N)\|latest\|<n>] [--place-file <file>] [--engine splice\|lune] [--kernel <dir>]` | patch the kernel into the live place (backup, verify, y/N); `--replace-place --yes` for the template/test place only; see below |
 | `typetorch kernel restore <file> [--dry-run] [--yes]` | publish a place file: a backup from `.typetorch/place-backups/`, or a dry run's patched file |
 | `typetorch approve [id] [--import <dir>] [--test] [--skip-test <reason>] [--rollout <1-99>] [--wait [s]]` | approve a proposal: details, y/N, publish (interactive terminal only); prod-channel ones are signed. A prod deploy or promote proposal without a passed (or skipped) cloud test runs it before the y/N. `--import`: a proposal state dir from automation you run yourself (see "No GitHub Actions") |
 | `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
 | `typetorch servers [--branch] [--watch]` | live servers from the fleet API (see "Fleet") |
 | `typetorch alerts [--follow] [--level] [--since <min>]` | the fleet's alerts (see "Fleet") |
 | `typetorch fleet setup --url <url>` | point game servers at the fleet API (see "Fleet") |
-| `typetorch report <seq\|artifact\|latest> [--branch]` | what the servers did with one deploy; exits 1 when one failed or rolled back (see "Fleet") |
+| `typetorch report <seq\|artifact\|| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>] [--engine splice|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N)> [--branch]` | what the servers did with one deploy; exits 1 when one failed or rolled back (see "Fleet") |
 | `typetorch keys init [--key-file]` / `keys init --fallback [--force] [--yes]` / `keys rotate [--yes]` / `keys resign` | the signing keys: see "Signing prod deploys" |
 | `typetorch pin <artifact> --branch <b> (--servers <ids> \| --pct <1-99>)` / `pin --unpin --branch <b> (--servers <ids> \| --all)` | A/B experiment pins, signed on prod-channel branches; `--by`, `--dry-run` |
 | `typetorch reject <id> [--reason]` / `typetorch proposals [--all]` | drop a proposal / list them |
-| `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n>]` | hot assets: export the instances marked `TypeTorchAsset` from the place's latest published version, upload new and changed ones, write `typetorch.assets.lock.json`; see "Hot assets" |
+| `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n>]` | hot assets: export the instances marked `TypeTorchAsset` from the place's | `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>] [--engine splice|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N) published version, upload new and changed ones, write `typetorch.assets.lock.json`; see "Hot assets" |
 | `typetorch assets status` / `typetorch assets list` | export + diff without uploading / the lockfile |
 | `typetorch remote-claude --users <ids> [...]` | runs `typetorch-dev-server remote-claude` ([`@typetorch/dev-server`](https://github.com/typetorch/dev-server)) with the same arguments in this terminal, and exits with its code: devs prompt Claude Code on this machine from the in-game DEV > Claude tab (dev-channel branches only). Found in `TYPETORCH_DEV_SERVER` (an entry), `node_modules/@typetorch/dev-server` in the game repo or a parent, next to this CLI (`npm i -g @typetorch/dev-server`; with npx: `npx -p @typetorch/cli -p @typetorch/dev-server typetorch remote-claude ...`), or a sibling `../dev-server` checkout; else a clear error. It gets the real environment (the dev-server reads the key, `--env-file` / `TYPETORCH_ENV_FILE` and `.env` itself) |
 | `typetorch dev --users <ids> [...]` | the same as `typetorch remote-claude` |
-| `typetorch update [<version>] [--check] [--yes]` | updates this CLI to the newest `@typetorch/cli` on npm (or `<version>`) the way it was installed: in the game's `package.json` with its package manager (bun, pnpm, yarn or npm, from the lockfile; a devDependency stays one), or globally (`npm i -g`, `bun add -g`, pnpm, yarn). Asks y/N first (`--yes` skips; without a terminal it prints the command). npx needs nothing (`npx @typetorch/cli@latest`); a git checkout gets the `git pull` to run. `--check` only shows the versions and the command |
+| `typetorch update [<version>] [--check] [--yes]` | updates this CLI to the newest `@typetorch/cli` on npm (or `<version>`) the way it was installed: in the game's `package.json` with its package manager (bun, pnpm, yarn or npm, from the lockfile; a devDependency stays one), or globally (`npm i -g`, `bun add -g`, pnpm, yarn). Asks y/N first (`--yes` skips; without a terminal it prints the command). npx needs nothing (`npx @typetorch/cli@| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>] [--engine splice|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N)`); a git checkout gets the `git pull` to run. `--check` only shows the versions and the command |
 | `typetorch doctor` | checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), and probes each key's scopes with harmless calls |
 
 Every command takes `--json` (one JSON document on stdout; human lines go to stderr), `--verbose`, `--config <path>`
@@ -333,7 +333,7 @@ versions without a restart (the framework's `hotAsset`). Guide: [Hot assets](htt
   another hot asset, and its parents' names may not contain `/`. A service can't be one. The sync refuses and lists
   every problem before uploading anything.
 - **`typetorch assets sync`:**
-  1. **Export:** a Luau Execution task on the place's **latest published** version (the newest version the Assets API
+  1. **Export:** a Luau Execution task on the place's **| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>] [--engine splice|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N) published** version (the newest version the Assets API
      marks `published`; `--place-version <n>` picks one) finds them, checks them, and serializes each with
      `SerializationService:SerializeInstancesAsync`. The task returns its metadata as `ReturnValues` and the bytes as
      binary output (`enableBinaryOutput`: `TTA1` + the exports back to back, at most 256 MiB, downloaded from a
@@ -386,7 +386,7 @@ versions without a restart (the framework's `hotAsset`). Guide: [Hot assets](htt
 
 ### Cloud test (the pre-publish gate)
 
-`typetorch test --cloud [<artifact>]` runs one Open Cloud Luau Execution task on the place's **latest published
+`typetorch test --cloud [<artifact>]` runs one Open Cloud Luau Execution task on the place's **| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>] [--engine splice|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N) published
 version** (what live servers run). Measured on the test place: 9-11 s (the task itself about 7 s).
 
 1. `InsertService:LoadAsset` the payload (the path live servers use) and the kernel's mount checks: a payload root,
@@ -432,7 +432,7 @@ you host. The CLI reads it:
 - `typetorch servers [--branch <b>] [--watch]`: job, branch, artifact, applied seq, health (`ok`, `failed`,
   `unverified`, `degraded`), players, kernel, age (uptime), seen (last heartbeat); `--watch` redraws every 5 s.
   Reserved-server access codes are never printed.
-- `typetorch report <seq|artifact|latest> [--branch <b>]`: counts per result, errors grouped with the servers that hit
+- `typetorch report <seq|artifact|| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>] [--engine splice|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N)> [--branch <b>]`: counts per result, errors grouped with the servers that hit
   them, and the branch's servers still on an older seq. Exits 1 when a server failed or rolled back, and prints the
   rollback command.
 - `typetorch alerts [--follow] [--level info|warning|critical] [--since <minutes>]`: the fleet's alerts (default the
@@ -483,10 +483,16 @@ any automation you choose to run yourself.
    trust roots `KeyAssetId` and `FallbackPublicKey` from typetorch.json and `BootstrapHeads` (the JSON of the current
    prod-channel heads, `{"<branch>":{"a","s","i"}}`, from the registry or the local log; `--no-registry`), on
    `ServerScriptService.TypeTorchKernel` (publishing refuses without the keys, or when the fallback key file doesn't
-   match);
+   match), and (kernel 0.3.6) the **backup build**: the current prod head's payload, which `deploy` and `upload` keep in
+   `<state dir>/payloads/<artifactId>.rbxm` (API keys can't download assets), checked (one Model, Folders and
+   ModuleScripts only, Channel `prod`) and stamped with `BackupArtifactId`, `BackupSeq`, `BackupBranch`,
+   `BackupChannel` and `BackupAt`, as `ServerStorage.TypeTorchBackup`. Servers run it only when nothing else can (see
+   the kernel's "Never an empty server"). It is a kernel slot, so every deploy replaces it. Without a kept payload for
+   the prod head it warns and the place keeps the backup it has; `--no-backup` skips it. `doctor` shows the place's
+   backup and its age (it warns past 30 days);
 4. **patches** the live place (the default, `--patch`):
    - picks the base: the place's newest version, which must be published (newer unpublished saves are refused and
-     listed; `--base published` patches the last publish and leaves them in version history, `--base latest` ships
+     listed; `--base published` patches the last publish and leaves them in version history, `--base | `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>] [--engine splice|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N)` ships
      them, `--base <n>` takes that version);
    - takes `--place-file <file> --base <version>` (a copy downloaded in Studio: File > Download a Copy), or downloads
      it (Open Cloud Asset Delivery, whose scope `legacy-asset:manage` **can't be granted to API keys today**; Roblox
