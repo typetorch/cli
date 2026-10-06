@@ -56,6 +56,13 @@ const server = Bun.serve({
 			}
 			if (method === "GET") return json({ code: 5, message: "NOT_FOUND" }, 404);
 		}
+		// The durable head (durablehead.ts): DataStores v1 Get / Set Entry, empty here.
+		if (url.pathname === "/datastores/v1/universes/42/standard-datastores/datastore/entries/entry") {
+			if (method === "GET") return json({ error: "NOT_FOUND" }, 404);
+			await req.text();
+			requests.push(`store ${url.searchParams.get("entryKey")}`);
+			return json({ version: "v1", deleted: false });
+		}
 		requests.push(`unexpected ${method} ${url.pathname}`);
 		return json({ message: "not faked" }, 404);
 	},
@@ -137,7 +144,11 @@ describe("non-interactive deploys never wait on stdin", () => {
 			const output = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text());
 			expect({ code, output }).toMatchObject({ code: 0 });
 			expect(output).toContain("deployed #1 dev");
-			expect(requests).toEqual(["create", "publish TypeTorch/deploy dev", "name check"]);
+			expect(requests.filter((r) => !r.startsWith("store "))).toEqual(["create", "publish TypeTorch/deploy dev", "name check"]);
+			// The durable head after the message: heads and deployments (in parallel).
+			const stores = requests.filter((r) => r.startsWith("store "));
+			expect([...stores].sort()).toEqual(["store deployments", "store heads"]);
+			for (const store of stores) expect(requests.indexOf(store)).toBeGreaterThan(requests.indexOf("publish TypeTorch/deploy dev"));
 			expect(seqClaims).toEqual([1]); // the seq was claimed from the shared counter
 		},
 		45_000,

@@ -85,7 +85,7 @@ scripts, git) get an allowlisted environment without any key. Keys are never pri
 | Variable | Used for | Scopes |
 |---|---|---|
 | `OPENCLOUD_ASSETS_KEY` | payload uploads and moderation (`deploy`, `upload`); the cloud test (`test --cloud`, the prod gate); hot assets (`assets sync`, `assets status`); doctor's place check | `asset:read` (also on the place), `asset:write`; `universe.place.luau-execution-session:read` + `:write` for the cloud test, hot assets and doctor |
-| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the shared seq (`deploy`, `rollback`, `promote`, `keys resign`); the registry (`config push`, `deployments`); `fleet setup` | `universe-messaging-service:publish`; `universe-datastores.objects:read` (+ `:create` and `:update` to claim seqs; see "The shared seq"); `universe:write` for `fleet setup`. The registry needs `universe:read`, which **can't be granted to API keys today** (OAuth only), so it is skipped |
+| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the shared seq (`deploy`, `rollback`, `promote`, `keys resign`); the registry (`config push`, `deployments`); `fleet setup` | `universe-messaging-service:publish`; `universe-datastores.objects:read` (+ `:create` and `:update` to claim seqs and store the durable head; see "The shared seq" and "The durable head"); `universe:write` for `fleet setup`. The registry needs `universe:read`, which **can't be granted to API keys today** (OAuth only), so it is skipped |
 | `OPENCLOUD_PLACE_KEY` | `kernel deploy`, `kernel restore` (manual only) | `universe.place:write` (publish), `asset:read` (place versions). Downloading the place needs `legacy-asset:manage`, which **can't be granted to API keys today**: pass `--place-file` (a copy downloaded in Studio) |
 | `TYPETORCH_API_KEY`, `OPENCLOUD_API_KEY` or `ROBLOX_API_KEY` | any job without its own key | all of the above |
 
@@ -309,6 +309,19 @@ atomic increment of `seq` (by enough to clear every source), so two machines dep
 whether servers run or not. The deployment line records where it came from (`seqSource`: `counter`, `read` or `local`).
 Without the read scope a deploy warns and uses this machine's log only; `--require-shared-seq` (CI) stops before the
 upload instead.
+
+### The durable head
+
+After the deploy message goes out (`deploy`, `promote`, `rollback`, `approve`, the automatic rollback, and `deploy
+--widen`), the CLI also writes the head into the game's DataStore `TypeTorch`: `heads.<branch>` (the shape the kernel
+stores, with `sig`/`sigF` for prod) and the deploy's entry in `deployments` (newest first, 100 kept). So a deploy made
+while **no server of that branch runs** isn't lost: with kernel 0.3.5, new servers boot it and running ones pick it up
+within about a minute (the kernel reads this copy every ~60 s and writes the MemoryStore copy back). It is a
+read-merge-write guarded by the entry's version (DataStores v1 `matchVersion`, or `exclusiveCreate` for a new key),
+retried when a game server wrote the key meanwhile, and a branch's seq is never lowered. It needs the shared seq's
+scopes (`universe-datastores.objects:read`, `:create`, `:update`); without them the deploy still succeeds, with one
+warning: "the head isn't stored durably: deploys reach only running servers". `typetorch doctor` checks the write
+scopes (`scope datastore write`, a tiny value under the key `doctor`).
 
 ### Hot assets
 

@@ -9,6 +9,9 @@
  *   configs write not probed (needs universe:write; a probe would have to touch the draft)
  *   datastore    GET DataStore TypeTorch entry "heads"         200/404 = ok, 401/403 = missing universe-datastores.objects:read
  *                                                             (the shared seq; :create/:update are checked by a deploy)
+ *   datastore write SET DataStore TypeTorch entry "doctor"     200 = ok (a tiny {doctor, t} value), 401/403 = missing
+ *                                                             :create/:update: deploys can't store the branch head
+ *                                                             durably (durablehead.ts), so they reach only running servers
  *   place publish POST an EMPTY body                         400 = scope ok (body rejected), 403 = missing
  *   fleet API     GET /v1/fleet/servers with the admin token   ok, or a warning (servers, report, alerts, --wait)
  *   luau exec     GET a task that doesn't exist               404 = :read ok, 401/403 = missing (test --cloud; :write
@@ -32,6 +35,8 @@ import { hasZstd, isBun, runtimeName } from "../runtime.ts";
 import { rojoBinary } from "../build.ts";
 import { REPOSITORY } from "../registry.ts";
 import { DS_READ_SCOPE, DS_WRITE_SCOPES, HEADS_KEY, SEQ_DATASTORE } from "../seqstore.ts";
+import { DURABLE_SCOPES, NOT_DURABLE } from "../durablehead.ts";
+import { createHash } from "node:crypto";
 import { stateDir } from "../state.ts";
 import { gatherKeyFacts, keyChecks, type Check, type Status } from "../keycheck.ts";
 import { KEY_FILE_FLAGS, signingKeyPaths } from "./common.ts";
@@ -257,6 +262,24 @@ export async function doctorCommand(args: ParsedArgs) {
 						? ["ok", `${DS_READ_SCOPE} (the shared seq: the kernel's DataStore heads; ${DS_WRITE_SCOPES} for the seq counter are checked by the first deploy)`]
 						: scopeMissing(status)
 							? ["warn", `missing ${DS_READ_SCOPE} on the deploy key: other machines and CI can't share the seq, and CI deploys (--require-shared-seq) stop (${status} ${short(text)})`]
+							: ["warn", `unexpected ${status} ${short(text)}`],
+			),
+			!deployKey ? skipped("scope datastore write", "deploy") : probe(
+				"scope datastore write",
+				() => {
+					// A tiny value under its own key: the durable head write (and the seq counter) need :create and :update.
+					const body = JSON.stringify({ doctor: true, t: Date.now() });
+					return client(deployKey).request(
+						"POST",
+						`/datastores/v1/universes/${universeId}/standard-datastores/datastore/entries/entry?datastoreName=${SEQ_DATASTORE}&entryKey=doctor`,
+						{ headers: { "content-type": "application/json", "content-md5": createHash("md5").update(body, "utf8").digest("base64") }, body },
+					);
+				},
+				(status, text) =>
+					status >= 200 && status < 300
+						? ["ok", `${DURABLE_SCOPES} (wrote ${SEQ_DATASTORE}/doctor): deploys store the branch head, so new servers boot it with none running (kernel 0.3.5)`]
+						: scopeMissing(status)
+							? ["warn", `missing universe-datastores.objects:create/:update on the deploy key: ${NOT_DURABLE}, and the seq counter isn't claimed (${status} ${short(text)})`]
 							: ["warn", `unexpected ${status} ${short(text)}`],
 			),
 			Promise.resolve<Check>({

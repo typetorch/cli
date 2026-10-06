@@ -14,6 +14,7 @@ import { bold, dim, emitJson, info, isJson } from "../log.ts";
 import { branchChannel, branchFromGit, branchNameError, strictest } from "../naming.ts";
 import { DEPLOY_TOPIC, deployMessage, encodeDeployMessage, type OpenCloud } from "../opencloud.ts";
 import { appendRollout, checkRollout, parseWiden, ROLLOUTS_LOG, type RolloutRecord } from "../rollout.ts";
+import { reportDurableHead, storeDurableHead } from "../durablehead.ts";
 import { modeFor } from "./approve.ts";
 import { openCloud, project, projectStateDir, readHistory, registryApi, warnRegistryFallback } from "./common.ts";
 import { fleetFor, waitForFleet, waitSeconds } from "./fleet.ts";
@@ -96,6 +97,8 @@ export async function widenCommand(args: ParsedArgs, deps: WidenDeps = {}) {
 	}
 	const client = oc ?? openCloud("deploy")!;
 	await client.publishMessage(proj.config.universeId, DEPLOY_TOPIC, text);
+	// The durable head with the new rollout (same seq, newer t): servers that start later take the widened rollout.
+	reportDurableHead(await storeDurableHead(client, proj.config.universeId, message), message);
 	appendRollout(dir, { universeId: proj.config.universeId, branch, seq: head.seq, artifactId: head.artifactId, assetId: head.assetId, rollout: pct, ...(before !== undefined ? { from: before } : {}), by: git.userName });
 	if (!isJson()) {
 		info(bold(`widened ${what}`));

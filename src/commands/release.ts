@@ -1,7 +1,7 @@
 /**
  * Pointing a branch at an (already approved) payload asset: shared by `deploy`, `rollback` and `promote`.
  *   lock the state dir -> seq -> message (signed for prod-channel branches) -> registry (when readable) -> deploy
- *   message -> local log -> unlock
+ *   message -> durable head (DataStore `heads` + `deployments`, durablehead.ts) -> local log -> unlock
  *
  * Signing (plans/03 "Signed prod messages and heads"): a release to a prod-channel branch must come with a signer (both
  * keys, keyfiles.ts `loadSigner`); the message and the registry head get `sig` and `sigF`. Dev-channel releases are
@@ -15,6 +15,7 @@ import type { Project } from "../config.ts";
 import { appendLocalLog, liveHeads, mergeDeployments, nextSeqFrom, readLocalLog, type LocalDeployment } from "../deployments.ts";
 import { debug, formatSeconds, info, warn, type Stopwatch } from "../log.ts";
 import { nextSharedSeq, type SharedSeq } from "../seqstore.ts";
+import { reportDurableHead, storeDurableHead, type DurableHeadResult } from "../durablehead.ts";
 import type { BuildSources, Channel } from "../naming.ts";
 import { DEPLOY_TOPIC, deployMessage, encodeDeployMessage, type DeployMessage, type OpenCloud } from "../opencloud.ts";
 import type { DualSigner } from "../signing.ts";
@@ -63,6 +64,8 @@ export interface ReleaseResult {
 	message: DeployMessage;
 	registry: NonNullable<LocalDeployment["registry"]>;
 	configVersion?: number;
+	/** The head written into the game's DataStore (kernel 0.3.5 boots and follows it with no server running). */
+	durable?: DurableHeadResult;
 }
 
 /** The registry is readable but could not be written: nothing was published. */
@@ -218,9 +221,13 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 			throw error;
 		}
 		info(`  publish     ${formatSeconds(watch.timings.publish)}  ${DEPLOY_TOPIC} ${describeMessage(message)}`);
+		// The durable head: servers that start later (or run but missed the message) find it even when no server on the
+		// branch heard the message. A failure (missing scopes) is one warning; the deploy stands.
+		const durable = await storeDurableHead(oc, proj.config.universeId, message);
+		reportDurableHead(durable, message);
 		const logged: LocalDeployment = { ...localEntry, timings: watch.total() };
 		appendLocalLog(history.stateDir, logged);
-		return { entry: logged, message, registry, configVersion };
+		return { entry: logged, message, registry, configVersion, durable };
 	});
 }
 
