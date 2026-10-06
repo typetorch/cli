@@ -69,6 +69,11 @@ export const kernelFlags = {
 	"no-registry": "boolean",
 	/** Kernel 0.3.6: don't bake the backup build (patch mode keeps the place's current one). */
 	"no-backup": "boolean",
+	/**
+	 * Turn `loadstring` on in the place (ServerScriptService.LoadStringEnabled = true): only remote-claude's run_luau needs
+	 * it (the test place). Without it a patch leaves the place's own value and --replace-place publishes it off.
+	 */
+	loadstring: "boolean",
 } as const;
 
 /** One bootstrap head: what the kernel trusts unsigned for that branch (plans/03 "Bootstrap heads"). */
@@ -257,6 +262,20 @@ export function signingAttributes(proj: Pick<Project, "config">, fallbackKeyFile
 	return { attributes, problems, warnings };
 }
 
+/**
+ * The place project with `ServerScriptService.$properties.LoadStringEnabled` set to `on` (a copy). The kernel build then
+ * carries the value the patch copies (with --loadstring) and --replace-place publishes.
+ */
+export function withLoadstring(projectJson: unknown, on: boolean): unknown {
+	const copy = JSON.parse(JSON.stringify(projectJson));
+	const tree = isRecord(copy) ? copy.tree : undefined;
+	if (!isRecord(tree)) return copy;
+	const key = Object.keys(tree).find((name) => isRecord(tree[name]) && ((tree[name] as Record<string, unknown>).$className ?? name) === "ServerScriptService");
+	const node = (key ? tree[key] : (tree.ServerScriptService = { $className: "ServerScriptService" })) as Record<string, unknown>;
+	node.$properties = { ...(isRecord(node.$properties) ? node.$properties : {}), LoadStringEnabled: on };
+	return copy;
+}
+
 /** The place project with the identity attributes on ServerScriptService.TypeTorchKernel. */
 export function stampKernelProject(projectJson: any, kernelDir: string, attributes: Record<string, string | number>): { project: any; stamped: boolean } {
 	const copy = absolutePaths(projectJson, kernelDir) as any;
@@ -364,7 +383,12 @@ async function prepareKernel(args: ParsedArgs): Promise<PreparedKernel> {
 	} else {
 		warn(`no backup build baked: ${backup.skipped}. ${backup.skipped === "--no-backup" ? "" : "The place keeps the backup it has (doctor shows its age); "}a server that can load nothing else then has no backup and moves its players to another server`);
 	}
-	const { project: stamped, stamped: didStamp } = backup.model ? { project: addBackupToProject(stampedKernel.project, backup.model), stamped: stampedKernel.stamped } : stampedKernel;
+	const { project: withBackup, stamped: didStamp } = backup.model ? { project: addBackupToProject(stampedKernel.project, backup.model), stamped: stampedKernel.stamped } : stampedKernel;
+	// LoadStringEnabled: the flag decides (the kernel's own place.project.json says false from kernel 0.3.6). Patch mode
+	// applies it only with --loadstring (kernelLayout); --replace-place publishes the stamped value either way.
+	const loadstring = flagBool(args, "loadstring");
+	const stamped = withLoadstring(withBackup, loadstring);
+	info(`  loadstring ${loadstring ? "ON (--loadstring: ServerScriptService.LoadStringEnabled = true, for remote-claude's run_luau)" : "off (patch: the place keeps its own LoadStringEnabled; --replace-place: false)"}`);
 	if (!didStamp) warn(`place.project.json has no ${KERNEL_SLOT.join(".")}; the kernel identity attributes were not stamped`);
 	const genPath = join(proj.root, PLACE_GEN_PROJECT);
 	writeFileSync(genPath, JSON.stringify(stamped, null, "\t"));
@@ -433,7 +457,7 @@ async function patchFlow(args: ParsedArgs, prepared: PreparedKernel, engine: "sp
 	const baseFlag = flagString(args, "base");
 	const { placeId, universeId } = proj.config;
 	const outDir = join(proj.root, OUT_DIR);
-	const layout = kernelLayout(prepared.stamped);
+	const layout = kernelLayout(prepared.stamped, { loadstring: flagBool(args, "loadstring") });
 	if (layout.slots.length === 0) throw new KernelCheckError(`${join(kernelDir, "place.project.json")} declares no TypeTorch* slot under a service; nothing to patch`);
 	info(`  slots    ${layout.slots.map((s) => `${s.service}.${s.name}`).join(", ")}${layout.serviceProps.length ? `  settings ${layout.serviceProps.map((p) => `${p.service}.${p.prop}`).join(", ")}` : ""}`);
 

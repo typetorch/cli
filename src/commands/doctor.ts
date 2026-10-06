@@ -198,8 +198,8 @@ export async function doctorCommand(args: ParsedArgs) {
 					name: "loadstring",
 					status: declares ? "info" : "ok",
 					detail: declares
-						? `the kernel's place.project.json sets ServerScriptService.LoadStringEnabled = true: \`kernel deploy\` (patch) leaves the place's own value, so loadstring stays off unless the place already had it; \`--replace-place\` (template/test place) turns it on. Only remote-claude's run_luau needs it`
-						: "the kernel's place.project.json leaves LoadStringEnabled alone (loadstring stays off; remote-claude's run_luau then says so)",
+						? `the kernel's place.project.json sets ServerScriptService.LoadStringEnabled = true (a kernel before 0.3.6): \`kernel deploy\` (patch) leaves the place's own value unless --loadstring; \`--replace-place\` publishes it off unless --loadstring. Only remote-claude's run_luau needs it`
+						: "loadstring stays off: `kernel deploy` turns ServerScriptService.LoadStringEnabled on only with --loadstring (patch and --replace-place; for remote-claude's run_luau, e.g. on a test place)",
 				});
 			}
 		} catch {

@@ -7,7 +7,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { placeFileName } from "../src/commands/kernel";
+import { placeFileName, withLoadstring } from "../src/commands/kernel";
 import { placeDownloadProbe } from "../src/commands/doctor";
 import { chooseBase, declaresLoadstring, kernelLayout, runLunePatch, runLuneVerify, summaryLines, writeLuneScript } from "../src/kernelpatch";
 import { encodeChunk, rawChunks, readRbxm, writeRbxm } from "../src/rbxm";
@@ -74,6 +74,27 @@ describe("kernelLayout and chooseBase", () => {
 		expect(kernelLayout(project).slots).toEqual(SLOTS);
 		expect(declaresLoadstring(project)).toBe(true);
 		expect(declaresLoadstring({ tree: { $className: "DataModel", ServerScriptService: { $className: "ServerScriptService", TypeTorchKernel: {} } } })).toBe(false);
+		// Kernel 0.3.6's place.project.json says false: not "turns loadstring on".
+		expect(declaresLoadstring({ tree: { $className: "DataModel", ServerScriptService: { $className: "ServerScriptService", $properties: { LoadStringEnabled: false } } } })).toBe(false);
+	});
+	test("kernel deploy --loadstring stamps the value both modes use; without it the build says false", () => {
+		const project = {
+			tree: {
+				$className: "DataModel",
+				HttpService: { $className: "HttpService", $properties: { HttpEnabled: true } },
+				ServerScriptService: { $className: "ServerScriptService", $properties: { LoadStringEnabled: false }, TypeTorchKernel: { $className: "Folder" } },
+			},
+		};
+		const on = withLoadstring(project, true) as any;
+		expect(on.tree.ServerScriptService.$properties).toEqual({ LoadStringEnabled: true });
+		expect(project.tree.ServerScriptService.$properties.LoadStringEnabled).toBe(false); // a copy
+		// Patch mode: applied only with the flag (kernelLayout), with the stamped value true.
+		expect(kernelLayout(on, { loadstring: true }).serviceProps).toContainEqual({ service: "ServerScriptService", prop: "LoadStringEnabled" });
+		expect(kernelLayout(on).serviceProps).not.toContainEqual({ service: "ServerScriptService", prop: "LoadStringEnabled" });
+		// --replace-place without the flag: false even when an older kernel project says true.
+		const old = withLoadstring({ tree: { ServerScriptService: { $className: "ServerScriptService", $properties: { LoadStringEnabled: true, Other: 1 } } } }, false) as any;
+		expect(old.tree.ServerScriptService.$properties).toEqual({ LoadStringEnabled: false, Other: 1 });
+		expect(declaresLoadstring(on)).toBe(true);
 	});
 	test("base version: newest published by default; saves refuse; published/latest/number", () => {
 		const v = (version: number, published: boolean) => ({ version, published, hasPublishedField: true });

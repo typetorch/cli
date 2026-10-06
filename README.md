@@ -172,7 +172,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch deployments [--branch] [--limit n]` | deployment history with git identity; `*` = each branch's live head; lists uploads that never went out |
 | `typetorch branch ls` | branches, channels and live heads |
 | `typetorch config push [--dry-run]` | copy `defaultBranch`, `channels`, `members`, `devBadgeId` (and `revoked`) into the registry |
-| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--place-file <file>] [--engine splice\|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N); `--replace-place --yes` for the template/test place only; see below |
+| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--place-file <file>] [--engine splice|lune] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build)\|lune] [--kernel <dir>] [--no-backup]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N); `--replace-place --yes` for the template/test place only; see below |
 | `typetorch kernel restore <file> [--dry-run] [--yes]` | publish a place file: a backup from `.typetorch/place-backups/`, or a dry run's patched file |
 | `typetorch approve [id] [--import <dir>] [--test] [--skip-test <reason>] [--rollout <1-99>] [--wait [s]]` | approve a proposal: details, y/N, publish (interactive terminal only); prod-channel ones are signed. A prod deploy or promote proposal without a passed (or skipped) cloud test runs it before the y/N. `--import`: a proposal state dir from automation you run yourself (see "No GitHub Actions") |
 | `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
@@ -499,8 +499,11 @@ any automation you choose to run yourself.
      says `universe.place:read` is coming), and backs it up to `.typetorch/place-backups/<placeId>-v<n>.rbxl`;
    - replaces only the **kernel slots** (the `TypeTorch*` children of services in the kernel's `place.project.json`:
      `ServerScriptService.TypeTorchKernel`, `ReplicatedStorage.TypeTorchKernelShared`,
-     `ReplicatedFirst.TypeTorchKernelClient`; every copy of each) and applies the service settings that project
-     declares (`HttpService.HttpEnabled`, `ServerScriptService.LoadStringEnabled`). The default **splice** engine works
+     `ReplicatedFirst.TypeTorchKernelClient`, and from kernel 0.3.6 `ServerStorage.TypeTorchBackup`; every copy of
+     each) and applies the service settings that project declares (`HttpService.HttpEnabled`;
+     `ServerScriptService.LoadStringEnabled` only with `--loadstring`, which sets it to true for remote-claude's
+     `run_luau` on a test place: without the flag a patch keeps the place's own value and `--replace-place` publishes it
+     off). The default **splice** engine works
      on the binary chunks: every chunk of a class the kernel doesn't use is copied byte for byte; the script and folder
      classes are re-encoded with the game's own values moved as raw bytes; referents stay dense; references into the
      old kernel are re-pointed to the new instance at the same path, or cleared (listed). `--engine lune` re-encodes

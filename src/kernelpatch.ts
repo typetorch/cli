@@ -57,9 +57,14 @@ export function kernelLayout(projectJson: unknown, options: KernelLayoutOptions 
 	return { slots, serviceProps };
 }
 
-/** Whether a kernel place project would turn `loadstring` on (`$properties.LoadStringEnabled` on ServerScriptService). */
+/** Whether a kernel place project turns `loadstring` on (`$properties.LoadStringEnabled` = true on ServerScriptService). */
 export function declaresLoadstring(projectJson: unknown): boolean {
-	return kernelLayout(projectJson, { loadstring: true }).serviceProps.some((p) => p.service === LOADSTRING_SETTING.service && p.prop === LOADSTRING_SETTING.prop);
+	const tree = isRecord(projectJson) ? projectJson.tree : undefined;
+	if (!isRecord(tree)) return false;
+	return Object.entries(tree).some(([key, node]) => {
+		if (!isRecord(node) || (typeof node.$className === "string" ? node.$className : key) !== LOADSTRING_SETTING.service) return false;
+		return isRecord(node.$properties) && node.$properties[LOADSTRING_SETTING.prop] === true;
+	});
 }
 
 export type BaseChoice =

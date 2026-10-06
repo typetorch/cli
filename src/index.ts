@@ -181,8 +181,8 @@ ${WAIT_USAGE}`,
 		summary: "install or update the kernel in the place; restore a backup",
 		usage: `typetorch kernel deploy [--patch] [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>]
                         [--engine splice|lune] [--kernel <dir>] [--allow-dirty] [--allow-untagged] [--fallback-key-file <path>]
-                        [--no-backup]
-typetorch kernel deploy --replace-place [--dry-run] [--yes] [--no-backup]      (template/test place only: wipes Studio content)
+                        [--no-backup] [--loadstring]
+typetorch kernel deploy --replace-place [--dry-run] [--yes] [--no-backup] [--loadstring]      (template/test place only: wipes Studio content)
 typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
 
   1. lune run scripts/check.luau in the kernel dir  2. version (package.json = Constants.luau) + content hash, printed;
@@ -194,10 +194,12 @@ typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
   nothing else can run. No kept payload: the place keeps its backup, with a warning. --no-backup skips it.
   4. Patch (default): download the place's newest version (it must be published; --base published|latest|<n>),
   back it up to .typetorch/place-backups/<placeId>-v<n>.rbxl, replace ONLY the kernel slots (the TypeTorch* children
-  of services in place.project.json) and its service settings (LoadStringEnabled, HttpEnabled), verify (binary + Lune:
+  of services in place.project.json) and its service settings (HttpEnabled; LoadStringEnabled only with --loadstring), verify (binary + Lune:
   everything outside the slots unchanged), write .typetorch/place-patches/<placeId>-v<n>-kernel-<version>.rbxl, show a
   summary, y/N (or --yes), check nobody published meanwhile, publish. A place without a kernel needs --install.
   --dry-run       everything except the publish
+  --loadstring    turn loadstring on (ServerScriptService.LoadStringEnabled = true), for remote-claude's run_luau (the test
+                  place); without it a patch leaves the place's value and --replace-place publishes it off
   --place-file    patch a local .rbxl instead of downloading (Studio: File > Download a Copy); publishing also needs
                   --base <the version it was taken from>
   --engine lune   re-encode the whole place with Lune (rbx-dom) when the default splice engine refuses; rbx-dom migrates
