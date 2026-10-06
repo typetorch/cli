@@ -6,6 +6,7 @@
  */
 import { readFileSync } from "node:fs";
 import { flagBool, flagString, parseArgs, UsageError, type FlagSpec, type ParsedArgs } from "./args.ts";
+import { ACCESS_USAGE, accessCommand, accessFlags } from "./commands/access.ts";
 import { assetsCommand, assetsFlags } from "./commands/assets.ts";
 import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands/build.ts";
 import { configCommand, configFlags } from "./commands/config.ts";
@@ -38,6 +39,7 @@ import { REMOTE_CLAUDE_USAGE, remoteClaudeCommand } from "./commands/remote-clau
 import { rollbackCommand, rollbackFlags } from "./commands/rollback.ts";
 import { UPDATE_USAGE, updateCommandRun, updateFlags } from "./commands/update.ts";
 import { redact, Settings, useSettings } from "./env.ts";
+import { closestCommand, renderHelp } from "./help.ts";
 import { red, setOutputMode } from "./log.ts";
 import { progress } from "./progress.ts";
 
@@ -57,7 +59,7 @@ const COMMANDS: Record<string, Command> = {
 	build: {
 		flags: buildFlags,
 		run: buildCommand,
-		summary: "compile and pack the payload (.typetorch/payload.rbxm)",
+		summary: "compile and pack the payload",
 		usage: `typetorch build [--branch <b>] [--channel prod|dev] [--clean]
 
   Writes src/shared/build.ts, runs rbxtsc (prod channel: $print/$warn compiled away, no source paths), then
@@ -71,7 +73,7 @@ const COMMANDS: Record<string, Command> = {
 	upload: {
 		flags: uploadFlags,
 		run: uploadCommand,
-		summary: "build and upload the payload as a new Model asset (no deploy)",
+		summary: "build and upload a payload, no deploy",
 		usage: `typetorch upload [--branch <b>] [--channel prod|dev] [--no-build] [--moderation-timeout <s>]
 
   Uploads the payload as a NEW private Model asset named tt-<branch>-<commit>[-dirty] and waits for moderation.
@@ -80,7 +82,7 @@ const COMMANDS: Record<string, Command> = {
 	deploy: {
 		flags: deployFlags,
 		run: deployCommand,
-		summary: "build, upload, wait for Approved, then approve (or propose) and tell live servers",
+		summary: "build, upload, approve and send to live servers",
 		usage: `typetorch deploy [--branch <b>] [--channel prod|dev] [--no-build] [--dry-run] [--message <text>] [--force]
                  [--no-registry] [--moderation-timeout <s>] [--propose] [--proposed-by <who>]
                  [--key-file <path>] [--fallback-key-file <path>]
@@ -109,7 +111,7 @@ ${WIDEN_USAGE}`,
 	promote: {
 		flags: promoteFlags,
 		run: promoteCommand,
-		summary: "point a branch at an already uploaded artifact (new seq, no rebuild)",
+		summary: "point a branch at an uploaded build, no rebuild",
 		usage: `typetorch promote <branch> <artifactId|assetId|#seq|commit> [--force] [--dry-run] [--no-registry] [--message <text>]
                   [--key-file <path>] [--fallback-key-file <path>]
 
@@ -129,7 +131,7 @@ ${ROLLOUT_USAGE}`,
 	rollback: {
 		flags: rollbackFlags,
 		run: rollbackCommand,
-		summary: "re-point a branch at an earlier, already approved build",
+		summary: "point a branch back at an earlier build",
 		usage: `typetorch rollback [--branch <b>] [--to <commit|artifactId|assetId|#seq>] [--force] [--dry-run] [--no-registry]
                    [--key-file <path>] [--fallback-key-file <path>]
 
@@ -147,29 +149,36 @@ ${WAIT_USAGE}`,
 	deployments: {
 		flags: deploymentsFlags,
 		run: deploymentsCommand,
-		summary: "list deployments with their git identity (* = live)",
+		summary: "deploy history (* = live)",
 		usage: `typetorch deployments [--branch <b>] [--limit <n>] [--json]`,
 	},
 	branch: {
 		flags: branchFlags,
 		run: branchCommand,
-		summary: "branch ls: branches, channels and live heads",
+		summary: "branches, channels and live heads",
 		usage: `typetorch branch ls [--json]`,
 	},
 	config: {
 		flags: configFlags,
 		run: configCommand,
-		summary: "config push: copy typetorch.json settings into the registry",
+		summary: "push settings to the registry (needs universe:read)",
 		usage: `typetorch config push [--dry-run] [--force]
 
   Writes defaultBranch, channels, members, devBadgeId (and revoked) into the registry, keeping branches and
   deployments. Needs universe:read and universe:write; universe:read can't be granted to API keys today (OAuth
-  only), so with an API key this fails until Roblox offers it.`,
+  only), so with an API key this fails until Roblox offers it. For members/revoked/devBadgeId use
+  \`typetorch access push\` instead (ConfigService TypeTorchAccess, written blind; kernel 0.3.6+).`,
+	},
+	access: {
+		flags: accessFlags,
+		run: (args) => accessCommand(args),
+		summary: "publish members and revoked to servers",
+		usage: ACCESS_USAGE,
 	},
 	kernel: {
 		flags: kernelFlags,
 		run: kernelCommand,
-		summary: "kernel deploy: patch the kernel into the live place (backup, verify, y/N); kernel restore <file>",
+		summary: "install or update the kernel in the place; restore a backup",
 		usage: `typetorch kernel deploy [--patch] [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>]
                         [--engine splice|lune] [--kernel <dir>] [--allow-dirty] [--allow-untagged] [--fallback-key-file <path>]
                         [--no-backup]
@@ -203,7 +212,7 @@ typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
 	approve: {
 		flags: approveFlags,
 		run: approveCommand,
-		summary: "approve a deploy proposal: details, y/N, publish (interactive only)",
+		summary: "review a deploy proposal and publish it (y/N)",
 		usage: `typetorch approve [id] [--no-registry] [--key-file <path>] [--fallback-key-file <path>]
 
   Lists pending proposals (newest first), shows the one you pick (branch, artifact, notes, sources, size, proposer,
@@ -219,37 +228,37 @@ ${ROLLOUT_USAGE}`,
 	test: {
 		flags: testFlags,
 		run: (args) => testCommand(args),
-		summary: "test --cloud: boot an uploaded payload headless in the place, stop it, report errors (the pre-publish gate)",
+		summary: "boot a build headless in the place (the prod gate)",
 		usage: TEST_USAGE,
 	},
 	servers: {
 		flags: serversFlags,
 		run: (args) => serversCommand(args),
-		summary: "live servers from the fleet API: branch, artifact, seq, health, players; --watch",
+		summary: "live servers: branch, build, health, players",
 		usage: SERVERS_USAGE,
 	},
 	report: {
 		flags: reportFlags,
 		run: (args) => reportCommand(args),
-		summary: "what the servers reported for a deploy: swapped/failed/rolled_back, errors, servers left behind",
+		summary: "what the servers reported for a deploy",
 		usage: REPORT_USAGE,
 	},
 	alerts: {
 		flags: alertsFlags,
 		run: (args) => alertsCommand(args),
-		summary: "alerts from the fleet API (servers, deploys, auto-rollbacks); --follow",
+		summary: "server, deploy and auto-rollback alerts",
 		usage: ALERTS_USAGE,
 	},
 	fleet: {
 		flags: fleetFlags,
 		run: (args) => fleetCommand(args),
-		summary: "fleet setup --url: point game servers at the fleet API (ConfigService TypeTorchFleet)",
+		summary: "point game servers at the fleet API",
 		usage: FLEET_USAGE,
 	},
 	pin: {
 		flags: pinFlags,
 		run: (args) => pinCommand(args),
-		summary: "A/B experiment pins on live servers (signed on prod-channel branches)",
+		summary: "A/B pins: run a build on some servers",
 		usage: `typetorch pin <artifactId|assetId|#seq|commit> --branch <b> (--servers <jobId,...> | --pct <1-99>) [--by <userId>]
 typetorch pin --unpin --branch <b> (--servers <jobId,...> | --all) [<artifact>] [--by <userId>]
               [--dry-run] [--no-registry] [--key-file <path>] [--fallback-key-file <path>]
@@ -264,7 +273,7 @@ typetorch pin --unpin --branch <b> (--servers <jobId,...> | --all) [<artifact>] 
 	keys: {
 		flags: keysFlags,
 		run: (args) => keysCommand(args),
-		summary: "keys init [--fallback] / keys rotate / keys resign: the keys that sign prod-channel deploys",
+		summary: "prod signing keys: init, rotate, resign",
 		usage: `typetorch keys init [--key-file <path>]
 typetorch keys init --fallback [--force] [--yes] [--fallback-key-file <path>]
 typetorch keys rotate [--yes] [--key-file <path>] [--fallback-key-file <path>]
@@ -299,7 +308,7 @@ typetorch keys resign [--key-file <path>] [--fallback-key-file <path>]
 	proposals: {
 		flags: proposalsFlags,
 		run: proposalsCommand,
-		summary: "list deploy proposals (pending; --all for every one)",
+		summary: "list deploy proposals",
 		usage: `typetorch proposals [--all] [--json]
 
   Proposals live in proposals.jsonl in the state dir and expire after 24 h.`,
@@ -307,7 +316,7 @@ typetorch keys resign [--key-file <path>] [--fallback-key-file <path>]
 	assets: {
 		flags: assetsFlags,
 		run: (args) => assetsCommand(args),
-		summary: "hot assets: sync models/UI marked TypeTorchAsset in the place to assets + typetorch.assets.lock.json",
+		summary: "sync hot assets from the place",
 		usage: `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n>] [--moderation-timeout <s>]
 typetorch assets status [--place-version <n>]
 typetorch assets list
@@ -334,60 +343,57 @@ typetorch assets list
 		flags: {},
 		run: async () => {},
 		raw: (argv) => remoteClaudeCommand(argv),
-		summary: "prompt Claude Code on this machine from the in-game DEV > Claude tab (runs @typetorch/dev-server)",
+		summary: "Claude Code from the in-game dev menu",
 		usage: REMOTE_CLAUDE_USAGE,
 	},
 	dev: {
 		flags: {},
 		run: async () => {},
 		raw: (argv) => remoteClaudeCommand(argv),
-		summary: "same as remote-claude",
+		summary: "Claude Code from the in-game dev menu",
 		usage: REMOTE_CLAUDE_USAGE.replace("typetorch remote-claude --users", "typetorch dev (= remote-claude) --users"),
 	},
 	update: {
 		flags: updateFlags,
 		run: updateCommandRun,
-		summary: "update this CLI to the newest version on npm (the way it was installed)",
+		summary: "update this CLI from npm",
 		usage: UPDATE_USAGE,
 	},
 	doctor: {
 		flags: doctorFlags,
 		run: doctorCommand,
-		summary: "check tools, typetorch.json, the API key and its scopes",
+		summary: "check tools, typetorch.json, keys and scopes",
 		usage: `typetorch doctor [--json]`,
 	},
 };
 
 function help(): string {
-	const width = Math.max(...Object.keys(COMMANDS).map((c) => c.length));
-	return [
-		`typetorch ${pkg.version}: hot-swap roblox-ts game code on live Roblox servers`,
-		"",
-		"usage: typetorch <command> [options]",
-		"",
-		...Object.entries(COMMANDS).map(([name, c]) => `  ${name.padEnd(width)}  ${c.summary}`),
-		"",
-		"global options: --json (machine output), --verbose, --config <typetorch.json>, --env-file <path>, --help",
-		"keys (environment, the TYPETORCH_ENV_FILE file, or .env here or above; never copied to child processes):",
-		"  OPENCLOUD_ASSETS_KEY, OPENCLOUD_DEPLOY_KEY, OPENCLOUD_PLACE_KEY per job, else TYPETORCH_API_KEY / OPENCLOUD_API_KEY",
-			"deploys are approved by a person at a terminal: typetorch approve; prod-channel ones are signed (typetorch keys)",
-	].join("\n");
+	return renderHelp(pkg.version, Object.fromEntries(Object.entries(COMMANDS).map(([name, c]) => [name, c.summary])));
 }
+
+const HELP_WORDS = new Set(["help", "--help", "-h", "-H", "-?", "/?"]);
 
 async function main(argv: string[]): Promise<number> {
 	const [name, ...rest] = argv;
-	if (!name || name === "help" || name === "--help" || name === "-h") {
+	if (!name || HELP_WORDS.has(name)) {
 		const topic = name === "help" ? rest[0] : undefined;
-		console.log(topic && COMMANDS[topic] ? COMMANDS[topic].usage : help());
+		if (topic && !COMMANDS[topic]) {
+			const guess = closestCommand(topic, Object.keys(COMMANDS));
+			console.error(red(`unknown command "${topic}"${guess ? `: did you mean "${guess}"?` : ""}`));
+			console.error(help());
+			return 2;
+		}
+		console.log(topic ? COMMANDS[topic].usage : help());
 		return 0;
 	}
-	if (name === "--version" || name === "-v" || name === "version") {
+	if (name === "--version" || name === "-v" || name === "-V" || name === "version") {
 		console.log(pkg.version);
 		return 0;
 	}
 	const command = COMMANDS[name];
 	if (!command) {
-		console.error(red(`unknown command "${name}"`));
+		const guess = closestCommand(name, Object.keys(COMMANDS));
+		console.error(red(`unknown command "${name}"${guess ? `: did you mean "${guess}"?` : ""}`));
 		console.error(help());
 		return 2;
 	}

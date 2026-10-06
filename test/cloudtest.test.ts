@@ -83,13 +83,19 @@ function fakeRun(ok: boolean, patch: Partial<GateRun> = {}): GateRun {
 describe("the task script", () => {
 	test("embeds the input as JSON in a long bracket string, and nothing else changes", () => {
 		const script = gateScript(input);
-		expect(script).toContain(`HttpService:JSONDecode([==[${JSON.stringify({ assetId: 123456789, artifactId: "12b63b9-3fa91c", branch: "dev", channel: "dev", requireChannel: null, seq: null, seconds: 5, swap: true })}]==])`);
+		expect(script).toContain(`HttpService:JSONDecode([==[${JSON.stringify({ assetId: 123456789, artifactId: "12b63b9-3fa91c", branch: "dev", channel: "dev", requireChannel: null, seq: null, seconds: 5, swap: true, stubChannel: "dev" })}]==])`);
 		expect(script).not.toContain("__CONFIG__");
 		expect(script).not.toContain("`"); // no Luau interpolated strings inside a TS template literal
 		for (const needle of ["ScriptContext.Error", "InsertService.LoadAsset", "boot.boot(kernel)", "STOP_DEADLINE", "TypeTorchTest", "tree.Shared:GetDescendants()"]) expect(script).toContain(needle);
 	});
-	test("prod: the payload Channel must be prod", () => {
-		expect(gateScript({ ...input, branch: "prod", channel: "prod", requireChannel: "prod" })).toContain('"requireChannel":"prod"');
+	test("prod: the payload Channel must be prod, but the stub kernel still runs as dev (real stores)", () => {
+		const script = gateScript({ ...input, branch: "prod", channel: "prod", requireChannel: "prod" });
+		expect(script).toContain('"requireChannel":"prod"');
+		expect(script).toContain('"stubChannel":"dev"');
+		// The game sees TypeTorch.channel = CONFIG.stubChannel, never the branch's channel.
+		expect(script).toContain("channel = CONFIG.stubChannel,");
+		expect(script).not.toContain("channel = CONFIG.channel,");
+		expect(script).toContain('serverType = if CONFIG.stubChannel == "prod" then "public" else "reserved"');
 	});
 });
 

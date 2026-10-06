@@ -20,8 +20,23 @@ export const BACKUP_DIR = "place-backups";
 export const PATCH_DIR = "place-patches";
 export const LUNE_SCRIPT = "kernel-patch.luau";
 
-/** The kernel's slots and service settings, read from its place project (`tree.<Service>.TypeTorch*`, `$properties`). */
-export function kernelLayout(projectJson: unknown): { slots: SlotRef[]; serviceProps: ServiceProp[] } {
+/** The service setting that turns `loadstring` on place-wide (remote-claude's run_luau needs it; nothing else does). */
+export const LOADSTRING_SETTING: ServiceProp = { service: "ServerScriptService", prop: "LoadStringEnabled" };
+
+export interface KernelLayoutOptions {
+	/**
+	 * Apply the kernel project's `LoadStringEnabled` to the place (`kernel deploy --loadstring`). Off by default
+	 * (security audit 2026-10-06): a patch then leaves the place's own value alone, so installing the kernel never
+	 * turns `loadstring` on in a real game. `loadstring` widens any future code-execution bug to the whole place.
+	 */
+	loadstring?: boolean;
+}
+
+/**
+ * The kernel's slots and service settings, read from its place project (`tree.<Service>.TypeTorch*`, `$properties`).
+ * `ServerScriptService.LoadStringEnabled` is left out unless `options.loadstring` is set (the place keeps its value).
+ */
+export function kernelLayout(projectJson: unknown, options: KernelLayoutOptions = {}): { slots: SlotRef[]; serviceProps: ServiceProp[] } {
 	const slots: SlotRef[] = [];
 	const serviceProps: ServiceProp[] = [];
 	const tree = isRecord(projectJson) ? projectJson.tree : undefined;
@@ -32,9 +47,19 @@ export function kernelLayout(projectJson: unknown): { slots: SlotRef[]; serviceP
 		for (const child of Object.keys(node)) {
 			if (!child.startsWith("$") && child.startsWith("TypeTorch")) slots.push({ service, name: child });
 		}
-		if (isRecord(node.$properties)) for (const prop of Object.keys(node.$properties)) serviceProps.push({ service, prop });
+		if (isRecord(node.$properties)) {
+			for (const prop of Object.keys(node.$properties)) {
+				if (!options.loadstring && service === LOADSTRING_SETTING.service && prop === LOADSTRING_SETTING.prop) continue;
+				serviceProps.push({ service, prop });
+			}
+		}
 	}
 	return { slots, serviceProps };
+}
+
+/** Whether a kernel place project would turn `loadstring` on (`$properties.LoadStringEnabled` on ServerScriptService). */
+export function declaresLoadstring(projectJson: unknown): boolean {
+	return kernelLayout(projectJson, { loadstring: true }).serviceProps.some((p) => p.service === LOADSTRING_SETTING.service && p.prop === LOADSTRING_SETTING.prop);
 }
 
 export type BaseChoice =
