@@ -60,7 +60,7 @@ import {
 	type History,
 } from "./common.ts";
 import { checkChannelGuard, checkPromoteChannel } from "./deploy.ts";
-import { fleetFor, rollbackThreshold, waitSeconds, waitForFleet, WAIT_FLAGS, type FleetDeps, type WaitResult } from "./fleet.ts";
+import { describeRollbackSetting, fleetFor, rollbackSetting, waitSeconds, waitForFleet, WAIT_FLAGS, type FleetDeps, type RollbackSetting, type WaitResult } from "./fleet.ts";
 import { autoRollbackHook } from "./autorollback.ts";
 import { encodeDeployMessage } from "../opencloud.ts";
 import { makeEntry, messageFor, registryMessage, release, type ReleaseResult } from "./release.ts";
@@ -390,7 +390,7 @@ export async function releaseExisting(input: {
 	const skipTest = skipReason(flagString(args, "skip-test"));
 	const testFlag = flagBool(args, "test");
 	const wait = waitSeconds(args, input.branchChannel);
-	const threshold = rollbackThreshold(args);
+	const rollback = rollbackSetting(args, proj.config);
 	if (input.dryRun) {
 		const ending = modeFor(proj, args, input.branchChannel).mode.kind;
 		const entry = makeEntry({ action: kind, branch, artifact: input.artifact, by: input.by }, history.snapshot?.value, history.local);
@@ -406,6 +406,7 @@ export async function releaseExisting(input: {
 			approval: { policy: proj.config.approval, ending },
 			test,
 			wait: wait ?? null,
+			autoRollback: wait !== undefined && kind !== "rollback" ? { failedPct: rollback.threshold ?? null, source: rollback.source } : null,
 			signing,
 			registry: history.snapshot
 				? { readable: true, message: registryMessage(kind, branch, input.artifact.artifactId, note) }
@@ -417,6 +418,7 @@ export async function releaseExisting(input: {
 		info(`  approval  policy "${proj.config.approval}": ${ending}`);
 		info(`  test      ${describeTest(undefined, test)}`);
 		info(`  wait      ${wait !== undefined ? `up to ${wait} s for the servers' reports` : "no (--wait)"}`);
+		if (plan.autoRollback) info(`  rollback  ${describeRollbackSetting(rollback)}`);
 		info(`  signing   ${describeSigning(signing)}`);
 		info(`  registry  ${history.snapshot ? `would publish "${plan.registry.message}"` : `not used (${history.unavailable})`}`);
 		info(`  message   ${DEPLOY_TOPIC} ${JSON.stringify(data)}`);
@@ -451,7 +453,7 @@ export async function releaseExisting(input: {
 		info(bold(`${kind === "rollback" ? "rolled back" : "promoted"} #${result.entry.seq} ${input.summary} in ${timings.total.toFixed(2)} s`));
 		info(dim(`  ${formatTimings(timings)}`));
 	}
-	const fleet = await waitAfterRelease(proj, result, { seconds: wait, oc: input.oc, branchChannel: input.branchChannel, threshold, keyPaths });
+	const fleet = await waitAfterRelease(proj, result, { seconds: wait, oc: input.oc, branchChannel: input.branchChannel, threshold: rollback.threshold, thresholdSource: rollback.source, keyPaths });
 	if (isJson()) return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, timings, ...(fleet ? { fleet } : {}) });
 }
 
@@ -465,6 +467,8 @@ export async function waitAfterRelease(
 		branchChannel: Channel;
 		/** Auto-rollback threshold (percent); undefined = off (--no-auto-rollback, or a rollback itself). */
 		threshold?: number;
+		/** Where the threshold comes from (rollbackSetting), for the output line. */
+		thresholdSource?: RollbackSetting["source"];
 		keyPaths: Record<KeyRole, string>;
 		deps?: FleetDeps & { countdown?: (seconds: number, text: string) => Promise<"go" | "kept">; signer?: DualSigner };
 	},
@@ -474,6 +478,10 @@ export async function waitAfterRelease(
 	if (!setup.client) {
 		info(dim(`  not waiting for the servers' reports: ${setup.missing}`));
 		return undefined;
+	}
+	// The threshold in use and where it comes from (--rollback-at, typetorch.json autoRollback.failedPct, the default).
+	if (result.entry.action !== "rollback") {
+		info(dim(`  ${describeRollbackSetting({ threshold: options.threshold, source: options.thresholdSource ?? (options.threshold === undefined ? "--no-auto-rollback" : "default") })}`));
 	}
 	const fleet = setup.client;
 	const oc = options.oc ?? openCloud("deploy")!;
@@ -552,7 +560,7 @@ export async function approveCommand(args: ParsedArgs) {
 	const rollout = parseRollout(flagString(args, "rollout"));
 	const skipTest = skipReason(flagString(args, "skip-test"));
 	const wait = waitSeconds(args, state.proposal.branchChannel);
-	const threshold = rollbackThreshold(args);
+	const rollback = rollbackSetting(args, proj.config);
 	const result = await approveProposal(proj, state, {
 		io,
 		noRegistry: flagBool(args, "no-registry"),
@@ -566,7 +574,7 @@ export async function approveCommand(args: ParsedArgs) {
 		info(bold(`approved ${state.proposal.id}: #${result.entry.seq} ${state.proposal.branch} -> ${result.entry.artifactId} (asset ${result.entry.assetId})${result.entry.rollout ? ` to ${result.entry.rollout}% of servers` : ""}`));
 		if (result.entry.timings) info(dim(`  ${formatTimings(result.entry.timings)}`));
 	}
-	const fleet = await waitAfterRelease(proj, result, { seconds: wait, branchChannel: state.proposal.branchChannel, threshold, keyPaths: signingKeyPaths(proj, args) });
+	const fleet = await waitAfterRelease(proj, result, { seconds: wait, branchChannel: state.proposal.branchChannel, threshold: rollback.threshold, thresholdSource: rollback.source, keyPaths: signingKeyPaths(proj, args) });
 	if (isJson()) return emitJson({ proposal: state.proposal.id, deployment: result.entry, message: result.message, registry: result.registry, ...(fleet ? { fleet } : {}) });
 }
 

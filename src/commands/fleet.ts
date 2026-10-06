@@ -18,7 +18,8 @@
  * servers alone never roll anything back: they are listed and raised as a `server_stuck` warning.
  */
 import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
-import { fleetUrlError, updateProjectConfig, type Project } from "../config.ts";
+import { fleetUrlError, updateProjectConfig, type Project, type ProjectConfig } from "../config.ts";
+import { DEFAULT_FAILED_PCT, FAILED_PCT_BOUNDS } from "../health.ts";
 import { matchDeployment } from "../deployments.ts";
 import { settings } from "../env.ts";
 import {
@@ -55,7 +56,7 @@ export const fleetFlags = { url: "string", "dry-run": "boolean" } as const;
 /** The flags releasing commands take for the wait. */
 export const WAIT_FLAGS = { wait: "optional", "no-wait": "boolean", "no-auto-rollback": "boolean", "rollback-at": "string" } as const;
 export const DEFAULT_WAIT_SECONDS = 90;
-export const DEFAULT_ROLLBACK_AT = 20;
+export const DEFAULT_ROLLBACK_AT = DEFAULT_FAILED_PCT;
 /** Seconds after the message when a still-waiting fleet gets the same message again. */
 export const RESEND_AFTER_SECONDS = 30;
 /** The ConfigService key game servers read the fleet API's URL and ingest token from. */
@@ -275,16 +276,42 @@ export function waitSeconds(args: ParsedArgs, branchChannel: Channel): number | 
 	return branchChannel === "prod" ? DEFAULT_WAIT_SECONDS : undefined;
 }
 
-/** --rollback-at <percent> (default 20); undefined with --no-auto-rollback. */
-export function rollbackThreshold(args: ParsedArgs): number | undefined {
+/** The auto-rollback threshold and where it comes from (shown in the deploy output). */
+export interface RollbackSetting {
+	/** Percent of the servers that tried the seq; undefined = off. */
+	threshold?: number;
+	source: "--rollback-at" | "--no-auto-rollback" | "typetorch.json autoRollback.failedPct" | "default";
+}
+
+/**
+ * --rollback-at <percent>, else typetorch.json "autoRollback": { "failedPct" } (health.ts), else 20;
+ * --no-auto-rollback turns it off.
+ */
+export function rollbackSetting(args: ParsedArgs, config?: Pick<ProjectConfig, "autoRollback">): RollbackSetting {
 	const raw = flagString(args, "rollback-at");
 	if (args.flags["no-auto-rollback"] === true) {
 		if (raw !== undefined) throw new UsageError("--rollback-at and --no-auto-rollback together");
-		return undefined;
+		return { source: "--no-auto-rollback" };
 	}
-	if (raw === undefined) return DEFAULT_ROLLBACK_AT;
-	if (!/^\d+$/.test(raw) || Number(raw) < 1 || Number(raw) > 100) throw new UsageError(`--rollback-at must be a percent from 1 to 100, got "${raw}"`);
-	return Number(raw);
+	const [low, high] = FAILED_PCT_BOUNDS;
+	if (raw !== undefined) {
+		if (!/^\d+$/.test(raw) || Number(raw) < low || Number(raw) > high) throw new UsageError(`--rollback-at must be a percent from ${low} to ${high}, got "${raw}"`);
+		return { threshold: Number(raw), source: "--rollback-at" };
+	}
+	if (config?.autoRollback) return { threshold: config.autoRollback.failedPct, source: "typetorch.json autoRollback.failedPct" };
+	return { threshold: DEFAULT_ROLLBACK_AT, source: "default" };
+}
+
+/** The threshold alone (rollbackSetting); undefined with --no-auto-rollback. */
+export function rollbackThreshold(args: ParsedArgs, config?: Pick<ProjectConfig, "autoRollback">): number | undefined {
+	return rollbackSetting(args, config).threshold;
+}
+
+/** One line for the deploy output: "auto-rollback at 20% of the servers that tried it (default)". */
+export function describeRollbackSetting(setting: RollbackSetting): string {
+	return setting.threshold === undefined
+		? `auto-rollback off (${setting.source})`
+		: `auto-rollback at ${setting.threshold}% of the servers that tried it (${setting.source})`;
 }
 
 export interface AutoRollbackHook {
@@ -405,9 +432,10 @@ export type { AlertRow };
 
 export const WAIT_USAGE = `  --wait [seconds]     after the message, wait for the servers' reports (the fleet API) and print a summary (default
                        on for prod-channel branches, 90 s; --no-wait skips it). At 30 s the message is re-sent once for
-                       servers still behind. When --rollback-at (default 20) % or more of the servers that tried it failed
-                       or rolled back, the branch is rolled back to the previous artifact automatically (a 10 s Ctrl+C
-                       window at a terminal; --no-auto-rollback turns it off). Stalled servers alone never roll back.`;
+                       servers still behind. When --rollback-at (default: typetorch.json autoRollback.failedPct, else 20) %
+                       or more of the servers that tried it failed or rolled back, the branch is rolled back to the
+                       previous artifact automatically (a 10 s Ctrl+C window at a terminal; --no-auto-rollback turns it
+                       off). Stalled servers alone never roll back.`;
 
 export const SERVERS_USAGE = `typetorch servers [--branch <b>] [--watch] [--json]
 

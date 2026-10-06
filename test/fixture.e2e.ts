@@ -81,6 +81,13 @@ check("build (clean, main -> prod): <commit7>-<hash6>", r.code === 0 && hashId(c
 check("build.ts compiled with the commit", compiled("build").includes(`"${c1}"`), compiled("build"));
 check("prod: $print/$warn and source paths compiled away", !compiled("describe").includes("fixture-debug-print") && !compiled("describe").includes("src/shared") && compiled("describe").includes("fixture-assert-message"), compiled("describe"));
 check("sources recorded", r.json?.sources?.template === c1 && r.json?.debugMacros === false, r.json);
+const healthOf = () => readRbxm(new Uint8Array(readFileSync(join(dir, ".typetorch", "payload.rbxm")))).find((i) => i.className === "Model")?.attributes ?? {};
+let stamped = healthOf();
+check(
+	"health: the defaults stamped on the payload root (HealthErrors 3, HealthWindow 30, HealthRollback true)",
+	stamped.HealthErrors === 3 && stamped.HealthWindow === 30 && stamped.HealthRollback === true && r.json?.health?.source === "default",
+	{ stamped, health: r.json?.health },
+);
 check("tree still clean after the build (generated tsconfig removed)", sh(["git", "status", "--porcelain"]) === "" && !existsSync(join(dir, ".tsconfig.typetorch.json")), sh(["git", "status", "--porcelain"]));
 const prodId = r.json?.artifactId;
 r = tt(["build", "--json"]);
@@ -100,9 +107,21 @@ r = tt(["build", "--json"]);
 check("feature/Thing -> feature-thing, dev, hash id", r.json?.branch === "feature-thing" && r.json?.channel === "dev" && hashId(c2).test(r.json?.artifactId), r.stderr || r.json);
 check("dev: $print keeps its source prefix", compiled("describe").includes("fixture-debug-print") && compiled("describe").includes("src/shared/describe.ts"), compiled("describe"));
 writeFileSync(join(dir, "src", "shared", "extra.ts"), "export const EXTRA = 2;\n");
+// typetorch.json "health" (kernel 0.3.7): this dev-channel build takes the base values and the dev override.
+writeFileSync(join(dir, "typetorch.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(dir, "typetorch.json"), "utf8")), health: { errors: 7, window: 60, dev: { rollback: false } } }, null, "\t"));
 r = tt(["build", "--json"]);
 check("dirty id", r.code === 0 && hashId(c2, true).test(r.json?.artifactId) && r.json?.dirty === true, r.stderr || r.json);
 const dirtyId = r.json?.artifactId;
+stamped = healthOf();
+check(
+	'health: typetorch.json "health" and its dev override stamped (HealthErrors 7, HealthWindow 60, HealthRollback false)',
+	stamped.HealthErrors === 7 && stamped.HealthWindow === 60 && stamped.HealthRollback === false && r.json?.health?.source === "typetorch.json" && r.json?.health?.rollback === false,
+	{ stamped, health: r.json?.health },
+);
+writeFileSync(join(dir, "typetorch.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(dir, "typetorch.json"), "utf8")), health: { errors: 0 } }, null, "\t"));
+r = tt(["build", "--json"]);
+check('health: an out-of-bounds value stops the build before anything runs', r.code === 1 && /"health\.errors" must be a whole number from 1 to 100/.test(r.stderr), r.stderr);
+sh(["git", "checkout", "--", "typetorch.json"]);
 
 // 4. deploy --dry-run without the registry (no key: nothing leaves the machine)
 r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json", "--message", "make coins spin"]);

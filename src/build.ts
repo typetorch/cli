@@ -34,6 +34,7 @@ import { payloadNotes, sourceChanges } from "./changes.ts";
 import { liveHeads, readLocalLog } from "./deployments.ts";
 import { stateDir } from "./state.ts";
 import { PROTOCOL_ATTRIBUTE, protocolHash, protocolStatus, type ProtocolStatus } from "./protocol.ts";
+import { effectiveHealth, healthAttributes, type EffectiveHealth } from "./health.ts";
 
 export const KERNEL_API = 1;
 export const BUILD_FILE = "src/shared/build.ts";
@@ -79,6 +80,8 @@ export interface PayloadMeta {
 	/** The network protocol hash stamped as ProtocolHash (protocol.ts), and how it compares to the branch's previous deploy. */
 	protocolHash?: string;
 	protocol?: { status: ProtocolStatus; since?: number; networks: number; files: string[] };
+	/** The health window stamped as HealthErrors / HealthWindow / HealthRollback (typetorch.json "health", health.ts). */
+	health?: EffectiveHealth;
 }
 
 export interface BuildTarget {
@@ -118,8 +121,8 @@ export function resolveTarget(project: Project, git: GitInfo, options: { branch?
  */
 export function stampProject(
 	projectJson: any,
-	attributes: Record<string, string | number>,
-	children: Record<string, Record<string, string | number>> = {},
+	attributes: Record<string, string | number | boolean>,
+	children: Record<string, Record<string, string | number | boolean>> = {},
 ): any {
 	if (!isRecord(projectJson) || !isRecord(projectJson.tree)) throw new BuildError("default.project.json has no tree");
 	const tree = projectJson.tree as Record<string, unknown>;
@@ -500,8 +503,11 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 	mkdirSync(outDir, { recursive: true });
 	const genPath = join(root, GEN_PROJECT);
 	const payloadPath = join(root, PAYLOAD_FILE);
-	const attributes = (id: string): Record<string, string | number> => {
-		const stamped: Record<string, string | number> = {
+	// The health window (kernel 0.3.7, plans/17 blocker 5): typetorch.json "health" for this build's channel, always
+	// stamped (the defaults without settings), so the build carries its own thresholds wherever it is promoted.
+	const health = effectiveHealth(project.config.health, target.channel);
+	const attributes = (id: string): Record<string, string | number | boolean> => {
+		const stamped: Record<string, string | number | boolean> = {
 			ArtifactId: id,
 			KernelApi: KERNEL_API,
 			Channel: target.channel,
@@ -514,6 +520,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		stamped.Notes = notes;
 		if (protocol.hash) stamped[PROTOCOL_ATTRIBUTE] = protocol.hash;
 		stamped[ASSETS_PAYLOAD_ATTRIBUTE] = assetsJson;
+		Object.assign(stamped, healthAttributes(health));
 		return stamped;
 	};
 	const rojoBuild = async (id: string): Promise<Uint8Array> => {
@@ -566,6 +573,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		assets: { count: Object.keys(assetsLock?.assets ?? {}).length, ...(assetsLock ? { placeVersion: assetsLock.placeVersion } : {}) },
 		...(protocol.hash ? { protocolHash: protocol.hash } : {}),
 		protocol: { status: protocolState, ...(previous?.seq !== undefined ? { since: previous.seq } : {}), networks: protocol.networks, files: protocol.files },
+		health,
 	};
 	writeFileSync(join(root, PAYLOAD_META), JSON.stringify(meta, null, "\t") + "\n");
 	return { meta, timings: watch.total(), target };

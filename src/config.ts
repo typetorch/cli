@@ -18,11 +18,15 @@
  *   "signingPublicKeys": ["<base64>"],          // trusted main public keys = the key asset's PublicKeys
  *   "revokedKeys": ["<base64>"],                // = the key asset's RevokedKeys (optional)
  *   "fallbackPublicKey": "<base64>",            // the fallback key; kernel deploy stamps it as FallbackPublicKey
- *   "keyAssetId": 123                            // the key asset; kernel deploy stamps it as KeyAssetId
+ *   "keyAssetId": 123,                           // the key asset; kernel deploy stamps it as KeyAssetId
+ *   // Safety thresholds (health.ts; kernel 0.3.7), all optional:
+ *   "health": { "errors": 3, "window": 30, "rollback": true, "dev": { "rollback": false } }, // stamped on each build
+ *   "autoRollback": { "failedPct": 20 }          // deploy --wait rolls the branch back at this % of failed servers
  * }
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { validateAutoRollback, validateHealth, type AutoRollbackConfig, type HealthConfig } from "./health.ts";
 import { isRecord, setJsonFields } from "./json.ts";
 import { branchNameError, isChannel, type Channel } from "./naming.ts";
 import { isTestVectorKey, publicKeyError, publicKeyListProblems } from "./signing.ts";
@@ -58,6 +62,10 @@ export interface ProjectConfig {
 	keyAssetId?: number;
 	/** The fleet API (heartbeats, deploy reports, alerts; `typetorch fleet setup`). Tokens come from the environment. */
 	fleet?: { url: string };
+	/** The health window's thresholds, stamped on every build (health.ts; kernel 0.3.7 reads them). */
+	health?: HealthConfig;
+	/** deploy --wait's auto-rollback threshold (health.ts). */
+	autoRollback?: AutoRollbackConfig;
 }
 
 export const APPROVAL_POLICIES = ["all", "prod", "none"] as const;
@@ -95,6 +103,8 @@ const KNOWN_KEYS = new Set([
 	"fallbackPublicKey",
 	"keyAssetId",
 	"fleet",
+	"health",
+	"autoRollback",
 ]);
 
 function positiveInt(value: unknown): number | undefined {
@@ -230,6 +240,18 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 		keyAssetId = positiveInt(raw.keyAssetId);
 		if (keyAssetId === undefined) errors.push(`"keyAssetId" must be a positive integer (the key asset's id)`);
 	}
+	let health: HealthConfig | undefined;
+	if (raw.health !== undefined) {
+		const checked = validateHealth(raw.health);
+		errors.push(...checked.errors);
+		health = checked.health;
+	}
+	let autoRollback: AutoRollbackConfig | undefined;
+	if (raw.autoRollback !== undefined) {
+		const checked = validateAutoRollback(raw.autoRollback);
+		errors.push(...checked.errors);
+		autoRollback = checked.autoRollback;
+	}
 
 	if (errors.length > 0) return { errors, warnings };
 	return {
@@ -253,6 +275,8 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			...(typeof raw.fallbackPublicKey === "string" ? { fallbackPublicKey: raw.fallbackPublicKey } : {}),
 			...(keyAssetId !== undefined ? { keyAssetId } : {}),
 			...(fleet ? { fleet } : {}),
+			...(health ? { health } : {}),
+			...(autoRollback ? { autoRollback } : {}),
 		},
 	};
 }

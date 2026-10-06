@@ -67,11 +67,30 @@ A game repo has `typetorch.json` next to `default.project.json`:
   "signingPublicKeys": ["…"],            // trusted main keys = the key asset's PublicKeys
   "revokedKeys": [],                     // = the key asset's RevokedKeys
   "fallbackPublicKey": "…",              // baked into the place by `kernel deploy`
-  "keyAssetId": 123                      // the key asset; `kernel deploy` stamps it
+  "keyAssetId": 123,                     // the key asset; `kernel deploy` stamps it
+  // optional safety thresholds (see "Health window and auto-rollback settings"):
+  "health": { "errors": 3, "window": 30, "rollback": true, "dev": { "rollback": false } },
+  "autoRollback": { "failedPct": 20 }
 }
 ```
 
 Gitignore `.typetorch/`, `src/shared/build.ts`, `.payload.gen.project.json` and `.tsconfig.typetorch.json`.
+
+### Health window and auto-rollback settings
+
+- `"health"`: on each server a new build is rolled back when its own scripts throw `errors` errors (1-100, default 3)
+  within `window` seconds of starting (5-300, default 30), or an `onStart` fails. `"rollback": false` keeps a failing
+  build running: the server only reports `degraded` (a `health_degraded` alert). `"prod"` and `"dev"` override any of
+  the three for builds of that channel. Per channel, not per branch: the values ride the build, and `promote` moves a
+  build between branches without a rebuild.
+- Every build stamps the result on the payload root as `HealthErrors`, `HealthWindow` and `HealthRollback` (the
+  defaults when unset). Kernel 0.3.7+ reads them when it mounts the build; older kernels ignore them (3, 30 s, on).
+  Prod payloads are signed deploys of your own uploads, so the values are trusted like the code.
+- `"autoRollback": { "failedPct": 20 }`: `--wait` rolls the branch back when this % (1-100) of the servers that tried
+  the build report `failed` or `rolled_back`. `--rollback-at <pct>` overrides it for one command.
+- `build` and `deploy` print the health line; `deploy` prints the auto-rollback line; `doctor` shows both.
+- A noisy game: measure first. Deploy to a dev branch, play, and count your errors in the first 30 s (dev menu >
+  Server > Status shows "Health window: errors / limit, time left"). Then set `errors` above that, or fix the errors.
 
 ### Keys
 
@@ -188,7 +207,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch remote-claude --users <ids> [...]` | runs `typetorch-dev-server remote-claude` ([`@typetorch/dev-server`](https://github.com/typetorch/dev-server)) with the same arguments in this terminal, and exits with its code: devs prompt Claude Code on this machine from the in-game DEV > Claude tab (dev-channel branches only). Found in `TYPETORCH_DEV_SERVER` (an entry), `node_modules/@typetorch/dev-server` in the game repo or a parent, next to this CLI (`npm i -g @typetorch/dev-server`; with npx: `npx -p @typetorch/cli -p @typetorch/dev-server typetorch remote-claude ...`), or a sibling `../dev-server` checkout; else a clear error. It gets the real environment (the dev-server reads the key, `--env-file` / `TYPETORCH_ENV_FILE` and `.env` itself) |
 | `typetorch dev --users <ids> [...]` | the same as `typetorch remote-claude` |
 | `typetorch update [<version>] [--check] [--yes]` | updates this CLI to the newest `@typetorch/cli` on npm (or `<version>`) the way it was installed: in the game's `package.json` with its package manager (bun, pnpm, yarn or npm, from the lockfile; a devDependency stays one), or globally (`npm i -g`, `bun add -g`, pnpm, yarn). Asks y/N first (`--yes` skips; without a terminal it prints the command). npx needs nothing (`npx @typetorch/cli@latest`); a git checkout gets the `git pull` to run. `--check` only shows the versions and the command |
-| `typetorch doctor` | checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), and probes each key's scopes with harmless calls |
+| `typetorch doctor` | checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the health window per channel and the auto-rollback threshold, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), and probes each key's scopes with harmless calls |
 
 Every command takes `--json` (one JSON document on stdout; human lines go to stderr), `--verbose`, `--config <path>`
 and `--env-file <path>` (`remote-claude` passes everything to the dev-server). Under Node, an `--env-file` naming a
@@ -442,8 +461,8 @@ you host. The CLI reads it:
   reports every 5 s until every live server of the branch has reported the seq (or moved past it):
   - at about 30 s it **re-sends the same message** (same seq and signature; kernels ignore a seq they applied) when
     servers are still behind and haven't reported (kernels also poll the head every 60 s and retry failed loads);
-  - **automatic rollback:** when `--rollback-at` (default 20) % or more of the servers that tried the seq (`skipped`
-    ones don't count) report `failed` or `rolled_back`, with at least one failure, it rolls the branch back to the
+  - **automatic rollback:** when `--rollback-at` (default: typetorch.json `autoRollback.failedPct`, else 20) % or
+    more of the servers that tried the seq (`skipped` ones don't count) report `failed` or `rolled_back`, with at least one failure, it rolls the branch back to the
     previous artifact through the same path as `typetorch rollback` (signed on prod-channel branches, with the key
     files on this PC). It decides early once the share can't drop below the threshold. It posts a critical
     `auto_rollback` alert (with the ingest token; otherwise it prints it), shows "rolling back <branch> to <artifact> in

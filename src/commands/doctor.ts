@@ -28,7 +28,8 @@ import { gitInfo } from "../git.ts";
 import { emitJson, green, info, isJson, red, yellow } from "../log.ts";
 import { OpenCloud } from "../opencloud.ts";
 import { FLEET_INGEST_TOKEN_VAR, FLEET_TOKEN_VAR } from "../fleet.ts";
-import { fleetFor } from "./fleet.ts";
+import { describeRollbackSetting, fleetFor, rollbackSetting } from "./fleet.ts";
+import { describeHealth, effectiveHealth, HEALTH_DEFAULTS, HEALTH_KERNEL } from "../health.ts";
 import { withJob } from "../progress.ts";
 import { capture } from "../proc.ts";
 import { hasZstd, isBun, runtimeName } from "../runtime.ts";
@@ -174,6 +175,25 @@ export async function doctorCommand(args: ParsedArgs) {
 		checks.push({ name: "approval", status: "ok", detail: `"${proj.config.approval}" (${proj.config.approval === "none" ? "deploys publish without approval" : "deploys wait for typetorch approve"})` });
 	}
 	if (proj) checks.push({ name: "state dir", status: "ok", detail: stateDir(proj.root) });
+
+	// Safety thresholds (health.ts; plans/17 blocker 5): the health window each build carries, per channel, and deploy
+	// --wait's auto-rollback threshold.
+	if (proj) {
+		const prod = effectiveHealth(proj.config.health, "prod");
+		const dev = effectiveHealth(proj.config.health, "dev");
+		const custom = prod.source !== "default" || dev.source !== "default";
+		const line = (h: typeof prod) => describeHealth({ errors: h.errors, window: h.window, rollback: h.rollback });
+		const values = line(prod) === line(dev) ? `prod and dev builds: ${line(prod)}` : `prod builds: ${line(prod)}; dev builds: ${line(dev)}`;
+		checks.push({
+			name: "health window",
+			status: "ok",
+			detail: custom
+				? `${values}. From typetorch.json "health", stamped on each build; kernel ${HEALTH_KERNEL}+ reads it (older kernels: ${HEALTH_DEFAULTS.errors} errors in ${HEALTH_DEFAULTS.window} s)`
+				: `${values} (the defaults; a game with noisy errors sets typetorch.json "health")`,
+		});
+		const rollback = rollbackSetting({ positionals: [], flags: {} }, proj.config);
+		checks.push({ name: "auto-rollback", status: "ok", detail: `deploy --wait: ${describeRollbackSetting(rollback)}; --rollback-at <pct> or --no-auto-rollback per deploy` });
+	}
 
 	// Dev access lists (security audit 2026-10-06): typetorch.json's members/revoked/devBadgeId reach servers only through
 	// `typetorch access push` (ConfigService TypeTorchAccess). The registry key can't be written with an API key.

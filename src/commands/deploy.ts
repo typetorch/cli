@@ -22,7 +22,8 @@ import { gatePolicy, skipReason } from "../cloudtest.ts";
 import { describeProtocol } from "../protocol.ts";
 import { checkRollout, parseRollout } from "../rollout.ts";
 import { describeShared, DS_READ_SCOPE, DS_WRITE_SCOPES, readSharedSeq, type SharedSeq } from "../seqstore.ts";
-import { rollbackThreshold, waitSeconds, WAIT_FLAGS } from "./fleet.ts";
+import { describeRollbackSetting, rollbackSetting, waitSeconds, WAIT_FLAGS } from "./fleet.ts";
+import { describeHealth } from "../health.ts";
 import { describeTest, GATE_FLAGS, gateRelease } from "./test.ts";
 import { widenCommand } from "./widen.ts";
 import { describeBuild } from "./build.ts";
@@ -164,6 +165,8 @@ export async function deployCommand(args: ParsedArgs) {
 	}
 	if (meta.sources) info(dim(`  sources     ${formatSources(meta.sources)}`));
 	if (meta.protocol) info(dim(`  protocol    ${describeProtocol({ hash: meta.protocolHash, status: meta.protocol.status, since: meta.protocol.since })}`));
+	// The health window this build carries (typetorch.json "health"; kernel 0.3.7+ reads it on each server).
+	if (meta.health) info(dim(`  health      ${describeHealth(meta.health)}`));
 	const branch = branchFlag ?? meta.branch;
 
 	const read = await readRegistryOrThrow();
@@ -187,7 +190,7 @@ export async function deployCommand(args: ParsedArgs) {
 	checkChannelGuard({ branch, branchChannel: targetChannel, artifactChannel: meta.channel, dirty: meta.dirty, force });
 	checkRollout(branch, targetChannel, rollout);
 	const wait = waitSeconds(args, targetChannel);
-	const threshold = rollbackThreshold(args);
+	const rollback = rollbackSetting(args, proj.config);
 
 	const { displayName, description } = assetNaming(proj.config, meta, branch);
 	const changes = meta.notes?.changes ?? [];
@@ -227,6 +230,8 @@ export async function deployCommand(args: ParsedArgs) {
 			approval: { policy: proj.config.approval, ending },
 			test,
 			wait: wait ?? null,
+			autoRollback: wait !== undefined ? { failedPct: rollback.threshold ?? null, source: rollback.source } : null,
+			health: meta.health ?? null,
 			signing,
 			registry: snapshot
 				? { readable: true, configVersion: snapshot.configVersion, exists: snapshot.exists, message: registryMessage("deploy", branch, meta.artifactId, note) }
@@ -243,6 +248,7 @@ export async function deployCommand(args: ParsedArgs) {
 		info(`  approval     policy "${proj.config.approval}": ${ending}`);
 		info(`  test         ${describeTest(undefined, test)}`);
 		info(`  wait         ${wait !== undefined ? `up to ${wait} s for the servers' reports` : "no (--wait)"}`);
+		if (wait !== undefined) info(`  rollback     ${describeRollbackSetting(rollback)}`);
 		if (rollout !== undefined) info(`  rollout      ${rollout}% of the servers (typetorch deploy --widen <pct> later)`);
 		info(`  signing      ${describeSigning(signing)}`);
 		info(`  asset name   ${displayName}`);
@@ -362,7 +368,7 @@ export async function deployCommand(args: ParsedArgs) {
 		);
 		info(dim(`  ${formatTimings(timings)}`));
 	}
-	const fleet = await waitAfterRelease(proj, result, { seconds: wait, oc: deployer, branchChannel: targetChannel, threshold, keyPaths });
+	const fleet = await waitAfterRelease(proj, result, { seconds: wait, oc: deployer, branchChannel: targetChannel, threshold: rollback.threshold, thresholdSource: rollback.source, keyPaths });
 	if (isJson()) {
 		return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, assetName: name.name, timings, ...(fleet ? { fleet } : {}) });
 	}
