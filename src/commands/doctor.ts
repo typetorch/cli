@@ -189,7 +189,7 @@ export async function doctorCommand(args: ParsedArgs) {
 				const ingest = setup.ingest ? "" : `; no ${FLEET_INGEST_TOKEN_VAR}: the CLI can't post alerts (auto_rollback, server_stuck) or run fleet setup`;
 				checks.push({ name: "fleet API", status: "ok", detail: `${new URL(setup.url).host}: ${servers.length} live server(s)${ingest}` });
 			} catch (error) {
-				checks.push({ name: "fleet API", status: "warn", detail: `${(error as Error).message} (reads use ${FLEET_TOKEN_VAR})` });
+				checks.push({ name: "fleet API", status: "warn", detail: (error as Error).message });
 			}
 		}
 	}

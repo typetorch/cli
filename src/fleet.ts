@@ -20,6 +20,7 @@
  * @typetorch/analytics will export `createFleetClient({url, token})` for the same API; the CLI keeps this small
  * fetch client so it stays dependency-free (analytics pulls in DuckDB).
  */
+import { fleetHint, fleetNetworkHint, shortBody } from "./httphints.ts";
 import { table } from "./log.ts";
 import { withJob } from "./progress.ts";
 
@@ -125,13 +126,18 @@ export function httpFleetClient(options: { url: string; token?: string; ingestTo
 			try {
 				response = await doFetch(`${base}${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(options.timeoutMs ?? 20_000) });
 			} catch (error) {
-				throw new FleetError(`the fleet API at ${new URL(base).host} didn't answer: ${(error as Error).message}`);
+				const host = new URL(base).host;
+				throw new FleetError(fleetNetworkHint(error as Error, host) ?? `the fleet API at ${host} didn't answer: ${(error as Error).message}`);
 			}
 			const text = await response.text();
 			if (response.status === 401 || response.status === 403) {
 				throw new FleetError(`the fleet API refused the token (${response.status}): check ${method === "GET" ? FLEET_TOKEN_VAR : FLEET_INGEST_TOKEN_VAR}`, response.status);
 			}
-			if (!response.ok) throw new FleetError(`fleet API ${method} ${path.split("?")[0]} -> ${response.status} ${text.replace(/\s+/g, " ").slice(0, 200)}`, response.status);
+			if (!response.ok) {
+				// A known cause gets its fix; anything else shows the response, shortened (HTML pages reduced to their title).
+				const hint = fleetHint(response.status, text, new URL(base).host);
+				throw new FleetError(hint ?? `fleet API ${method} ${path.split("?")[0]} -> ${response.status} ${shortBody(text)}`, response.status);
+			}
 			try {
 				return text ? JSON.parse(text) : undefined;
 			} catch {
