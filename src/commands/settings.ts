@@ -42,7 +42,8 @@ typetorch settings push                            (defaultBranch, channels and 
   get     one field as JSON (tokens hidden), or all of them
   set     change one field: read, check it was signed by your keys, change, sign (seq + 1), write, ping servers
   push    defaultBranch, channels and access from typetorch.json (access push writes access alone)
-  --force     replace a record your keys didn't sign (lost both keys, or game code wrote junk)
+  --force     replace a record your keys didn't sign (lost both keys, or game code wrote junk); its fields are
+              dropped, never re-signed, so write them again afterwards
   --no-ping   don't ping servers (they still read it within about a minute)
   Needs both signing keys (\`typetorch keys init\`, \`typetorch keys init --fallback\`) and the deploy key's
   ${DS_READ_SCOPE} and ${DS_WRITE_SCOPES}, plus messaging for the ping. Fleet: \`typetorch fleet setup\`.`;
@@ -96,6 +97,10 @@ export function reportChange(result: ChangeSettingsResult, what: string) {
 		return;
 	}
 	info(bold(`${what}: written as settings #${result.seq}`));
+	if (result.untrusted) {
+		const dropped = result.dropped?.length ? ` (dropped: ${result.dropped.join(", ")})` : "";
+		warn(`replaced a record your keys didn't sign${dropped}: write those fields again (typetorch settings push, fleet setup, settings set analytics -)`);
+	}
 	if (result.pinged) info(dim("  servers pinged (kernel 0.3.8 reads it within seconds; older kernels ignore it)"));
 	else if (result.pingError) warn(`the ping failed (${result.pingError}); servers still read the record within about a minute`);
 	else info(dim("  not pinged (--no-ping); servers read it within about a minute"));

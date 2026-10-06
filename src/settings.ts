@@ -239,10 +239,15 @@ export interface SettingsWrite {
 	scopeMissing?: boolean;
 	/** The current record isn't signed by these keys (refused unless `force`). */
 	untrusted?: boolean;
+	/** `force` replaced an untrusted record: its fields, dropped (never re-signed). */
+	dropped?: string[];
 }
 
 export interface WriteSettingsOptions {
-	/** Overwrite a record these keys didn't sign (after losing both keys, or the first write over game-written junk). */
+	/**
+	 * Overwrite a record these keys didn't sign (after losing both keys, or over game-written junk). Its fields are
+	 * dropped, never re-signed (they could be anyone's): only the change is written, at a seq above the stored one.
+	 */
 	force?: boolean;
 	/** Re-sign with a new seq even when nothing changed (`keys rotate`). */
 	resign?: boolean;
@@ -271,17 +276,21 @@ export async function writeSettings(
 			if (parsed.record && parsed.body) {
 				const by = verifySettingsRecord(parsed.record, { main: signer.main.publicKey, fallback: signer.fallback.publicKey });
 				if (!by && !options.force) {
-					refusal = "the stored settings record isn't signed by your keys (neither sig with your main key nor sigF with your fallback key); if you lost both keys, or game code wrote it, run again with --force to replace it";
+					refusal = "the stored settings record isn't signed by your keys (neither sig with your main key nor sigF with your fallback key); if you lost both keys, or game code wrote it, run again with --force to replace it (its fields are dropped)";
 					result.untrusted = true;
 					return undefined;
 				}
-				current = parsed.body;
+				if (by) current = parsed.body;
+				else {
+					result.untrusted = true;
+					result.dropped = Object.keys(parsed.body).sort();
+				}
 				seq = parsed.record.seq;
 			} else if (!options.force) {
 				refusal = `the stored settings entry isn't a usable record (${parsed.problem}); run again with --force to replace it`;
 				result.untrusted = true;
 				return undefined;
-			}
+			} else result.untrusted = true;
 		}
 		result.before = current;
 		const next = mutate(JSON.parse(JSON.stringify(current)) as SettingsBody);

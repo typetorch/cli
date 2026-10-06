@@ -147,8 +147,11 @@ describe("writes", () => {
 		expect(refused.untrusted).toBe(true);
 		expect(refused.error).toContain("isn't signed by your keys");
 		expect((cloud.values.settings as SettingsRecord).seq).toBe(4);
-		const forced = await writeSettings(cloud.oc, 42, mine, (body) => ({ ...body, game: { a: 2 } }), { force: true });
-		expect(forced).toMatchObject({ outcome: "written", seq: 5 });
+		const forced = await writeSettings(cloud.oc, 42, mine, (body) => ({ ...body, access: { members: { "1": "dev" }, revoked: {}, devBadgeId: null } }), { force: true });
+		// The untrusted record's fields are dropped, never re-signed with our keys.
+		expect(forced).toMatchObject({ outcome: "written", seq: 5, untrusted: true, dropped: ["game"] });
+		expect(forced.after).toEqual({ access: { members: { "1": "dev" }, revoked: {}, devBadgeId: null } });
+		expect(verifySettingsRecord(cloud.values.settings as SettingsRecord, { main: mine.main.publicKey })).toBe("sig");
 		const junk = fakeDataStoreCloud({ settings: { hello: "game code wrote this" } });
 		expect((await writeSettings(junk.oc, 42, mine, (body) => body)).error).toContain("isn't a usable record");
 	});
