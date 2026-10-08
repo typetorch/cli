@@ -19,6 +19,7 @@
  */
 import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
 import { fleetUrlError, updateProjectConfig, type Project, type ProjectConfig } from "../config.ts";
+import { checkFleetEndpoint, enforceEndpoints, reportsJson } from "../endpoints.ts";
 import { DEFAULT_FAILED_PCT, FAILED_PCT_BOUNDS } from "../health.ts";
 import { matchDeployment } from "../deployments.ts";
 import { settings } from "../env.ts";
@@ -53,7 +54,7 @@ import type { DualSigner } from "../signing.ts";
 export const serversFlags = { branch: "string", watch: "boolean" } as const;
 export const reportFlags = { branch: "string", "no-registry": "boolean" } as const;
 export const alertsFlags = { follow: "boolean", level: "string", since: "string" } as const;
-export const fleetFlags = { url: "string", "dry-run": "boolean", "no-ping": "boolean", ...KEY_FILE_FLAGS } as const;
+export const fleetFlags = { url: "string", "dry-run": "boolean", "no-ping": "boolean", force: "boolean", ...KEY_FILE_FLAGS } as const;
 /** The flags releasing commands take for the wait. */
 export const WAIT_FLAGS = { wait: "optional", "no-wait": "boolean", "no-auto-rollback": "boolean", "rollback-at": "string" } as const;
 export const DEFAULT_WAIT_SECONDS = 90;
@@ -229,7 +230,7 @@ export async function alertsCommand(args: ParsedArgs, deps: FleetDeps = {}) {
 	}
 }
 
-export async function fleetCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner } = {}) {
+export async function fleetCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; fetch?: typeof fetch } = {}) {
 	const [sub, extra] = args.positionals;
 	if (sub !== "setup") throw new UsageError(`unknown fleet subcommand "${sub ?? ""}" (setup)`);
 	if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
@@ -241,8 +242,12 @@ export async function fleetCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud
 	const ingest = settings().get(FLEET_INGEST_TOKEN_VAR);
 	if (!ingest) throw new Error(`${FLEET_INGEST_TOKEN_VAR} isn't set: game servers post with the fleet API's write-only ingest token (put it in the environment or the env file; it is never printed)`);
 	const dryRun = flagBool(args, "dry-run");
+	// Game servers will post to this address with this token: test the URL, GET /healthz and the token (GET
+	// /v1/auth/check) before anything is signed or written. --force writes it anyway; the failures print as warnings.
+	const report = await checkFleetEndpoint({ url, token: ingest.value, fetch: deps.fetch });
+	enforceEndpoints({ reports: [report], what: "settings.fleet", force: flagBool(args, "force") });
 	if (dryRun) {
-		if (isJson()) return emitJson({ dryRun: true, field: "fleet", value: { url, token: "<ingest token>" } });
+		if (isJson()) return emitJson({ dryRun: true, field: "fleet", value: { url, token: "<ingest token>" }, checks: reportsJson([report]) });
 		info(bold(`dry run: would write settings.fleet = {"url":"${url}","token":"<${FLEET_INGEST_TOKEN_VAR}>"} into the signed settings record and ping servers`));
 		return;
 	}
@@ -254,10 +259,11 @@ export async function fleetCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud
 		signer,
 		what: `fleet setup ${new URL(url).host}`,
 		noPing: flagBool(args, "no-ping"),
+		checked: ["fleet"],
 		mutate: (body) => ({ ...body, fleet: { url, token } }),
 	});
 	if (proj.config.fleet?.url !== url) updateProjectConfig(proj, { fleet: { url } });
-	if (isJson()) return emitJson({ field: "fleet", url, settingsSeq: result.seq ?? null, outcome: result.outcome ?? null });
+	if (isJson()) return emitJson({ field: "fleet", url, settingsSeq: result.seq ?? null, outcome: result.outcome ?? null, checks: reportsJson([report]) });
 	reportChange(result, `fleet setup: game servers post to ${url}`);
 	info(dim(`  typetorch.json fleet.url = ${url}; reads use ${FLEET_TOKEN_VAR}. The token sits in the signed settings record, never printed.`));
 }
@@ -457,10 +463,14 @@ export const ALERTS_USAGE = `typetorch alerts [--follow] [--level info|warning|c
   Alerts from the fleet API (servers, deploys, auto-rollbacks), the last --since minutes (default 60). --follow keeps
   printing new ones (polls every 5 s).`;
 
-export const FLEET_USAGE = `typetorch fleet setup --url <https url> [--dry-run] [--no-ping] [--key-file <path>] [--fallback-key-file <path>]
+export const FLEET_USAGE = `typetorch fleet setup --url <https url> [--dry-run] [--no-ping] [--force] [--key-file <path>] [--fallback-key-file <path>]
 
   Points game servers at the fleet API: writes settings.fleet = {url, token} into the signed settings record (kernel
   0.3.8; \`typetorch settings\`) with the write-only ingest token from ${FLEET_INGEST_TOKEN_VAR} (never printed),
   signed with both prod keys, pings servers, and sets typetorch.json fleet.url. Needs both signing keys and the deploy
   key's DataStore read/create/update scopes.
+  Checked first (--dry-run too), so a broken address or token never reaches game servers: the URL parses, is https and
+  the server's base address; GET <url>/healthz answers within 5 s; GET <url>/v1/auth/check accepts the token as a
+  write-only ingest token for the fleet part (the admin token is refused). A failure prints what is wrong and how to
+  fix it, writes nothing and exits 1; --force writes it anyway (the failures print as warnings).
   Reads (servers, report, alerts, --wait) use the admin token in ${FLEET_TOKEN_VAR}.`;

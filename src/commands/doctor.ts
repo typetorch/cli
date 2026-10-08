@@ -7,6 +7,12 @@
  *   settings     GET DataStore TypeTorch entry "settings"    the signed settings record (kernel 0.3.8, plans/20): seq, age,
  *                                                             fields, and whether it verifies with your keys; missing or
  *                                                             not signed by your keys = warn
+ *   fleet / analytics url, healthz, token   the endpoints IN that record, with the record's own token (endpoints.ts, the
+ *                                                             same checks `fleet setup` and `settings set analytics` run
+ *                                                             before signing): FAIL with a fix when the URL is wrong, the
+ *                                                             server or tunnel doesn't answer /healthz within 5 s, or the
+ *                                                             token is refused / is the admin token; typetorch.json fleet.url
+ *                                                             is checked too and compared with the record's
  *   datastore    GET DataStore TypeTorch entry "heads"         200/404 = ok, 401/403 = missing universe-datastores.objects:read
  *                                                             (the shared seq; :create/:update are checked by a deploy)
  *   datastore write SET DataStore TypeTorch entry "doctor"     200 = ok (a tiny {doctor, t} value), 401/403 = missing
@@ -27,6 +33,7 @@ import { JOB_KEY_VARS, JOB_SCOPES, settings, type KeyJob } from "../env.ts";
 import { gitInfo } from "../git.ts";
 import { emitJson, green, info, isJson, red, yellow } from "../log.ts";
 import { OpenCloud } from "../opencloud.ts";
+import { checkAnalyticsEndpoint, checkFleetEndpoint, type EndpointOptions, type EndpointReport } from "../endpoints.ts";
 import { FLEET_INGEST_TOKEN_VAR, FLEET_TOKEN_VAR } from "../fleet.ts";
 import { describeRollbackSetting, fleetFor, rollbackSetting } from "./fleet.ts";
 import { describeHealth, effectiveHealth, HEALTH_DEFAULTS, HEALTH_KERNEL } from "../health.ts";
@@ -34,7 +41,7 @@ import { withJob } from "../progress.ts";
 import { capture } from "../proc.ts";
 import { hasZstd, isBun, runtimeName } from "../runtime.ts";
 import { rojoBinary } from "../build.ts";
-import { describeFields, readSettings, verifySettingsRecord } from "../settings.ts";
+import { describeFields, readSettings, verifySettingsRecord, type SettingsBody } from "../settings.ts";
 import { DS_READ_SCOPE, DS_WRITE_SCOPES, HEADS_KEY, SEQ_DATASTORE } from "../seqstore.ts";
 import { DURABLE_SCOPES, NOT_DURABLE } from "../durablehead.ts";
 import { createHash } from "node:crypto";
@@ -56,26 +63,91 @@ function mark(status: Status): string {
  * The signed settings record (kernel 0.3.8, plans/20): read with the deploy key, verified with your keys (when they load).
  * Never shows a value (tokens).
  */
-async function settingsCheck(oc: OpenCloud, proj: Project, args: ParsedArgs): Promise<Check> {
+async function settingsCheck(oc: OpenCloud, proj: Project, args: ParsedArgs, deps: DoctorDeps = {}): Promise<Check[]> {
 	const name = "settings";
 	const read = await withJob(name, () => readSettings(oc, proj.config.universeId));
-	if (read.scopeMissing) return { name, status: "warn", detail: `can't read the settings record: the deploy key needs ${DS_READ_SCOPE} (${short(read.error ?? "")})` };
-	if (read.error) return { name, status: "warn", detail: `reading the settings record failed: ${short(read.error)}` };
+	if (read.scopeMissing) return [{ name, status: "warn", detail: `can't read the settings record: the deploy key needs ${DS_READ_SCOPE} (${short(read.error ?? "")})` }];
+	if (read.error) return [{ name, status: "warn", detail: `reading the settings record failed: ${short(read.error)}` }];
 	if (read.missing) {
-		return { name, status: "warn", detail: "no settings record: servers (kernel 0.3.8) use the defaults. Run typetorch settings push (and fleet setup, access push)" };
+		return [{ name, status: "warn", detail: "no settings record: servers (kernel 0.3.8) use the defaults. Run typetorch settings push (and fleet setup, access push)" }];
 	}
-	if (!read.record) return { name, status: "warn", detail: `the settings entry isn't a usable record (${read.problem}); servers ignore it. typetorch settings push --force replaces it` };
+	if (!read.record) return [{ name, status: "warn", detail: `the settings entry isn't a usable record (${read.problem}); servers ignore it. typetorch settings push --force replaces it` }];
 	const fields = describeFields(read.body ?? {}).map((line) => line.split(/\s+/)[0]).join(", ") || "none";
 	let verified = "";
+	// The record's endpoints (fleet, analytics) are tested whether or not it verifies: servers that trust other keys
+	// refuse an unsigned one, but its address and token are still what a broken push would have left behind.
+	const endpoints = () => withJob("settings endpoints (fleet, analytics)", () => settingsEndpointChecks({ body: read.body ?? {}, configFleetUrl: proj.config.fleet?.url, ...deps }));
 	try {
 		const signer = loadSigner(proj, signingKeyPaths(proj, args));
 		const by = verifySettingsRecord(read.record, { main: signer.main.publicKey, fallback: signer.fallback.publicKey });
-		if (!by) return { name, status: "warn", detail: `#${read.record.seq} (${read.record.at}) is NOT signed by your keys: servers that trust other keys refuse it. Rewrite it (typetorch settings push --force)` };
+		if (!by) {
+			return [
+				{ name, status: "warn", detail: `#${read.record.seq} (${read.record.at}) is NOT signed by your keys: servers that trust other keys refuse it. Rewrite it (typetorch settings push --force)` },
+				...(await endpoints()),
+			];
+		}
 		verified = `, verified by your ${by === "sig" ? "main" : "fallback"} key`;
 	} catch {
 		verified = ", not checked (your signing keys don't load here)";
 	}
-	return { name, status: "ok", detail: `#${read.record.seq} written ${read.record.at}${verified}; fields: ${fields}` };
+	return [{ name, status: "ok", detail: `#${read.record.seq} written ${read.record.at}${verified}; fields: ${fields}` }, ...(await endpoints())];
+}
+
+export interface DoctorDeps extends EndpointOptions {}
+
+/** An endpoint report as doctor lines: ok / FAIL (with the fix) / info for steps that could not run. */
+export function reportChecks(report: EndpointReport, label: string = report.target): Check[] {
+	return report.steps.map((step) => ({
+		name: `${label} ${step.step}`,
+		status: step.skipped ? "info" : step.ok ? "ok" : "fail",
+		detail: step.ok ? step.detail : `${step.detail}. Fix: ${step.hint ?? "see the detail"}`,
+	}));
+}
+
+const sameUrl = (a: string, b: string) => a.replace(/\/+$/, "").toLowerCase() === b.replace(/\/+$/, "").toLowerCase();
+
+/**
+ * The endpoints in the live settings record, tested with the record's own tokens (never printed), plus
+ * typetorch.json `fleet.url` compared with the record's. The same checks `fleet setup` and `settings set analytics`
+ * run before they sign anything, so a record written some other way (an old CLI, a hand edit, a server whose tunnel
+ * restarted since) still gets caught.
+ */
+export async function settingsEndpointChecks(input: { body: SettingsBody; configFleetUrl?: string } & EndpointOptions): Promise<Check[]> {
+	const { body } = input;
+	const options: EndpointOptions = { fetch: input.fetch, timeoutMs: input.timeoutMs };
+	const checks: Check[] = [];
+	const [fleet, analytics] = await Promise.all([
+		body.fleet ? checkFleetEndpoint({ url: body.fleet.url, token: body.fleet.token, ...options }) : undefined,
+		body.analytics ? checkAnalyticsEndpoint(body.analytics, options) : undefined,
+	]);
+	if (fleet) checks.push(...reportChecks(fleet));
+	else if (input.configFleetUrl) {
+		checks.push({ name: "fleet", status: "warn", detail: `typetorch.json lists fleet.url ${input.configFleetUrl}, but the live settings record has no fleet section: game servers report nowhere. Run typetorch fleet setup` });
+	} else checks.push({ name: "fleet", status: "info", detail: "the settings record has no fleet section: game servers post no heartbeats (typetorch fleet setup)" });
+	if (analytics) checks.push(...reportChecks(analytics));
+	else checks.push({ name: "analytics", status: "info", detail: "the settings record has no analytics section: game servers send no analytics (typetorch settings set analytics -)" });
+	if (body.fleet && input.configFleetUrl && typeof body.fleet.url === "string" && !sameUrl(body.fleet.url, input.configFleetUrl)) {
+		let recordHost = body.fleet.url;
+		let fileHost = input.configFleetUrl;
+		try {
+			recordHost = new URL(body.fleet.url).host;
+			fileHost = new URL(input.configFleetUrl).host;
+		} catch {}
+		checks.push({
+			name: "fleet url mismatch",
+			status: "warn",
+			detail: `typetorch.json fleet.url (${fileHost}) differs from the live settings record's (${recordHost}): game servers use the record's, the CLI the file's. Run typetorch fleet setup --url <the right one> (bun run local does both for a new tunnel)`,
+		});
+	}
+	return checks;
+}
+
+/** typetorch.json `fleet.url` (what the CLI reads): the URL and /healthz, no token. */
+export async function configFleetChecks(url: string, options: EndpointOptions = {}): Promise<Check[]> {
+	const report = await checkFleetEndpoint({ url, token: undefined, kernelRules: false, ...options });
+	const failed = report.steps.find((step) => !step.ok);
+	if (failed) return [{ name: "typetorch.json fleet", status: "fail", detail: `${failed.step}: ${failed.detail}. Fix: ${failed.hint ?? "see the detail"}` }];
+	return [{ name: "typetorch.json fleet", status: "ok", detail: `${report.host}: url ok, ${report.steps.find((step) => step.step === "healthz")?.detail ?? "healthz ok"}` }];
 }
 
 async function probe(
@@ -107,7 +179,7 @@ export function placeDownloadProbe(status: number, text: string): [Status, strin
 	return ["warn", `unexpected ${status}${status >= 300 ? ` ${short(text)}` : ""}`];
 }
 
-export async function doctorCommand(args: ParsedArgs) {
+export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 	const checks: Check[] = [];
 	const cwd = process.cwd();
 
@@ -265,6 +337,13 @@ export async function doctorCommand(args: ParsedArgs) {
 		checks.push(...keyChecks(facts));
 	}
 
+	// typetorch.json fleet.url: what the CLI reads (servers, report, alerts, --wait). The record's own fleet and analytics
+	// endpoints are checked together with the settings record, below.
+	if (proj?.config.fleet?.url) {
+		const url = proj.config.fleet.url;
+		checks.push(...(await withJob("fleet url (typetorch.json)", () => configFleetChecks(url, deps))));
+	}
+
 	// The fleet API (servers, report, alerts, --wait and auto-rollback); tokens are never printed.
 	if (proj) {
 		const setup = fleetFor(proj);
@@ -325,7 +404,7 @@ export async function doctorCommand(args: ParsedArgs) {
 							? ["fail", `missing universe.place.luau-execution-session:read/:write on the assets key: the cloud test (always on for prod deploys) can't run (${status} ${short(text)})`]
 							: ["warn", `unexpected ${status} ${short(text)}`],
 			),
-			!deployKey ? skipped("settings", "deploy") : settingsCheck(client(deployKey), proj, args),
+			!deployKey ? skipped("settings", "deploy") : settingsCheck(client(deployKey), proj, args, deps),
 			!deployKey ? skipped("scope datastore", "deploy") : probe(
 				"scope datastore",
 				() => client(deployKey).request("GET", `/cloud/v2/universes/${universeId}/data-stores/${SEQ_DATASTORE}/entries/${HEADS_KEY}`),
@@ -377,7 +456,7 @@ export async function doctorCommand(args: ParsedArgs) {
 				(status, text) => placeDownloadProbe(status, text),
 			),
 		]);
-		checks.push(...probes);
+		checks.push(...probes.flat());
 	}
 
 	const failed = checks.filter((c) => c.status === "fail").length;

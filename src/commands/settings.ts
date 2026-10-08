@@ -6,6 +6,7 @@
 import { flagBool, UsageError, type ParsedArgs } from "../args.ts";
 import { accessValue } from "../access.ts";
 import type { Project } from "../config.ts";
+import { checkAnalyticsEndpoint, enforceEndpoints, reportsJson, type EndpointReport } from "../endpoints.ts";
 import { bold, dim, emitJson, info, isJson, warn } from "../log.ts";
 import type { OpenCloud } from "../opencloud.ts";
 import {
@@ -30,6 +31,7 @@ export const SETTINGS_USAGE = `typetorch settings status
 typetorch settings get [field | game.<key>]
 typetorch settings set game.<key> <json | ->       (- reads the JSON from stdin)
 typetorch settings set analytics <json | ->        (the analytics sink; use - so tokens never sit in a command line)
+                                                   (checked first: URL, GET /healthz, the token; refused when broken)
 typetorch settings unset game.<key> | analytics | fleet
 typetorch settings push                            (defaultBranch, channels and dev access from typetorch.json)
   [--dry-run] [--force] [--no-ping] [--key-file <path>] [--fallback-key-file <path>]
@@ -43,7 +45,12 @@ typetorch settings push                            (defaultBranch, channels and 
   set     change one field: read, check it was signed by your keys, change, sign (seq + 1), write, ping servers
   push    defaultBranch, channels and access from typetorch.json (access push writes access alone)
   --force     replace a record your keys didn't sign (lost both keys, or game code wrote junk); its fields are
-              dropped, never re-signed, so write them again afterwards
+              dropped, never re-signed, so write them again afterwards. For \`set analytics\` it also writes a
+              value whose checks failed (the failures print as warnings)
+  Before \`set analytics\` signs anything it checks the endpoint like \`typetorch doctor\` does: the URL parses, is
+  https and (DuckDB) ends in /v1/ingest; GET <server>/healthz answers within 5 s; the token is accepted by
+  GET /v1/auth/check as a write-only ingest token (never the admin token). A failure prints what is wrong and how to
+  fix it, writes nothing and exits 1. Basin streams: the URLs must answer; the token can't be verified.
   --no-ping   don't ping servers (they still read it within about a minute)
   Needs both signing keys (\`typetorch keys init\`, \`typetorch keys init --fallback\`) and the deploy key's
   ${DS_READ_SCOPE} and ${DS_WRITE_SCOPES}, plus messaging for the ping. Fleet: \`typetorch fleet setup\`.`;
@@ -59,6 +66,12 @@ export interface ChangeSettingsInput {
 	signer: DualSigner;
 	mutate: (body: SettingsBody) => SettingsBody | undefined;
 	what: string;
+	/**
+	 * The sections whose endpoint the caller checked (endpoints.ts: URL, /healthz, token) or deliberately forced past.
+	 * A change to `fleet` or `analytics` that isn't listed here is refused before anything is signed, so no new write
+	 * path can push a URL or token nobody tested.
+	 */
+	checked?: readonly ("fleet" | "analytics")[];
 	force?: boolean;
 	/** Re-sign with a new seq even when nothing changed (keys rotate / resign). */
 	resign?: boolean;
@@ -74,7 +87,19 @@ export interface ChangeSettingsResult extends SettingsWrite {
 /** One settings change, end to end (write + ping). Throws on refusals and failed writes with what to do. */
 export async function changeSettings(input: ChangeSettingsInput): Promise<ChangeSettingsResult> {
 	const { proj } = input;
-	const write = await writeSettings(input.oc, proj.config.universeId, input.signer, input.mutate, { force: input.force, resign: input.resign, now: input.now });
+	const checked = new Set(input.checked ?? []);
+	let unchecked: string | undefined;
+	const mutate = (body: SettingsBody): SettingsBody | undefined => {
+		const before = { fleet: encodeBody({ fleet: body.fleet }), analytics: encodeBody({ analytics: body.analytics }) };
+		const next = input.mutate(body);
+		if (next === undefined) return undefined;
+		for (const field of ["fleet", "analytics"] as const) {
+			if (!checked.has(field) && encodeBody({ [field]: next[field] }) !== before[field]) unchecked = field;
+		}
+		return unchecked ? undefined : next;
+	};
+	const write = await writeSettings(input.oc, proj.config.universeId, input.signer, mutate, { force: input.force, resign: input.resign, now: input.now });
+	if (unchecked) throw new Error(`${input.what}: internal error: this change writes settings.${unchecked} without checking its endpoint first (endpoints.ts); nothing was written`);
 	if (write.scopeMissing) throw new Error(`can't write the settings record: the deploy key needs ${DS_READ_SCOPE} and ${DS_WRITE_SCOPES} (${write.error})`);
 	if (write.error) throw new Error(`${input.what}: ${write.error}`);
 	const result: ChangeSettingsResult = { ...write };
@@ -132,18 +157,23 @@ function plainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export async function settingsCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; stdin?: () => Promise<string>; now?: () => Date } = {}) {
+export async function settingsCommand(
+	args: ParsedArgs,
+	deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; stdin?: () => Promise<string>; now?: () => Date; fetch?: typeof fetch } = {},
+) {
 	const [sub, path, valueArg, extra] = args.positionals;
 	if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
 	const proj = project(args);
 	const dryRun = flagBool(args, "dry-run");
 	const force = flagBool(args, "force");
 	const noPing = flagBool(args, "no-ping");
-	const oc = deps.oc ?? openCloud("deploy")!;
+	let cloud: Pick<OpenCloud, "request" | "publishMessage"> | undefined = deps.oc;
+	// The deploy key is only needed once the record is read: `set analytics` tests its endpoint first (no key needed).
+	const client = () => (cloud ??= openCloud("deploy")!);
 
 	if (sub === "status" || sub === "get") {
 		if (sub === "status" && path !== undefined) throw new UsageError(`unexpected argument "${path}"`);
-		const read = await readSettings(oc, proj.config.universeId);
+		const read = await readSettings(client(), proj.config.universeId);
 		if (read.scopeMissing) throw new Error(`can't read the settings record: the deploy key needs ${DS_READ_SCOPE} (${read.error})`);
 		if (read.error) throw new Error(`reading the settings record failed: ${read.error}`);
 		if (sub === "get") {
@@ -196,6 +226,7 @@ export async function settingsCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCl
 	if (sub !== "set" && sub !== "unset" && sub !== "push") throw new UsageError(`unknown settings subcommand "${sub ?? ""}" (status, get, set, unset, push)`);
 	let mutate: (body: SettingsBody) => SettingsBody | undefined;
 	let what: string;
+	let checks: EndpointReport[] = [];
 	if (sub === "push") {
 		if (path !== undefined) throw new UsageError(`unexpected argument "${path}"`);
 		const access = accessValue(proj.config);
@@ -233,20 +264,27 @@ export async function settingsCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCl
 		if (key === undefined && !plainObject(value)) throw new UsageError("analytics must be a JSON object (the sink settings)");
 		mutate = (body) => (key !== undefined ? { ...body, game: { ...(body.game ?? {}), [key]: value } } : { ...body, analytics: value as Record<string, unknown> });
 		what = `settings set ${path}`;
+		// The analytics sink goes to every game server: test the URL, /healthz and the token before anything is signed.
+		if (key === undefined) {
+			checks = [await checkAnalyticsEndpoint(value, { fetch: deps.fetch })];
+			enforceEndpoints({ reports: checks, what: "settings.analytics", force });
+		}
 	}
 	if (dryRun) {
-		const read = await readSettings(oc, proj.config.universeId);
+		const read = await readSettings(client(), proj.config.universeId);
 		if (read.error) throw new Error(`reading the settings record failed: ${read.error}`);
 		const next = mutate(JSON.parse(JSON.stringify(read.body ?? {})) as SettingsBody);
 		const changed = next !== undefined && encodeBody(next) !== encodeBody(read.body ?? {});
-		if (isJson()) return emitJson({ dryRun: true, seq: read.record ? read.record.seq + 1 : 1, changed, after: maskSecrets(next ?? read.body ?? {}) });
+		if (isJson()) return emitJson({ dryRun: true, seq: read.record ? read.record.seq + 1 : 1, changed, after: maskSecrets(next ?? read.body ?? {}), ...(checks.length ? { checks: reportsJson(checks) } : {}) });
 		info(bold(`dry run: ${changed ? `would write settings #${read.record ? read.record.seq + 1 : 1}` : "nothing to change"}`));
 		for (const line of describeFields(next ?? read.body ?? {})) info(`  ${line}`);
 		return;
 	}
 	const signer = deps.signer ?? settingsSigner(proj, args);
-	const result = await changeSettings({ proj, oc, signer, mutate, what, force, noPing, now: deps.now });
-	if (isJson()) return emitJson({ outcome: result.outcome ?? null, seq: result.seq ?? null, pinged: result.pinged ?? false, fields: result.after ? Object.keys(result.after).sort() : [] });
+	const result = await changeSettings({ proj, oc: client(), signer, mutate, what, force, noPing, now: deps.now, checked: checks.map((report) => report.target) });
+	if (isJson()) {
+		return emitJson({ outcome: result.outcome ?? null, seq: result.seq ?? null, pinged: result.pinged ?? false, fields: result.after ? Object.keys(result.after).sort() : [], ...(checks.length ? { checks: reportsJson(checks) } : {}) });
+	}
 	reportChange(result, what);
 }
 
