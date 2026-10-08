@@ -29,6 +29,7 @@ import {
 	type SettingsRecord,
 } from "../src/settings";
 import { generateSigningKey, parseSigningKey, verifyCanonicalStrict, type DualSigner } from "../src/signing";
+import { fakeServer } from "./fixtures/fake-analytics";
 import { fakeDataStoreCloud } from "./fixtures/fake-datastore";
 import { FIXTURE_BODIES, fixtures } from "./fixtures/settings-fixtures";
 
@@ -199,12 +200,14 @@ describe("commands", () => {
 		const proj = project();
 		const signer = newSigner();
 		const cloud = fakeDataStoreCloud();
-		const deps = { oc: cloud.oc, signer, now: AT };
+		// `set analytics` checks the endpoint first (endpoints.ts): a fake server whose ingest token is the one below.
+		const server = fakeServer({ ingest: ["analytics-secret-0123456789"] });
+		const deps = { oc: cloud.oc, signer, now: AT, fetch: server.fetch };
 		await run(proj, () => settingsCommand(parseArgs(["set", "game.shop.price", "75"], settingsFlags), deps));
 		await run(proj, () => settingsCommand(parseArgs(["set", "game.flags", '{"pvp":true}'], settingsFlags), deps));
 		const got = await run(proj, () => settingsCommand(parseArgs(["get", "game.shop.price"], settingsFlags), deps));
 		expect(got.out.trim()).toBe("75");
-		const stdin = '{"backend":"duckdb","events":"https://a.example/v1/ingest","token":"analytics-secret-0123456789"}';
+		const stdin = '{"backend":"duckdb","events":"https://fleet.example.com/v1/ingest","token":"analytics-secret-0123456789"}';
 		const set = await run(proj, () => settingsCommand(parseArgs(["set", "analytics", "-"], settingsFlags), { ...deps, stdin: async () => stdin }));
 		expect(set.out).toContain("settings #3");
 		const status = await run(proj, () => settingsCommand(parseArgs(["status"], settingsFlags), deps));
@@ -253,11 +256,13 @@ describe("commands", () => {
 		const proj = project();
 		useSettings(new Settings({ startDir: proj.root, env: { TYPETORCH_FLEET_INGEST_TOKEN: "ingest-secret-1234567890" } }));
 		const cloud = fakeDataStoreCloud();
-		const done = await run(proj, () => fleetCommand(parseArgs(["setup", "--url", "https://fleet.example"], fleetFlags), { oc: cloud.oc, signer: newSigner() }));
+		// The endpoint is checked before anything is signed (endpoints.ts): a fake server that knows this ingest token.
+		const fetch = fakeServer({ ingest: ["ingest-secret-1234567890"] }).fetch;
+		const done = await run(proj, () => fleetCommand(parseArgs(["setup", "--url", "https://fleet.example"], fleetFlags), { oc: cloud.oc, signer: newSigner(), fetch }));
 		expect(JSON.parse((cloud.values.settings as SettingsRecord).body).fleet).toEqual({ url: "https://fleet.example", token: "ingest-secret-1234567890" });
 		expect(done.out).not.toContain("ingest-secret");
 		expect(JSON.parse(readFileSync(proj.configPath, "utf8")).fleet).toEqual({ url: "https://fleet.example" });
-		await expect(run(proj, () => fleetCommand(parseArgs(["setup", "--url", "http://fleet.example"], fleetFlags), { oc: cloud.oc, signer: newSigner() }))).rejects.toThrow(/https/);
+		await expect(run(proj, () => fleetCommand(parseArgs(["setup", "--url", "http://fleet.example"], fleetFlags), { oc: cloud.oc, signer: newSigner(), fetch }))).rejects.toThrow(/https/);
 	});
 	test("config push is gone with a pointer to settings push", async () => {
 		const { configCommand } = await import("../src/commands/config");

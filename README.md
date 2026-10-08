@@ -209,7 +209,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch dev --users <ids> [...]` | the same as `typetorch remote-claude` |
 | `typetorch migrate --from flamework [--dry-run] [--net compat\|native] [--report <file>] [--allow-dirty]` | the mechanical part of moving a Flamework 1.x game (see "Migrating from Flamework"); local only, no keys |
 | `typetorch update [<version>] [--check] [--yes]` | updates this CLI to the newest `@typetorch/cli` on npm (or `<version>`) the way it was installed: in the game's `package.json` with its package manager (bun, pnpm, yarn or npm, from the lockfile; a devDependency stays one), or globally (`npm i -g`, `bun add -g`, pnpm, yarn). Asks y/N first (`--yes` skips; without a terminal it prints the command). npx needs nothing (`npx @typetorch/cli@latest`); a git checkout gets the `git pull` to run. `--check` only shows the versions and the command |
-| `typetorch doctor` | checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the health window per channel and the auto-rollback threshold, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), and probes each key's scopes with harmless calls |
+| `typetorch doctor` | checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the health window per channel and the auto-rollback threshold, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), the endpoints in the live settings record (`fleet` and `analytics`: url, `/healthz`, token; a stale tunnel or a wrong token is a FAIL with the fix) and typetorch.json's `fleet.url`, and probes each key's scopes with harmless calls |
 
 Every command takes `--json` (one JSON document on stdout; human lines go to stderr), `--verbose`, `--config <path>`
 and `--env-file <path>` (`remote-claude` passes everything to the dev-server). Under Node, an `--env-file` naming a
@@ -345,6 +345,24 @@ init`"). `settings status` and `get` print no token; `set analytics -` reads the
 in a command line. Servers verify by the same strict rule as prod deploys and refuse an older seq, so game code (which
 can write DataStores) can't change it; it can only put back an older signed copy, which running servers refuse (a
 fresh write fixes it).
+
+**Endpoint checks (`fleet` and `analytics` never reach the record broken).** A wrong address or token in the record is
+not rejected by anything else: game servers just fail every request ("NetFail", HTTP 401 or 530) until someone looks at
+the dev menu. So `typetorch fleet setup` and `typetorch settings set analytics -` test the value BEFORE reading the
+record or signing, and `typetorch doctor` runs the same tests against the live record:
+
+| Step | What is checked | Typical fix it prints |
+|---|---|---|
+| `url` | parses; https (the kernel's Fleet module and Roblox servers only use https; analytics also takes http on localhost for Studio); no user info; fleet: the base address, not an endpoint path, and only the characters the kernel accepts; DuckDB analytics: ends in `/v1/ingest`, with a token; Basin: both stream URLs | give the public https address |
+| `healthz` | `GET <base>/healthz` answers 200 `{"ok":true}` within 5 s; redirects are reported, not followed | a dead quick tunnel: start `bun run local` again (the tunnel URL changes on every run); a stopped server; a wrong host |
+| `token` | `GET <base>/v1/auth/check` (no side effects) accepts the token as the game (write-only) key for that part (fleet / analytics: `parts` in the answer); the ADMIN token is refused (the record is readable by every script in the game). Servers before that route: `GET /v1/settings` proves the token is accepted | put the server's API key (`TYPETORCH_API_KEY`; `TT_ANALYTICS_INGEST_TOKENS` before the backend rename) in `TYPETORCH_FLEET_INGEST_TOKEN` / the `token` field |
+
+A failure prints each failing step with a `fix:` line in red, writes nothing (no record, no ping, no typetorch.json
+change) and exits 1; `--force` writes anyway and prints the failures as warnings. `--dry-run` runs the checks too.
+Basin streams have no `/healthz` and no side-effect-free authenticated call: their URLs must answer (any status) and a
+401/403 is a refused token; whether the token is right is otherwise only seen on the first upload. `doctor` lists
+`fleet url / healthz / token` and `analytics url / healthz / token` from the live record as ok / FAIL, `typetorch.json
+fleet` for the file's `fleet.url`, and warns when the file's URL differs from the record's. Tokens are never printed.
 
 `--no-registry` (deploy, rollback, promote, approve, kernel deploy) is accepted and prints a one-line note.
 `--require-registry` now means `--require-shared-seq`.
@@ -486,7 +504,9 @@ you host. The CLI reads it:
 
 - **Setup:** `typetorch fleet setup --url https://<host>` writes `fleet` = `{url, token}` into the signed settings
   record (see "Settings"; kernel 0.3.8), with the write-only ingest token from `TYPETORCH_FLEET_INGEST_TOKEN`, pings
-  the servers, and sets typetorch.json `"fleet": { "url": ... }`. Reads use the admin token in
+  the servers, and sets typetorch.json `"fleet": { "url": ... }`. It first checks the address and the token (URL,
+  `GET /healthz`, `GET /v1/auth/check`; see "Settings > Endpoint checks") and refuses a broken one (`--force` to write
+  it anyway). Reads use the admin token in
   `TYPETORCH_FLEET_TOKEN`. Both tokens come from the environment or the env file and are never printed or passed to a
   child process. Without them, `servers`, `report` and `alerts` say so in one line, and `--wait` is skipped with a note.
 - `typetorch servers [--branch <b>] [--watch]`: job, branch, artifact, applied seq, health (`ok`, `failed`,

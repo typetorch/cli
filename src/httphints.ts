@@ -8,6 +8,16 @@
 export const LOCAL_FLEET_HINT =
 	"start it again on the dev PC: in analytics/, bun run local -- --env-file <server env file> --game <game repo> (a new tunnel URL; it updates the game settings and typetorch.json)";
 
+/**
+ * How to get the right token for a fleet / analytics endpoint. The server has two secrets: the API key
+ * (TYPETORCH_API_KEY, TT_ANALYTICS_INGEST_TOKENS before the rename; write-only: what game servers hold in the settings
+ * record) and the admin token (TYPETORCH_ADMIN_TOKEN, TT_ANALYTICS_ADMIN_TOKEN before; reads: stays on the dev's PC).
+ */
+export function INGEST_TOKEN_HINT(part: "fleet" | "analytics"): string {
+	const where = part === "fleet" ? "TYPETORCH_FLEET_INGEST_TOKEN (the CLI's env file)" : 'the "token" field of the analytics settings';
+	return `put the server's API key (TYPETORCH_API_KEY, or one of TT_ANALYTICS_INGEST_TOKENS on a server before the rename) in ${where}; the admin token is the read token and never goes to game servers`;
+}
+
 /** The response as one short line: JSON `error`/`message`, an HTML page's title, else the text. */
 export function shortBody(text: string, max = 160): string {
 	const trimmed = text.trim();
@@ -58,7 +68,18 @@ export function fleetNetworkHint(error: Error, host: string): string | undefined
 	if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(text) && /\.trycloudflare\.com$/i.test(host)) {
 		return `${host} no longer exists (quick tunnel URLs die with their cloudflared); ${LOCAL_FLEET_HINT}`;
 	}
-	if (/ECONNREFUSED/i.test(text)) return `nothing listens at ${host}: start the analytics server (or ${LOCAL_FLEET_HINT})`;
+	// Bun's fetch says "ConnectionRefused" for a refused connection AND for a host name that doesn't resolve.
+	if (/ECONNREFUSED|ConnectionRefused|FailedToOpenSocket|Unable to connect/i.test(text)) {
+		if (/\.trycloudflare\.com$/i.test(host)) return `${host} doesn't answer: quick tunnel URLs die with their cloudflared (a new run gets a new URL), or the server behind it stopped; ${LOCAL_FLEET_HINT}`;
+		return `nothing listens at ${host} (or the host name doesn't exist): start the analytics server (or ${LOCAL_FLEET_HINT})`;
+	}
 	if (/timeout|timed out|ETIMEDOUT|aborted/i.test(text)) return `${host} didn't answer in time: check that the server and its tunnel are running`;
+	if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(text)) return `${host} doesn't resolve: check the URL for typos (and this PC's internet connection)`;
+	if (/CERT_|SELF_SIGNED|UNABLE_TO_VERIFY|certificate|ERR_TLS|SSL/i.test(text)) {
+		return `${host} has no valid TLS certificate (Roblox servers refuse it too): use a host with a real certificate (the Cloudflare tunnel, or Caddy on a VPS)`;
+	}
+	if (/ECONNRESET|socket hang up|UND_ERR_SOCKET|closed unexpectedly/i.test(text)) {
+		return `${host} dropped the connection: the server or its tunnel is restarting or overloaded; ${LOCAL_FLEET_HINT}`;
+	}
 	return undefined;
 }
