@@ -216,6 +216,7 @@ export interface KernelTaskConfig {
 	expect: Record<string, string>;
 	/** mode "save": the check task's outside descriptor root; any other value aborts before the save. */
 	expectOutside?: string;
+	expectOutsideList?: string[];
 }
 
 /**
@@ -553,7 +554,9 @@ local function describeTree(root, phase, refs)
 		end
 		table.insert(lines, depth .. "|" .. instance.Name .. "|" .. instance.ClassName .. "|" .. attributesOf(instance) .. "|" .. tagsOf(instance) .. "|" .. extra)
 		for _, child in childrenOf(instance) or {} do
-			walk(child, depth + 1)
+			if tryRead(child, "Archivable") ~= false then -- never saved; see manifest()
+				walk(child, depth + 1)
+			end
 		end
 	end
 	walk(root, 0)
@@ -580,7 +583,9 @@ local function manifest(phase, serialize, refs)
 		-- comparison (rootD) must not depend on the order the engine lists things in.
 		local seen = {}
 		for _, child in children do
-			if not isSlotChild(service, child) then
+			-- Archivable = false instances are never saved (e.g. the default PlayerModule, PlayerScriptsLoader and
+			-- RbxCharacterSounds the engine inserts into StarterPlayerScripts in every session, in varying order).
+			if not isSlotChild(service, child) and tryRead(child, "Archivable") ~= false then
 				seen[child.Name] = (seen[child.Name] or 0) + 1
 				m.entries[serviceKey].kids += 1
 				local key = serviceKey .. "/" .. child.Name .. "#" .. seen[child.Name]
@@ -622,11 +627,12 @@ local function manifest(phase, serialize, refs)
 	table.sort(dlines)
 	m.root = hashString(table.concat(lines, "\n"))
 	m.rootD = hashString(table.concat(dlines, "\n"))
+	m.dlist = dlines
 	return m
 end
 
 local function summary(m)
-	return { services = m.services, subtrees = m.subtrees, instances = m.instances, unserializable = m.unserializable, unreadable = m.unreadable, root = m.root, rootD = m.rootD }
+	return { services = m.services, subtrees = m.subtrees, instances = m.instances, unserializable = m.unserializable, unreadable = m.unreadable, root = m.root, rootD = m.rootD, dlist = m.dlist }
 end
 
 -- A slot's scripts: { ["relpath:Class"] = sourceHash } and the counts.
@@ -829,6 +835,27 @@ local function run()
 	result.timings.before = clock() - t
 	if CONFIG.expectOutside ~= nil and before.rootD ~= CONFIG.expectOutside then
 		problem("the place's content outside the kernel differs from what the check task saw (" .. before.rootD .. " now, " .. CONFIG.expectOutside .. " then); nothing was saved")
+		-- Then name the entries that differ from the check task's list.
+		local was, now = {}, {}
+		for _, line in CONFIG.expectOutsideList or {} do
+			was[line] = true
+		end
+		for _, line in before.dlist or {} do
+			now[line] = true
+		end
+		local shown = 0
+		for line in now do
+			if not was[line] and shown < 12 then
+				shown += 1
+				problem("outside differs: now " .. line)
+			end
+		end
+		for line in was do
+			if not now[line] and shown < 24 then
+				shown += 1
+				problem("outside differs: check saw " .. line)
+			end
+		end
 	end
 	if #result.problems > 0 then
 		result.outside = summary(before)
@@ -1055,7 +1082,7 @@ export interface KernelTaskResult {
 	newSlots: { slot: string; copies: number; instances: number; scripts: number; scriptsHash?: string }[];
 	settings: { path: string; want: string; before?: string; after?: string; changed: boolean; error?: string }[];
 	refs: { remapped: string[]; cleared: string[]; nRemapped: number; nCleared: number };
-	outside: { services: number; subtrees: number; instances: number; unserializable: number; unreadable: number; unstable: number; root?: string; rootD?: string; after?: string; afterD?: string; changed: string[]; nChanged: number };
+	outside: { services: number; subtrees: number; instances: number; unserializable: number; unreadable: number; unstable: number; root?: string; rootD?: string; dlist?: string[]; after?: string; afterD?: string; changed: string[]; nChanged: number };
 	hashMode?: string;
 	inputBytes?: number;
 	/** Scripts whose Source the task couldn't read (their changes aren't listed). */
@@ -1109,6 +1136,7 @@ export function parseKernelTaskResult(results: unknown[]): KernelTaskResult {
 			unstable: num(outside.unstable),
 			root: str(outside.root),
 			rootD: str(outside.rootD),
+			dlist: Array.isArray(outside.dlist) ? outside.dlist.map(String) : undefined,
 			after: str(outside.after),
 			afterD: str(outside.afterD),
 			changed: list(outside.changed).map(String),

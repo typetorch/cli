@@ -145,7 +145,7 @@ export async function refreshBackup(input: RefreshInput, deps: LuauDeps): Promis
 		const record = { universeId, placeId, mode: "backup", engine: "luau", artifactId: build.artifactId, seq: build.seq, branch: build.branch, previous: check.oldKernel.BackupArtifactId ?? null, placeVersionBefore: base.version };
 		deps.record({ event: "backup-refreshing", ...record });
 		const save = parseKernelTaskResult(
-			(await runTask(deps, { universeId, placeId, version: base.version, script: kernelTaskScript({ ...config, mode: "save", expectOutside: check.outside.rootD }), timeoutSeconds: input.timeoutSeconds, binaryInput: sent.path, what: "backup save task" })).results,
+			(await runTask(deps, { universeId, placeId, version: base.version, script: kernelTaskScript({ ...config, mode: "save", expectOutside: check.outside.rootD, expectOutsideList: check.outside.dlist }), timeoutSeconds: input.timeoutSeconds, binaryInput: sent.path, what: "backup save task" })).results,
 		);
 		if (!save.saved) {
 			const reason = save.saveError ? explainSaveError(save.saveError, { universeId, placeId }).text : `the save task found problems: ${save.problems.slice(0, 5).join("; ")}`;

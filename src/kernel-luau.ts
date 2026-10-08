@@ -302,7 +302,7 @@ export async function luauDeploy(input: DeployInput, deps: LuauDeps): Promise<vo
 	let saveRun: LuauTaskResult;
 	try {
 		saveRun = await watch.stage("save", () =>
-			runTask(deps, { universeId, placeId, version: base.version, script: kernelTaskScript({ ...config, mode: "save", expectOutside: check.outside.rootD }), timeoutSeconds: input.timeoutSeconds, binaryInput: sent.path, what: "save task" }),
+			runTask(deps, { universeId, placeId, version: base.version, script: kernelTaskScript({ ...config, mode: "save", expectOutside: check.outside.rootD, expectOutsideList: check.outside.dlist }), timeoutSeconds: input.timeoutSeconds, binaryInput: sent.path, what: "save task" }),
 		);
 		save = parseKernelTaskResult(saveRun.results);
 	} catch (error) {
