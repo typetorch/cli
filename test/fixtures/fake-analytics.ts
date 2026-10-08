@@ -1,7 +1,7 @@
 /**
- * A fake of the analytics server's public surface for the endpoint checks (endpoints.ts): GET /healthz,
- * GET /v1/auth/check and GET /v1/settings, answering like analytics/src/server/app.ts. Records every request so tests
- * can assert that only side-effect-free GETs were made. Tokens are made up.
+ * A fake of the analytics backend's public surface for the endpoint checks (endpoints.ts): GET /healthz,
+ * GET /v1/auth/check (role "game" | "admin" and `parts`, like analytics/src/server/app.ts) and GET /v1/settings (older
+ * servers). Records every request so tests can assert that only side-effect-free GETs were made. Tokens are made up.
  */
 export const INGEST = "ingest-token-for-tests-0123456789";
 export const ADMIN = "admin-token-for-tests-0123456789ab";
@@ -13,6 +13,8 @@ export interface FakeOptions {
 	parts?: { analytics: boolean; fleet: boolean };
 	/** Servers before /v1/auth/check answer 404 there. */
 	authCheck?: boolean;
+	/** The first version of the route: role "ingest" and `valid` instead of role "game" and `parts`. */
+	legacyShape?: boolean;
 	/** Answers every path with this (a dead tunnel, a wrong server). */
 	everything?: () => Response;
 	/** Throws instead of answering (no connection). */
@@ -50,9 +52,9 @@ export function fakeServer(options: FakeOptions = {}) {
 		if (url.pathname === "/healthz") return json(200, { ok: true });
 		if (url.pathname === "/v1/auth/check") {
 			if (options.authCheck === false) return json(404, { error: "not found" });
-			if (!auth) return json(401, { ok: false, error: "bearer token required" });
-			if (!role) return json(401, { ok: false, error: "token not accepted" });
-			return json(200, { ok: true, service: "typetorch-analytics", role, parts, valid: { ...parts } });
+			if (!role) return json(401, { error: "sign in required", login: { token: true, roblox: false } });
+			if (options.legacyShape) return json(200, { ok: true, service: "typetorch-analytics", role, parts, valid: { ...parts } });
+			return json(200, { ok: true, role: role === "ingest" ? "game" : role, via: "bearer", service: "typetorch-backend", version: "0.0.0-test", parts });
 		}
 		if (url.pathname === "/v1/settings") return role ? json(200, {}) : json(401, { error: "token required" });
 		return json(404, { error: "not found" });

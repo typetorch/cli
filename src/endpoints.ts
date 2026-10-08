@@ -9,8 +9,9 @@
  *            localhost for Studio); no credentials in it; only the characters the kernel accepts; the base address (fleet) or
  *            `.../v1/ingest` (DuckDB analytics); a token of a usable shape
  *   healthz  GET <base>/healthz answers 200 `{ ok: true }` within 5 s (a dead quick tunnel, a stopped server, a wrong host)
- *   token    GET <base>/v1/auth/check with the token (analytics server: no side effects) says it is an INGEST token, valid for
- *            the part (fleet / analytics); the ADMIN token is refused (it would sit in a record every server script can
+ *   token    GET <base>/v1/auth/check with the token (the backend's role check: no side effects) says it is the GAME key
+ *            (role "game", write-only; "ingest" on the first version of the route) and that the server runs the part
+ *            (fleet / analytics, `parts`); the ADMIN token is refused (it would sit in a record every server script can
  *            read). Older servers without that route: GET /v1/settings (also read-only) proves the token is accepted.
  *
  * Basin analytics has no /healthz and no documented side-effect-free authenticated call, so there the stream URLs must
@@ -224,7 +225,7 @@ async function healthzStep(doFetch: typeof fetch, base: string, host: string, ti
 }
 
 const PART_OFF = (part: EndpointTarget) =>
-	`the server runs without its ${part === "fleet" ? "fleet" : "analytics"} part: set TT_SERVER_PARTS=analytics,fleet in its env file and restart it`;
+	`the server runs without its ${part === "fleet" ? "fleet" : "analytics"} part: set TYPETORCH_PARTS=analytics,fleet (TT_SERVER_PARTS before the rename) in its env file and restart it`;
 
 /** GET <base>/v1/auth/check with the token (older servers: /v1/settings). */
 async function tokenStep(doFetch: typeof fetch, base: string, host: string, token: string, part: EndpointTarget, timeoutMs: number): Promise<EndpointStep> {
@@ -244,14 +245,18 @@ async function tokenStep(doFetch: typeof fetch, base: string, host: string, toke
 	if (body.role === "admin") {
 		return fail(
 			"token",
-			"this is the server's ADMIN token (it reads everything), not an ingest token",
-			`the settings record is readable by every script in your game, so it must only hold a write-only token. ${INGEST_TOKEN_HINT(part)}`,
+			"this is the server's ADMIN token (it reads everything), not the game key",
+			`the settings record is readable by every script in your game, so it must only hold the write-only game key. ${INGEST_TOKEN_HINT(part)}`,
 			reply.ms,
 		);
 	}
-	const valid = typeof body.valid === "object" && body.valid !== null ? (body.valid as Record<string, unknown>) : {};
-	if (valid[part] !== true) return fail("token", `the token is accepted, but not for the ${part} part`, PART_OFF(part), reply.ms);
-	return pass("token", `accepted as an ingest (write-only) token, valid for ${part}`, reply.ms);
+	if (body.role !== "game" && body.role !== "ingest") {
+		return fail("token", `${host}/v1/auth/check says role ${short(body.role, 30)}, not a game key`, INGEST_TOKEN_HINT(part), reply.ms);
+	}
+	// `parts` (what the server runs): a game key writes to every part that runs. A server that doesn't say can't be asked.
+	const parts = typeof body.parts === "object" && body.parts !== null ? (body.parts as Record<string, unknown>) : typeof body.valid === "object" && body.valid !== null ? (body.valid as Record<string, unknown>) : undefined;
+	if (parts && parts[part] !== true) return fail("token", `the key is accepted, but the server doesn't run its ${part} part`, PART_OFF(part), reply.ms);
+	return pass("token", `accepted as the game key (write-only)${parts ? `, the server runs ${part}` : ""}`, reply.ms);
 }
 
 /** Servers before /v1/auth/check: GET /v1/settings takes an ingest or admin token and changes nothing. */

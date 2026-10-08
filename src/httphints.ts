@@ -9,13 +9,13 @@ export const LOCAL_FLEET_HINT =
 	"start it again on the dev PC: in analytics/, bun run local -- --env-file <server env file> --game <game repo> (a new tunnel URL; it updates the game settings and typetorch.json)";
 
 /**
- * How to get the right token for a fleet / analytics endpoint. The server has two kinds: ingest tokens
- * (TT_ANALYTICS_INGEST_TOKENS, write-only: what game servers hold in the settings record) and the admin token
- * (TT_ANALYTICS_ADMIN_TOKEN, reads: stays on the dev's PC).
+ * How to get the right token for a fleet / analytics endpoint. The server has two secrets: the API key
+ * (TYPETORCH_API_KEY, TT_ANALYTICS_INGEST_TOKENS before the rename; write-only: what game servers hold in the settings
+ * record) and the admin token (TYPETORCH_ADMIN_TOKEN, TT_ANALYTICS_ADMIN_TOKEN before; reads: stays on the dev's PC).
  */
 export function INGEST_TOKEN_HINT(part: "fleet" | "analytics"): string {
 	const where = part === "fleet" ? "TYPETORCH_FLEET_INGEST_TOKEN (the CLI's env file)" : 'the "token" field of the analytics settings';
-	return `put one of the server's TT_ANALYTICS_INGEST_TOKENS in ${where}; TT_ANALYTICS_ADMIN_TOKEN is the read token and never goes to game servers`;
+	return `put the server's API key (TYPETORCH_API_KEY, or one of TT_ANALYTICS_INGEST_TOKENS on a server before the rename) in ${where}; the admin token is the read token and never goes to game servers`;
 }
 
 /** The response as one short line: JSON `error`/`message`, an HTML page's title, else the text. */

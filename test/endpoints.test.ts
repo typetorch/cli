@@ -40,7 +40,7 @@ describe("fleet endpoint: the URL", () => {
 		const report = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: server.fetch });
 		expect(report.ok).toBe(true);
 		expect(report.steps.map((s) => [s.step, s.ok])).toEqual([["url", true], ["healthz", true], ["token", true]]);
-		expect(stepOf(report, "token").detail).toContain("valid for fleet");
+		expect(stepOf(report, "token").detail).toContain("accepted as the game key (write-only), the server runs fleet");
 		expect(server.calls.every((c) => c.method === "GET")).toBe(true);
 		expect(server.calls.map((c) => c.path)).toEqual(["/healthz", "/v1/auth/check"]);
 		expect(JSON.stringify(report)).not.toContain(INGEST);
@@ -145,8 +145,26 @@ describe("fleet endpoint: the token", () => {
 	});
 	test("accepted, but the fleet part is off on that server", async () => {
 		const report = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: fakeServer({ parts: { analytics: true, fleet: false } }).fetch });
-		expect(stepOf(report, "token").detail).toContain("not for the fleet part");
+		expect(stepOf(report, "token").detail).toContain("doesn't run its fleet part");
+		expect(stepOf(report, "token").hint).toContain("TYPETORCH_PARTS");
 		expect(stepOf(report, "token").hint).toContain("TT_SERVER_PARTS");
+	});
+	test("the first version of the route (role ingest, valid) and a server that doesn't list its parts both still work", async () => {
+		const legacy = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: fakeServer({ legacyShape: true }).fetch });
+		expect(legacy.ok).toBe(true);
+		const legacyAdmin = await checkFleetEndpoint({ url: HOST, token: ADMIN, fetch: fakeServer({ legacyShape: true }).fetch });
+		expect(stepOf(legacyAdmin, "token").detail).toContain("ADMIN token");
+		const legacyOff = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: fakeServer({ legacyShape: true, parts: { analytics: true, fleet: false } }).fetch });
+		expect(stepOf(legacyOff, "token").detail).toContain("doesn't run its fleet part");
+		const noParts = await checkFleetEndpoint({
+			url: HOST,
+			token: INGEST,
+			fetch: fakeServer({ everything: () => new Response(JSON.stringify({ ok: true, role: "game" }), { status: 200 }) }).fetch,
+		});
+		// (/healthz answers {"ok":true,"role":"game"} too here, which counts: only ok matters)
+		expect(stepOf(noParts, "token").detail).toBe("accepted as the game key (write-only)");
+		const odd = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: fakeServer({ everything: () => new Response(JSON.stringify({ ok: true, role: "viewer" }), { status: 200 }) }).fetch });
+		expect(stepOf(odd, "token").detail).toContain("says role");
 	});
 	test("no token, a token with a newline in it, a too short one: caught before the request", async () => {
 		const server = fakeServer();
