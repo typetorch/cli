@@ -299,7 +299,7 @@ describe.skipIf(!hasLune)("the deploy task under Lune (mock DataModel)", () => {
 		expect(calls.save).toBe(0);
 		const r = parseKernelTaskResult([result]);
 		expect(r.outside.nChanged).toBe(1);
-		expect(r.outside.changed[0]).toMatch(/^Workspace|Workspace/Lobby#1: structure, names, attributes/)\|Workspace\/\d+:Lobby: structure, names, attributes/);
+		expect(r.outside.changed[0]).toMatch(/^Workspace\|Workspace\/Lobby#1: structure, names, attributes/);
 		expect(r.problems.join(" ")).toContain("outside the kernel slots changed");
 	});
 
