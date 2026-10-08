@@ -195,6 +195,8 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--engine luau\|splice\|lune] [--place-file <file>] [--timeout <s>] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build) into the live place (check, y/N, save, verify); no download: Luau Execution tasks do it (the luau engine), or `--place-file` patches a Studio copy (splice); `--replace-place --yes` for the template/test place only; see below |
 | `typetorch kernel restore --version <n> [--dry-run] [--yes]` | republish place version `n` (a task on it calls SavePlaceAsync): the undo of a kernel deploy |
 | `typetorch kernel restore <file> [--dry-run] [--yes]` | publish a place file: a backup from `.typetorch/place-backups/`, or a dry run's patched file |
+| `typetorch backup refresh [--build <x>] [--dry-run] [--yes] [--force]` | make a proven-healthy prod build the place's backup build now (luau engine, only that slot); see "Backup build" |
+| `typetorch deploy --reupload <artifactId|#seq|commit|assetId> [--branch <b>]` | moderation took down an approved build: upload its kept bytes as a NEW asset, then deploy it (cloud test, approval, new seq, signed on prod); see "Backup build" |
 | `typetorch approve [id] [--import <dir>] [--test] [--skip-test <reason>] [--rollout <1-99>] [--wait [s]]` | approve a proposal: details, y/N, publish (interactive terminal only); prod-channel ones are signed. A prod deploy or promote proposal without a passed (or skipped) cloud test runs it before the y/N. `--import`: a proposal state dir from automation you run yourself (see "No GitHub Actions") |
 | `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
 | `typetorch servers [--branch] [--watch]` | live servers from the fleet API (see "Fleet") |
@@ -629,6 +631,28 @@ any automation you choose to run yourself.
    publishes a place file back: a backup (undo of a splice deploy), or a dry run's patched file (publish exactly what
    was inspected). `--replace-place --yes` publishes the whole kernel place instead and **wipes Studio/Team Create
    content** (the template/test place only). The place version before and after go to `kernel-deploys.jsonl`.
+
+### Backup build
+
+Kernel 0.3.6 servers run `ServerStorage.TypeTorchBackup` only when the head, the last known good and the builds other
+servers run all fail. It should be at most one deploy behind:
+- **Automatic:** after `typetorch deploy`, `approve` or `promote` publishes build N+1 to the default (prod-channel) branch
+  at your terminal, the place's backup becomes build N once N is **proven healthy**: the fleet API has reports for its
+  seq with no failure or rollback, no server running it is failed or degraded, and it went out at least
+  `backup.healthyHours` ago (typetorch.json `"backup": { "refresh": "auto", "healthyHours": 3 }`; `"refresh": "off"`
+  turns it off). It uses the luau engine with ONLY the backup slot (check task, save task with SavePlaceAsync, verify
+  task; the rest of the place must not change). It never blocks or fails the deploy: unpublished saves, Team Create,
+  the "Save Place API" setting, an unproven build, no kept payload, no place key, or a non-interactive run each print
+  one line (`backup      not refreshed: ...`). A rollback never moves the backup.
+- **Now:** `typetorch backup refresh [--build <x>]` (default: the prod head; y/N or `--yes`; `--dry-run`; an unproven
+  build needs `--force`).
+- `doctor` shows the place's backup build and its age. Each save is a new place version: a project with hot assets
+  then loads them from their asset versions on new servers until the next `typetorch assets sync`.
+- **A build taken down by moderation:** `typetorch deploy --reupload <build>` uploads the exact bytes kept at upload
+  (`<state dir>/payloads`) as a NEW asset (uploads.jsonl `reuploadOf` = the old asset id), waits for moderation and
+  deploys it like any deploy (the cloud test, the approval policy: prod = your y/N or `typetorch approve`; a new seq,
+  signed on prod). The artifact id stays; servers on the old asset swap to the new copy. Then `typetorch backup
+  refresh` if the backup was that build.
 
 ## Develop
 

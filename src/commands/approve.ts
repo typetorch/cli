@@ -61,6 +61,7 @@ import { describeRollbackSetting, fleetFor, rollbackSetting, waitSeconds, waitFo
 import { autoRollbackHook } from "./autorollback.ts";
 import { encodeDeployMessage } from "../opencloud.ts";
 import { makeEntry, messageFor, release, type ReleaseResult } from "./release.ts";
+import { autoRefreshBackup } from "./backup.ts";
 import { describeTest, GATE_FLAGS, gateRelease, type TestDeps } from "./test.ts";
 import { gatePolicy, skipReason, type TestSummary } from "../cloudtest.ts";
 import { checkRollout, parseRollout } from "../rollout.ts";
@@ -437,7 +438,9 @@ export async function releaseExisting(input: {
 		info(dim(`  ${formatTimings(timings)}`));
 	}
 	const fleet = await waitAfterRelease(proj, result, { seconds: wait, oc: input.oc, branchChannel: input.branchChannel, threshold: rollback.threshold, thresholdSource: rollback.source, keyPaths });
-	if (isJson()) return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, timings, ...(fleet ? { fleet } : {}) });
+	// Fresh backups (promotes; rollbacks never move the backup): the replaced build, once proven healthy.
+	const backup = fleet?.autoRollback?.rolledBack ? undefined : await autoRefreshBackup({ proj, action: kind, branch, branchChannel: input.branchChannel, previous: head });
+	if (isJson()) return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, timings, ...(fleet ? { fleet } : {}), ...(backup ? { backup } : {}) });
 }
 
 /** `--wait` after a published release: the servers' reports for its seq (see fleet.ts). */
@@ -557,7 +560,11 @@ export async function approveCommand(args: ParsedArgs) {
 		if (result.entry.timings) info(dim(`  ${formatTimings(result.entry.timings)}`));
 	}
 	const fleet = await waitAfterRelease(proj, result, { seconds: wait, branchChannel: state.proposal.branchChannel, threshold: rollback.threshold, thresholdSource: rollback.source, keyPaths: signingKeyPaths(proj, args) });
-	if (isJson()) return emitJson({ proposal: state.proposal.id, deployment: result.entry, message: result.message, registry: result.registry, ...(fleet ? { fleet } : {}) });
+	// Fresh backups: the replaced build becomes the place's backup when proven healthy (never fails the approval).
+	const backup = fleet?.autoRollback?.rolledBack
+		? undefined
+		: await autoRefreshBackup({ proj, action: state.proposal.kind, branch: state.proposal.branch, branchChannel: state.proposal.branchChannel, previous: state.proposal.from, interactive: true });
+	if (isJson()) return emitJson({ proposal: state.proposal.id, deployment: result.entry, message: result.message, registry: result.registry, ...(fleet ? { fleet } : {}), ...(backup ? { backup } : {}) });
 }
 
 export const rejectFlags = { reason: "string" } as const;

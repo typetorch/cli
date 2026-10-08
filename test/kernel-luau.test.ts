@@ -10,10 +10,9 @@
  * No network; the Lune parts are skipped when Lune can't run.
  */
 import { afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { luauDeploy, luauRestore, type DeployInput, type LuauCloud, type LuauDeps } from "../src/kernel-luau";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { luauDeploy, luauRestore, type DeployInput } from "../src/kernel-luau";
 import { runLuneVerify, writeLuneScript } from "../src/kernelpatch";
 import {
 	BINARY_INPUT_LIMIT,
@@ -35,9 +34,9 @@ import {
 	type KernelTaskConfig,
 	type SlotInventory,
 } from "../src/kernelpatch-task";
-import { captureJson, setOutputMode } from "../src/log";
+import { setOutputMode } from "../src/log";
+import { dir, fakeCloud, harness, hasLune, lune, makeDeps, nextRun, place, quiet, slotsFile } from "./fixtures/kernel-luau/lune-cloud";
 import { OpenCloud, setLuauRetryDelay } from "../src/opencloud";
-import type { PlaceVersion } from "../src/opencloud";
 import { writeRbxm } from "../src/rbxm";
 import { DOWNLOAD_SCOPE_HINT, taskTimeout } from "../src/commands/kernel";
 import { placeLuauProbe } from "../src/commands/doctor";
@@ -214,48 +213,6 @@ describe("scripts and literals", () => {
 
 // The task scripts under Lune -------------------------------------------------------------------------------------------
 
-const dir = mkdtempSync(join(tmpdir(), "tt-kluau-"));
-const lune = process.env.TYPETORCH_LUNE || "lune";
-const fixtures = resolve(import.meta.dir, "fixtures");
-writeFileSync(join(dir, "rokit.toml"), '[tools]\nlune = "lune-org/lune@0.10.5"\n');
-const made = Bun.spawnSync([lune, "run", join(fixtures, "kernel-patch", "make-fixtures.luau"), dir], { cwd: dir, stdout: "pipe", stderr: "pipe" });
-const hasLune = made.exitCode === 0;
-if (!hasLune) console.warn(`luau engine Lune tests skipped: Lune didn't run (${made.stderr.toString().trim().split(/\r?\n/)[0]})`);
-const slotsFile = (kernel: string, extra = false) => {
-	const out = join(dir, `${kernel}${extra ? "-extra" : ""}.slots.rbxm`);
-	if (!existsSync(out)) {
-		const r = Bun.spawnSync([lune, "run", join(fixtures, "kernel-luau", "make-slots.luau"), join(dir, `${kernel}.rbxl`), out, ...(extra ? ["extra"] : [])], { cwd: dir, stdout: "pipe", stderr: "pipe" });
-		if (r.exitCode !== 0) throw new Error(r.stderr.toString());
-	}
-	return out;
-};
-
-let runs = 0;
-interface HarnessOptions {
-	placeId?: number;
-	placeVersion?: number;
-	saveError?: string;
-	denySetting?: string;
-	tamperOnSetting?: boolean;
-	noEncoding?: boolean;
-	unstableBytes?: boolean;
-}
-/** Runs a task script in the harness; returns the result, the engine calls, and the saved place (if any). */
-function harness(script: string, place: string, input: string | undefined, options: HarnessOptions = {}): { result: any; calls: any; saved?: string } {
-	const n = ++runs;
-	const scriptPath = join(dir, `task-${n}.luau`);
-	const out = join(dir, `out-${n}.json`);
-	const saved = join(dir, `saved-${n}.rbxl`);
-	writeFileSync(scriptPath, script);
-	writeFileSync(join(dir, `opts-${n}.json`), JSON.stringify({ placeId: 2, placeVersion: 57, ...options }));
-	const r = Bun.spawnSync([lune, "run", join(fixtures, "kernel-luau", "harness.luau"), scriptPath, place, input ?? "-", join(dir, `opts-${n}.json`), out, saved], { cwd: dir, stdout: "pipe", stderr: "pipe" });
-	if (r.exitCode !== 0) throw new Error(`harness failed: ${r.stderr.toString()}`);
-	const parsed = JSON.parse(readFileSync(out, "utf8"));
-	return { result: parsed.result, calls: parsed.calls, saved: existsSync(saved) ? saved : undefined };
-}
-
-const place = (name: string) => join(dir, name);
-
 describe.skipIf(!hasLune)("the deploy task under Lune (mock DataModel)", () => {
 	let verifyScript = "";
 	beforeAll(() => {
@@ -393,87 +350,6 @@ describe.skipIf(!hasLune)("the deploy task under Lune (mock DataModel)", () => {
 
 // The flow against a fake Open Cloud whose tasks run in the harness ---------------------------------------------------
 
-interface FakeOptions extends HarnessOptions {
-	/** The newest version jumps to this right after the check task (someone published). */
-	raceTo?: number;
-	/** The save task answers FAILED with this error instead of running. */
-	failSave?: { code: string; message: string };
-}
-
-function fakeCloud(basePlace: string, options: FakeOptions = {}) {
-	const versions: PlaceVersion[] = [
-		{ version: 57, published: true, hasPublishedField: true },
-		{ version: 56, published: false, hasPublishedField: false },
-	];
-	const places = new Map<number, string>([[57, basePlace], [56, basePlace]]);
-	const inputs = new Map<string, Uint8Array>();
-	const tasks: { script: string; version?: number; binaryInput?: string; kind: string }[] = [];
-	const createdInputs: number[] = [];
-	const newest = () => Math.max(...versions.map((v) => v.version));
-	const oc: LuauCloud = {
-		async placeVersions() {
-			return [...versions].sort((a, b) => b.version - a.version);
-		},
-		async latestPlaceVersion() {
-			return newest();
-		},
-		async createBinaryInput(universeId, size) {
-			createdInputs.push(size);
-			return { path: `universes/${universeId}/luau-execution-session-task-binary-inputs/in${createdInputs.length}`, uploadUri: `https://upload.test.invalid/in${createdInputs.length}?sig=not-real` };
-		},
-		async uploadBinaryInput(uri, bytes) {
-			inputs.set(new URL(uri).pathname.slice(1), bytes);
-		},
-		async runLuau(_universeId, _placeId, script, _timeout, opts = {}) {
-			const kind = script.includes("kernel restore") ? (script.includes("SavePlaceAsync") ? "restore-save" : "restore-check") : script.includes('["mode"] = "save"') ? "save" : script.includes('["mode"] = "verify"') ? "verify" : "check";
-			tasks.push({ script, version: opts.version, binaryInput: opts.binaryInput, kind });
-			const path = `universes/1/places/2/versions/${opts.version}/luau-execution-sessions/s/tasks/t${tasks.length}`;
-			if (kind === "save" && options.failSave) return { state: "FAILED", results: [], error: options.failSave, path };
-			let input: string | undefined;
-			if (opts.binaryInput) {
-				input = join(dir, `fake-input-${tasks.length}.rbxm`);
-				writeFileSync(input, inputs.get(opts.binaryInput.split("/").pop()!)!);
-			}
-			const run = harness(script, places.get(opts.version!)!, input, { ...options, placeVersion: opts.version });
-			if (run.result?.saved && run.saved) {
-				const next = newest() + 1;
-				versions.push({ version: next, published: true, hasPublishedField: true });
-				places.set(next, run.saved);
-			}
-			if (kind === "check" && options.raceTo) versions.push({ version: options.raceTo, published: true, hasPublishedField: true });
-			return { state: "COMPLETE", results: [run.result], path };
-		},
-		async taskLogs() {
-			return ["log line"];
-		},
-	};
-	return { oc, tasks, versions, createdInputs, inputs };
-}
-
-function deps(oc: LuauCloud, patch: Partial<LuauDeps> = {}): LuauDeps & { records: any[]; asked: string[] } {
-	const records: any[] = [];
-	const asked: string[] = [];
-	let clock = 0;
-	return {
-		oc,
-		interactive: true,
-		confirm: async (question) => {
-			asked.push(question);
-			return true;
-		},
-		record: (entry) => records.push(entry),
-		// A fake clock: waits pass at once.
-		sleep: async (ms) => {
-			clock += ms;
-		},
-		now: () => clock,
-		findVersionSeconds: 0,
-		records,
-		asked,
-		...patch,
-	};
-}
-
 function deployInput(patch: Partial<DeployInput> = {}): DeployInput {
 	const slotsPath = slotsFile("kernel-v2");
 	const slotsBytes = new Uint8Array(readFileSync(slotsPath));
@@ -493,32 +369,18 @@ function deployInput(patch: Partial<DeployInput> = {}): DeployInput {
 		yes: false,
 		timeoutSeconds: 300,
 		blockers: [],
-		reportPath: join(dir, `report-${++runs}.json`),
+		reportPath: join(dir, `report-${nextRun()}.json`),
 		reportDisplay: "report.json",
 		logFields: { by: "test" },
 		...patch,
 	};
 }
 
-async function quiet<T>(fn: () => Promise<T>): Promise<{ value?: T; json: any; error?: Error }> {
-	setOutputMode({ json: true, verbose: false });
-	let value: T | undefined;
-	let error: Error | undefined;
-	const json = await captureJson(async () => {
-		try {
-			value = await fn();
-		} catch (e) {
-			error = e as Error;
-		}
-	});
-	return { value, json, error };
-}
-
 describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks in Lune)", () => {
 	// The fixture's kernel-v2 says KernelVersion 1.1.0 and KernelHash 111...1.
 	test("--dry-run: one binary input, one check task without SavePlaceAsync, the report, nothing saved", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
-		const d = deps(cloud.oc);
+		const d = makeDeps(cloud.oc);
 		const input = deployInput({ dryRun: true });
 		const { json, error } = await quiet(() => luauDeploy(input, d));
 		expect(error).toBeUndefined();
@@ -535,7 +397,7 @@ describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks i
 
 	test("deploy: check, y/N, save (SavePlaceAsync on the base version), the new version, verify; records around it", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
-		const d = deps(cloud.oc);
+		const d = makeDeps(cloud.oc);
 		const { json, error } = await quiet(() => luauDeploy(deployInput(), d));
 		expect(error).toBeUndefined();
 		expect(d.asked).toHaveLength(1);
@@ -552,9 +414,9 @@ describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks i
 
 	test("no y/N without a terminal: refused before the save; a 'no' saves nothing", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
-		const refused = await quiet(() => luauDeploy(deployInput(), deps(cloud.oc, { interactive: false })));
+		const refused = await quiet(() => luauDeploy(deployInput(), makeDeps(cloud.oc, { interactive: false })));
 		expect(refused.error?.message).toContain("without --yes");
-		const no = deps(cloud.oc, { confirm: async () => false });
+		const no = makeDeps(cloud.oc, { confirm: async () => false });
 		const answered = await quiet(() => luauDeploy(deployInput(), no));
 		expect(answered.error).toBeUndefined();
 		expect(cloud.tasks.map((t) => t.kind)).toEqual(["check", "check"]);
@@ -563,14 +425,14 @@ describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks i
 
 	test("someone published after the check: nothing saved", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"), { raceTo: 58 });
-		const { error } = await quiet(() => luauDeploy(deployInput({ yes: true }), deps(cloud.oc)));
+		const { error } = await quiet(() => luauDeploy(deployInput({ yes: true }), makeDeps(cloud.oc)));
 		expect(error?.message).toContain("the place changed since the check (newest version then v57, now v58)");
 		expect(cloud.tasks.map((t) => t.kind)).toEqual(["check"]);
 	});
 
 	test("SavePlaceAsync refused: the Creator Hub setting with its page; recorded as failed", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"), { saveError: "Save Place API is not enabled for this place" });
-		const d = deps(cloud.oc);
+		const d = makeDeps(cloud.oc);
 		const { error } = await quiet(() => luauDeploy(deployInput({ yes: true }), d));
 		expect(error?.message).toContain('turn on "Allow place to be updated using Save Place API"');
 		expect(error?.message).toContain(saveSettingUrl(1, 2));
@@ -580,7 +442,7 @@ describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks i
 
 	test("a save task that times out: the --timeout fix, the task log, and whether a version appeared", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"), { failSave: { code: "DEADLINE_EXCEEDED", message: "too slow" } });
-		const d = deps(cloud.oc);
+		const d = makeDeps(cloud.oc);
 		const { error } = await quiet(() => luauDeploy(deployInput({ yes: true, timeoutSeconds: 120 }), d));
 		expect(error?.message).toContain("--timeout 300");
 		expect(error?.message).toContain("log line");
@@ -590,7 +452,7 @@ describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks i
 
 	test("check problems stop the deploy with the Studio fix for settings; a dry run still shows them", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"), { denySetting: "HttpEnabled" });
-		const { error } = await quiet(() => luauDeploy(deployInput({ yes: true }), deps(cloud.oc)));
+		const { error } = await quiet(() => luauDeploy(deployInput({ yes: true }), makeDeps(cloud.oc)));
 		expect(error?.message).toContain("the check task found problems (nothing saved");
 		expect(error?.message).toContain("Allow HTTP Requests");
 		expect(cloud.tasks.map((t) => t.kind)).toEqual(["check"]);
@@ -598,7 +460,7 @@ describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks i
 
 	test("signing blockers: a dry run warns, a deploy refuses before the y/N", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
-		const d = deps(cloud.oc);
+		const d = makeDeps(cloud.oc);
 		expect((await quiet(() => luauDeploy(deployInput({ dryRun: true, blockers: ["no keyAssetId"] }), d))).error).toBeUndefined();
 		const { error } = await quiet(() => luauDeploy(deployInput({ blockers: ["no keyAssetId"] }), d));
 		expect(error?.message).toContain("no keyAssetId");
@@ -607,10 +469,10 @@ describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks i
 
 	test("a first install needs --install (the dry run only warns)", async () => {
 		const cloud = fakeCloud(place("game.rbxl"));
-		expect((await quiet(() => luauDeploy(deployInput({ dryRun: true }), deps(cloud.oc)))).error).toBeUndefined();
-		const refused = await quiet(() => luauDeploy(deployInput({ yes: true }), deps(cloud.oc)));
+		expect((await quiet(() => luauDeploy(deployInput({ dryRun: true }), makeDeps(cloud.oc)))).error).toBeUndefined();
+		const refused = await quiet(() => luauDeploy(deployInput({ yes: true }), makeDeps(cloud.oc)));
 		expect(refused.error?.message).toContain("--install");
-		const d = deps(cloud.oc);
+		const d = makeDeps(cloud.oc);
 		const installed = await quiet(() => luauDeploy(deployInput({ yes: true, install: true }), d));
 		expect(installed.error).toBeUndefined();
 		expect(d.records.at(-1)).toMatchObject({ event: "kernel-published", firstInstall: true, placeVersionAfter: 58 });
@@ -618,7 +480,7 @@ describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks i
 
 	test("an input over 100 MiB is refused before anything is sent", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
-		const { error } = await quiet(() => luauDeploy(deployInput({ slotsBytes: new Uint8Array(BINARY_INPUT_LIMIT + 1) }), deps(cloud.oc)));
+		const { error } = await quiet(() => luauDeploy(deployInput({ slotsBytes: new Uint8Array(BINARY_INPUT_LIMIT + 1) }), makeDeps(cloud.oc)));
 		expect(error?.message).toContain("over Open Cloud's 100 MiB binary input limit");
 		expect(error?.message).toContain("--no-backup");
 		expect(cloud.createdInputs).toEqual([]);
@@ -628,9 +490,9 @@ describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks i
 		const cloud = fakeCloud(place("game-installed.rbxl"));
 		// As the Assets API sends it: `published: true`, and false left out.
 		cloud.versions.push({ version: 58, published: false, hasPublishedField: false });
-		const { error } = await quiet(() => luauDeploy(deployInput({ dryRun: true }), deps(cloud.oc)));
+		const { error } = await quiet(() => luauDeploy(deployInput({ dryRun: true }), makeDeps(cloud.oc)));
 		expect(error?.message).toContain("v58 is not published");
-		const ok = await quiet(() => luauDeploy(deployInput({ dryRun: true, baseFlag: "published" }), deps(cloud.oc)));
+		const ok = await quiet(() => luauDeploy(deployInput({ dryRun: true, baseFlag: "published" }), makeDeps(cloud.oc)));
 		expect(ok.error).toBeUndefined();
 		expect(ok.json).toMatchObject({ base: { version: 57, skipped: [58] } });
 	});
@@ -641,7 +503,7 @@ describe.skipIf(!hasLune)("kernel restore --version (fake Open Cloud, tasks in L
 
 	test("dry run: one check task on that version, no SavePlaceAsync", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
-		const { json, error } = await quiet(() => luauRestore(restoreInput({ dryRun: true }), deps(cloud.oc)));
+		const { json, error } = await quiet(() => luauRestore(restoreInput({ dryRun: true }), makeDeps(cloud.oc)));
 		expect(error).toBeUndefined();
 		expect(cloud.tasks.map((t) => [t.kind, t.version])).toEqual([["restore-check", 56]]);
 		expect(json).toMatchObject({ dryRun: true, version: 56, newest: 57, check: { identity: { KernelVersion: "1.0.0" } } });
@@ -649,7 +511,7 @@ describe.skipIf(!hasLune)("kernel restore --version (fake Open Cloud, tasks in L
 
 	test("restore: the save task on that version only calls SavePlaceAsync; recorded with the new version", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
-		const d = deps(cloud.oc);
+		const d = makeDeps(cloud.oc);
 		const { json, error } = await quiet(() => luauRestore(restoreInput(), d));
 		expect(error).toBeUndefined();
 		expect(cloud.tasks.map((t) => [t.kind, t.version])).toEqual([["restore-check", 56], ["restore-save", 56]]);
@@ -659,7 +521,7 @@ describe.skipIf(!hasLune)("kernel restore --version (fake Open Cloud, tasks in L
 
 	test("a version newer than the newest is refused", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
-		const { error } = await quiet(() => luauRestore(restoreInput({ version: 99 }), deps(cloud.oc)));
+		const { error } = await quiet(() => luauRestore(restoreInput({ version: 99 }), makeDeps(cloud.oc)));
 		expect(error?.message).toContain("has no v99 yet");
 		expect(cloud.tasks).toEqual([]);
 	});

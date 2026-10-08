@@ -164,7 +164,7 @@ export function deploySummaryLines(input: {
 }
 
 /** Finds the version a save made: the newest version once it is above `above` (polls the version list). */
-async function findSavedVersion(deps: LuauDeps, placeId: number, above: number): Promise<{ version: number; published: boolean } | undefined> {
+export async function findSavedVersion(deps: LuauDeps, placeId: number, above: number): Promise<{ version: number; published: boolean } | undefined> {
 	const sleep = deps.sleep ?? realSleep;
 	const deadline = (deps.now ?? Date.now)() + (deps.findVersionSeconds ?? 60) * 1000;
 	while (true) {
@@ -178,7 +178,7 @@ async function findSavedVersion(deps: LuauDeps, placeId: number, above: number):
 }
 
 /** A task, with its failure explained (and the version list checked when it may have saved). */
-async function runTask(deps: LuauDeps, input: { universeId: number; placeId: number; version: number; script: string; timeoutSeconds: number; binaryInput?: string; what: string }): Promise<LuauTaskResult> {
+export async function runTask(deps: LuauDeps, input: { universeId: number; placeId: number; version: number; script: string; timeoutSeconds: number; binaryInput?: string; what: string }): Promise<LuauTaskResult> {
 	if (input.script.length > TASK_SCRIPT_LIMIT) throw new LuauEngineError(`the ${input.what} script is ${formatBytes(input.script.length)}, over Open Cloud's 4 MB task script limit (a CLI bug)`);
 	let run: LuauTaskResult;
 	try {
@@ -196,7 +196,7 @@ async function runTask(deps: LuauDeps, input: { universeId: number; placeId: num
 }
 
 /** Sends the kernel slots .rbxm as a binary input; returns its path and when it was made. */
-async function sendInput(deps: LuauDeps, universeId: number, bytes: Uint8Array): Promise<{ path: string; at: number }> {
+export async function sendInput(deps: LuauDeps, universeId: number, bytes: Uint8Array): Promise<{ path: string; at: number }> {
 	if (bytes.length > BINARY_INPUT_LIMIT) {
 		throw new LuauEngineError(
 			`the kernel slots .rbxm is ${formatBytes(bytes.length)}, over Open Cloud's 100 MiB binary input limit. The backup build (ServerStorage.TypeTorchBackup, the prod payload) is most of it: --no-backup leaves the place's current backup as it is`,

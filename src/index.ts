@@ -33,6 +33,7 @@ import { ROLLOUT_USAGE, WIDEN_USAGE } from "./rollout.ts";
 import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history.ts";
 import { approveCommand, approveFlags, proposalsCommand, proposalsFlags, rejectCommand, rejectFlags } from "./commands/approve.ts";
 import { kernelCommand, kernelFlags } from "./commands/kernel.ts";
+import { backupCommand, backupFlags } from "./commands/backup.ts";
 import { MIGRATE_USAGE, migrateCommand, migrateFlags } from "./commands/migrate.ts";
 import { keysCommand, keysFlags } from "./commands/keys.ts";
 import { pinCommand, pinFlags } from "./commands/pin.ts";
@@ -85,7 +86,7 @@ const COMMANDS: Record<string, Command> = {
 		flags: deployFlags,
 		run: deployCommand,
 		summary: "build, upload, approve and send to live servers",
-		usage: `typetorch deploy [--branch <b>] [--channel prod|dev] [--no-build] [--dry-run] [--message <text>] [--force]
+		usage: `typetorch deploy [--branch <b>] [--channel prod|dev] [--no-build] [--dry-run] [--message <text>] [--force] [--reupload <build>]
                  [--no-registry] [--moderation-timeout <s>] [--propose] [--proposed-by <who>]
                  [--key-file <path>] [--fallback-key-file <path>]
 
@@ -104,6 +105,12 @@ const COMMANDS: Record<string, Command> = {
                  from): the DataStore (universe-datastores.objects:read). --require-registry: old name
   Prod-channel branches: the message is signed with both keys (sig + sigF) when it is published; the key files are
   checked before the upload. Dev-channel messages are unsigned. See \`typetorch keys\`.
+  --reupload <artifactId|#seq|commit|assetId>  moderation took down an approved build: upload the exact bytes it had
+                 (kept in <state dir>/payloads at upload) as a NEW asset, wait for moderation, then deploy it as usual
+                 (cloud test, approval, new seq, signed on prod). No rebuild; the artifact id stays. --branch picks the
+                 branch (default: the build's own). uploads.jsonl records reuploadOf = the old asset id
+  After a prod deploy of the default branch at your terminal, the place's backup build becomes the build it replaced
+  once that one is proven healthy (typetorch backup refresh; typetorch.json "backup"). Never fails the deploy.
 ${GATE_USAGE}
 ${WAIT_USAGE}
 ${ROLLOUT_USAGE}
@@ -179,6 +186,23 @@ ${WAIT_USAGE}`,
 		run: (args) => accessCommand(args),
 		summary: "push members and revoked into the signed settings",
 		usage: ACCESS_USAGE,
+	},
+	backup: {
+		flags: backupFlags,
+		run: backupCommand,
+		summary: "refresh the place's backup build (the build servers run when nothing else can)",
+		usage: `typetorch backup refresh [--build <artifactId|#seq|commit|assetId>] [--dry-run] [--yes] [--force] [--timeout <s>]
+
+  Puts a prod build's kept payload into the place as ServerStorage.TypeTorchBackup (kernel 0.3.6+ runs it only when the
+  head, the last known good and the builds other servers run all fail). Default build: the prod head. Through the luau
+  engine with ONLY that slot: a check task, y/N (or --yes), a save task (SavePlaceAsync), a verify task; the rest of the
+  place must not change, and the same rules as kernel deploy apply (published base, Team Create, "Allow place to be
+  updated using Save Place API"). The build must be proven healthy: fleet reports for its seq with no failure or
+  rollback, no failed or degraded server running it, and live for backup.healthyHours (typetorch.json, default 3).
+  --force skips that proof.
+  Automatic: a prod deploy, approve or promote of the default branch at your terminal refreshes the backup to the build
+  it replaced once that one is proven (one line in the output, never an error). typetorch.json
+  "backup": { "refresh": "off" } turns that off. Records go to kernel-deploys.jsonl (backup-refreshed).`,
 	},
 	kernel: {
 		flags: kernelFlags,

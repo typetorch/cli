@@ -317,9 +317,29 @@ export const DOWNLOAD_SCOPE_HINT =
 
 /** The kernel slots `.rbxm` the luau engine sends to its task, and the Rojo project it is built from. */
 export const SLOTS_FILE = `${OUT_DIR}/kernel-slots.rbxm`;
-export const SLOTS_GEN_PROJECT = `${OUT_DIR}/kernel-slots.gen.project.json`;
 /** The kernel folder whose attributes identify the kernel. */
-const IDENTITY_SLOT: SlotRef = { service: KERNEL_SLOT[0], name: KERNEL_SLOT[1] };
+export const IDENTITY_SLOT: SlotRef = { service: KERNEL_SLOT[0], name: KERNEL_SLOT[1] };
+
+/**
+ * Builds a slots project (kernelpatch-task.ts `slotsProject`, or the backup slot alone) with Rojo into `outFile`
+ * (relative to the game root) and reads it back with the CLI's own reader. Throws KernelCheckError when it can't be read.
+ */
+export async function buildSlotsRbxm(proj: Project, projectJson: unknown, slots: SlotRef[], identitySlot: SlotRef, outFile: string): Promise<{ bytes: Uint8Array; read: ReturnType<typeof readSlotsRbxm> }> {
+	const gen = outFile.replace(/\.rbxm$/, ".gen.project.json");
+	mkdirSync(join(proj.root, OUT_DIR), { recursive: true });
+	writeFileSync(join(proj.root, gen), JSON.stringify(projectJson, null, "\t"));
+	try {
+		await run([rojoBinary(), "build", gen, "-o", outFile], proj.root);
+	} finally {
+		rmSync(join(proj.root, gen), { force: true });
+	}
+	const bytes = new Uint8Array(readFileSync(join(proj.root, outFile)));
+	try {
+		return { bytes, read: readSlotsRbxm(bytes, slots, identitySlot) };
+	} catch (error) {
+		throw new KernelCheckError(`the slots build ${outFile} can't be read: ${(error as Error).message}`);
+	}
+}
 
 /** `--timeout <s>` for the luau engine's tasks: 30 to 300 s, default 300 (Roblox's maximum). */
 export function taskTimeout(args: ParsedArgs): number {
@@ -330,7 +350,7 @@ export function taskTimeout(args: ParsedArgs): number {
 }
 
 /** The luau engine's dependencies for a real run: the place key's Open Cloud client, the terminal, the log. */
-function luauDeps(proj: Project): LuauDeps {
+export function luauDeps(proj: Project): LuauDeps {
 	const io = interaction();
 	const stateDir = projectStateDir(proj);
 	return { oc: openCloud("place")!, interactive: io.interactive, confirm: (question) => io.confirm(question), record: (entry) => logKernel(stateDir, entry) };
@@ -500,20 +520,7 @@ async function luauFlow(args: ParsedArgs, prepared: PreparedKernel, timeoutSecon
 	info(`  slots    ${layout.slots.map((s) => `${s.service}.${s.name}`).join(", ")}${settings.length ? `  settings ${settings.map((s) => `${s.service}.${s.prop} = ${s.value}`).join(", ")}` : ""}`);
 
 	// The kernel slots alone, as an .rbxm (one Folder, a Folder per service, the slots).
-	const genPath = join(proj.root, SLOTS_GEN_PROJECT);
-	writeFileSync(genPath, JSON.stringify(slotsProject(prepared.stamped, layout.slots), null, "\t"));
-	try {
-		await watch.stage("slots", () => run([rojoBinary(), "build", SLOTS_GEN_PROJECT, "-o", SLOTS_FILE], proj.root));
-	} finally {
-		rmSync(genPath, { force: true });
-	}
-	const slotsBytes = new Uint8Array(readFileSync(join(proj.root, SLOTS_FILE)));
-	let cli: ReturnType<typeof readSlotsRbxm>;
-	try {
-		cli = readSlotsRbxm(slotsBytes, layout.slots, IDENTITY_SLOT);
-	} catch (error) {
-		throw new KernelCheckError(`the kernel slots build ${SLOTS_FILE} can't be read: ${(error as Error).message}`);
-	}
+	const { bytes: slotsBytes, read: cli } = await watch.stage("slots", () => buildSlotsRbxm(proj, slotsProject(prepared.stamped, layout.slots), layout.slots, IDENTITY_SLOT, SLOTS_FILE));
 	if (cli.identity.KernelHash !== identity.hash) throw new KernelCheckError(`${SLOTS_FILE} carries KernelHash ${String(cli.identity.KernelHash)}, the kernel is ${identity.hash}`);
 	info(`  input    ${formatSeconds(watch.timings.slots)}  ${SLOTS_FILE}  ${formatBytes(slotsBytes.length)}  ${cli.slots.map((s) => `${s.slot} ${s.instances} (${s.scripts} scripts)`).join(", ")}`);
 
