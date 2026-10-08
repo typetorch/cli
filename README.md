@@ -59,7 +59,7 @@ A game repo has `typetorch.json` next to `default.project.json`:
   "defaultBranch": "prod",
   "branches": { "main": "prod" },        // git branch -> TypeTorch branch (default: lowercased, "/" -> "-")
   "channels": { "prod": "prod" },        // branch -> "prod" | "dev" (default: prod for defaultBranch, else dev)
-  "members": { "123456789": "owner" },   // userId -> owner | dev ("admin" no longer exists: read as dev, with a warning)
+  "members": { "123456789": "owner" },   // userId -> owner | dev
   "devBadgeId": null,
   "kernel": "node_modules/@typetorch/kernel",
   "approval": "all",                     // "all" (default) | "prod" | "none": which deploys need `typetorch approve`
@@ -68,13 +68,17 @@ A game repo has `typetorch.json` next to `default.project.json`:
   "revokedKeys": [],                     // = the key asset's RevokedKeys
   "fallbackPublicKey": "…",              // baked into the place by `kernel deploy`
   "keyAssetId": 123,                     // the key asset; `kernel deploy` stamps it
+  "backend": { "url": "https://backend.example.com" },  // the TypeTorch backend (`typetorch backend setup` writes it)
   // optional safety thresholds (see "Health window and auto-rollback settings"):
   "health": { "errors": 3, "window": 30, "rollback": true, "dev": { "rollback": false } },
   "autoRollback": { "failedPct": 20 }
 }
 ```
 
-Gitignore `.typetorch/`, `src/shared/build.ts`, `.payload.gen.project.json` and `.tsconfig.typetorch.json`.
+Gitignore `.env`, `.typetorch/`, `src/shared/build.ts`, `.payload.gen.project.json` and `.tsconfig.typetorch.json`.
+
+**Secrets go in the game repo's `.env`, everything else in `typetorch.json`** (CLI 0.9, plans/21). `typetorch doctor`
+lists every value the CLI reads and where it came from (Config).
 
 ### Health window and auto-rollback settings
 
@@ -94,19 +98,26 @@ Gitignore `.typetorch/`, `src/shared/build.ts`, `.payload.gen.project.json` and 
 
 ### Keys
 
-Keys are read from, highest priority first: the real environment; the env file named by `--env-file` or
-`TYPETORCH_ENV_FILE`; `.env` files in the working directory and its parents (the nearest wins). **Keep them in an env
-file outside the repo** (for example `~/.config/typetorch/my-game.env`) and point `TYPETORCH_ENV_FILE` at it (a repo
-`.env` may hold just that line; a relative path is relative to that `.env`). Nothing read from a file is copied into
-`process.env`, a key goes only into the Open Cloud client for its job, and child processes (rbxtsc, rojo, lune, bun
-scripts, git) get an allowlisted environment without any key. Keys are never printed.
+Keys are read from, highest priority first: the real environment; the **game repo's `.env`** (next to typetorch.json:
+`--config`'s folder, else the nearest folder with typetorch.json at or above the working directory). No other `.env`
+is read (before CLI 0.9 every parent folder's `.env` counted). `--env-file <path>` or `TYPETORCH_ENV_FILE` (real
+environment) is an override: that file is read **instead of** `.env`. A `TYPETORCH_ENV_FILE=` line inside the game's
+`.env` (the CLI 0.8 layout) is still followed for CLI 0.9 only, with a warning: move the keys into `.env`. Values Bun
+auto-loads from `.env*` files count as that file, not as the environment. Nothing read from a file is copied into
+`process.env`, a key goes only into the client for its job, and child processes (rbxtsc, rojo, lune, bun scripts, git)
+get an allowlisted environment without any key. Keys are never printed.
 
 | Variable | Used for | Scopes |
 |---|---|---|
 | `OPENCLOUD_ASSETS_KEY` | payload uploads and moderation (`deploy`, `upload`); the cloud test (`test --cloud`, the prod gate); hot assets (`assets sync`, `assets status`); doctor's place check | `asset:read` (also on the place), `asset:write`; `universe.place.luau-execution-session:read` + `:write` for the cloud test, hot assets and doctor |
-| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the shared seq (`deploy`, `rollback`, `promote`, `keys resign`); the signed settings record (`settings`, `access push`, `fleet setup`, `keys rotate` / `resign`) | `universe-messaging-service:publish`; `universe-datastores.objects:read` (+ `:create` and `:update` to claim seqs, store the durable head and write the settings; see "The shared seq", "The durable head" and "Settings"). No `universe:write` / `universe:read`: nothing is kept in ConfigService since CLI 0.8 / kernel 0.3.8 |
+| `OPENCLOUD_DEPLOY_KEY` | deploy messages and the shared seq (`deploy`, `rollback`, `promote`, `keys resign`); the signed settings record (`settings`, `access push`, `backend setup`, `keys rotate` / `resign`) | `universe-messaging-service:publish`; `universe-datastores.objects:read` (+ `:create` and `:update` to claim seqs, store the durable head and write the settings; see "The shared seq", "The durable head" and "Settings"). No `universe:write` / `universe:read`: nothing is kept in ConfigService since CLI 0.8 / kernel 0.3.8 |
 | `OPENCLOUD_PLACE_KEY` | `kernel deploy`, `kernel restore` (manual only) | `universe.place:write` (publish), `asset:read` (place versions). Downloading the place needs `legacy-asset:manage`, which **can't be granted to API keys today**: pass `--place-file` (a copy downloaded in Studio) |
-| `TYPETORCH_API_KEY`, `OPENCLOUD_API_KEY` or `ROBLOX_API_KEY` | any job without its own key | all of the above |
+| `OPENCLOUD_API_KEY` (alias `ROBLOX_API_KEY`) | any job without its own key | all of the above |
+| `TYPETORCH_API_KEY` | the TypeTorch backend's **game key** (write-only): `backend setup` checks it and writes it into the settings record (game servers post heartbeats, events and errors with it); the CLI posts alerts with it. **Since CLI 0.9 never a Roblox key**: an old value that still looks like one (the same as an Open Cloud variable, or the CLI 0.8 layout next to `TYPETORCH_FLEET_INGEST_TOKEN`) is refused with the rename to do | - |
+| `TYPETORCH_ADMIN_TOKEN` | the backend's **admin token**: `servers`, `report`, `alerts`, `--wait`, the owner list (`PUT /v1/access`); never goes into the record | - |
+
+Old names, read in CLI 0.9 only, with a warning naming the new one: `TYPETORCH_FLEET_TOKEN` (= `TYPETORCH_ADMIN_TOKEN`),
+`TYPETORCH_FLEET_INGEST_TOKEN` (= `TYPETORCH_API_KEY`).
 
 Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_CHILD_ENV=NAME,NAME` (extra
 non-secret variables for child processes), `TYPETORCH_KEY_FILE` / `TYPETORCH_FALLBACK_KEY_FILE` (the signing key files;
@@ -132,7 +143,7 @@ Every deploy, rollback and promote is approved by a person in their own terminal
 Approval and signing are separate: whatever publishes a release to a prod-channel branch (your y/N, or `"approval":
 "none"`) signs it automatically. Approval itself is enforced by the CLI only, so for dev-channel branches (unsigned)
 anything that holds the Open Cloud deploy key, or runs code on any server of the universe, can still publish a deploy
-message. Keep the deploy key away from agents. An old `signingPublicKey` (CLI 0.2-0.3) in typetorch.json is ignored.
+message. Keep the deploy key away from agents.
 
 ### Signing prod deploys
 
@@ -184,7 +195,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 |---|---|
 | `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs rbxtsc (`bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first |
 | `typetorch upload [--no-build]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
-| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--require-shared-seq] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: deploy message, durable head, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
+| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: deploy message, durable head, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
 | `typetorch deploy --widen <1-100> [--branch]` | re-send the branch's live deploy (same seq) to more servers; dev-channel branches only (see "Rollouts") |
 | `typetorch promote <branch> <artifactId\|assetId\|#seq\|commit> [--force] [--dry-run] [--test] [--skip-test <reason>] [--wait [s]] [--rollout <1-99>]` | point a branch at an already uploaded, approved payload (from the deployments or `uploads.jsonl`) with a new seq; no rebuild. A prod-channel branch only takes prod-channel artifacts, even with `--force` ("rebuild for prod"). `promote <artifact> <branch>` works too when only the second is a known branch |
 | `typetorch rollback [--branch] [--to <commit\|artifactId\|assetId\|#seq>] [--force] [--dry-run] [--test] [--wait [s]]` | point the branch at an earlier, already approved asset (no build or upload) and tell its servers; no cloud test unless `--test` (it is an earlier build) |
@@ -198,7 +209,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
 | `typetorch servers [--branch] [--watch]` | live servers from the fleet API (see "Fleet") |
 | `typetorch alerts [--follow] [--level] [--since <min>]` | the fleet's alerts (see "Fleet") |
-| `typetorch fleet setup --url <url>` | point game servers at the fleet API (see "Fleet") |
+| `typetorch backend setup [--url <url>] [--flush-seconds <s>] [--record-share <0-1>] [--dry-run] [--force]` | point game servers at the TypeTorch backend: checks, then the record's `backend` section (and the old `fleet`/`analytics` from it), ping, owner list, typetorch.json `backend.url` (see "Fleet") |
 | `typetorch report <seq\|artifact\|latest> [--branch]` | what the servers did with one deploy; exits 1 when one failed or rolled back (see "Fleet") |
 | `typetorch keys init [--key-file]` / `keys init --fallback [--force] [--yes]` / `keys rotate [--yes]` / `keys resign` | the signing keys: see "Signing prod deploys" |
 | `typetorch pin <artifact> --branch <b> (--servers <ids> \| --pct <1-99>)` / `pin --unpin --branch <b> (--servers <ids> \| --all)` | A/B experiment pins, signed on prod-channel branches; `--by`, `--dry-run` |
@@ -209,7 +220,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch dev --users <ids> [...]` | the same as `typetorch remote-claude` |
 | `typetorch migrate --from flamework [--dry-run] [--net compat\|native] [--report <file>] [--allow-dirty]` | the mechanical part of moving a Flamework 1.x game (see "Migrating from Flamework"); local only, no keys |
 | `typetorch update [<version>] [--check] [--yes]` | updates this CLI to the newest `@typetorch/cli` on npm (or `<version>`) the way it was installed: in the game's `package.json` with its package manager (bun, pnpm, yarn or npm, from the lockfile; a devDependency stays one), or globally (`npm i -g`, `bun add -g`, pnpm, yarn). Asks y/N first (`--yes` skips; without a terminal it prints the command). npx needs nothing (`npx @typetorch/cli@latest`); a git checkout gets the `git pull` to run. `--check` only shows the versions and the command |
-| `typetorch doctor` | checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the health window per channel and the auto-rollback threshold, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), the endpoints in the live settings record (`fleet` and `analytics`: url, `/healthz`, token; a stale tunnel or a wrong token is a FAIL with the fix) and typetorch.json's `fleet.url`, and probes each key's scopes with harmless calls |
+| `typetorch doctor` | prints the **Config** section (every value the CLI reads and where it came from: typetorch.json, the game repo's `.env`, the environment, the settings record; secrets only as set / unset), then checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the health window per channel and the auto-rollback threshold, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), the backend (typetorch.json `backend.url` with your keys: url, `/healthz`, the game key's and the admin token's roles; the record's own backend section; a stale tunnel or a wrong key is a FAIL with the fix), the backend's owner list against the signed record, and probes each key's scopes with harmless calls |
 
 Every command takes `--json` (one JSON document on stdout; human lines go to stderr), `--verbose`, `--config <path>`
 and `--env-file <path>` (`remote-claude` passes everything to the dev-server). Under Node, an `--env-file` naming a
@@ -331,41 +342,45 @@ one log and one seq. If a deploy stops after the upload, `typetorch deployments`
 Kernel 0.3.8 reads ONE signed record instead of ConfigService (CLI 0.8 removed the ConfigService registry, `config
 push` and every `universe:write` / `universe:read` use): the game's DataStore `TypeTorch`, key `settings`,
 `{ v: 1, seq, at, body, sig, sigF }`. `body` is JSON text with `defaultBranch`, `channels`, `access` (`members`,
-`revoked`, `devBadgeId`), `fleet` (`{url, token}`), `analytics` (the sink settings) and `game` (the game's live values,
+`revoked`, `devBadgeId`), `backend` (`{url, key, analytics?}`; CLI 0.9), the old `fleet` (`{url, token}`) and `analytics` (the sink settings) derived from it for kernels before 0.4 and `game` (the game's live values,
 `TypeTorch.liveConfig`); at most 32 KB, `game` at most 16 KB. `sig` and `sigF` are Ed25519 by the main and the fallback
 prod key over the lines `tt1settings`, `<seq>`, `<at>` and `<body>` joined with `\n`: the body is the exact text stored,
 so nothing is re-encoded before verifying.
 
-Every write (`settings set|unset|push`, `access push`, `fleet setup`, `keys rotate|resign`) reads the record, refuses
+Every write (`settings set|unset|push`, `access push`, `backend setup`, `keys rotate|resign`) reads the record, refuses
 one your keys didn't sign (`--force` replaces it and drops its fields: they're never re-signed), changes one field,
 raises `seq`, signs with both keys and writes it with `matchVersion` (or `exclusiveCreate`), starting over when
 another machine wrote in between. Then a ping on `TypeTorch/deploy`, `{"k":"settings","s":<seq>}`, makes 0.3.8 servers
 read it within seconds (`--no-ping`: within about a minute). All of them need both key files (else "run `typetorch keys
-init`"). `settings status` and `get` print no token; `set analytics -` reads the JSON from stdin so a token never sits
-in a command line. Servers verify by the same strict rule as prod deploys and refuse an older seq, so game code (which
+init`"). `settings status` and `get` print no token. **After every write** the record's owners go to the backend
+(`PUT /v1/access {seq, owners}` with `TYPETORCH_ADMIN_TOKEN`; only owners may Sign in with Roblox there): a backend that
+is down, refuses, or holds a newer seq is a warning, never a failed write; `typetorch access push` sends them again. Servers verify by the same strict rule as prod deploys and refuse an older seq, so game code (which
 can write DataStores) can't change it; it can only put back an older signed copy, which running servers refuse (a
 fresh write fixes it).
 
-**Endpoint checks (`fleet` and `analytics` never reach the record broken).** A wrong address or token in the record is
-not rejected by anything else: game servers just fail every request ("NetFail", HTTP 401 or 530) until someone looks at
-the dev menu. So `typetorch fleet setup` and `typetorch settings set analytics -` test the value BEFORE reading the
-record or signing, and `typetorch doctor` runs the same tests against the live record:
+**Endpoint checks (the backend never reaches the record broken).** A wrong address or key in the record is not
+rejected by anything else: game servers just fail every request ("NetFail", HTTP 401 or 530) until someone looks at the
+dev menu. So `typetorch backend setup` tests the value BEFORE reading the record or signing, and `typetorch doctor` runs
+the same tests against the live record:
 
 | Step | What is checked | Typical fix it prints |
 |---|---|---|
-| `url` | parses; https (the kernel's Fleet module and Roblox servers only use https; analytics also takes http on localhost for Studio); no user info; fleet: the base address, not an endpoint path, and only the characters the kernel accepts; DuckDB analytics: ends in `/v1/ingest`, with a token; Basin: both stream URLs | give the public https address |
-| `healthz` | `GET <base>/healthz` answers 200 `{"ok":true}` within 5 s; redirects are reported, not followed | a dead quick tunnel: start `bun run local` again (the tunnel URL changes on every run); a stopped server; a wrong host |
-| `token` | `GET <base>/v1/auth/check` (no side effects) accepts the token as the game (write-only) key for that part (fleet / analytics: `parts` in the answer); the ADMIN token is refused (the record is readable by every script in the game). Servers before that route: `GET /v1/settings` proves the token is accepted | put the server's API key (`TYPETORCH_API_KEY`; `TT_ANALYTICS_INGEST_TOKENS` before the backend rename) in `TYPETORCH_FLEET_INGEST_TOKEN` / the `token` field |
+| `url` | parses; https (the kernel's Fleet module and Roblox servers only use https); no user info; the base address, not an endpoint path, and only the characters the kernel accepts | give the public https address |
+| `healthz` | `GET <base>/healthz` answers 200 `{"ok":true}` within 5 s; redirects are reported, not followed | a dead quick tunnel: start `bun run local` again; a stopped server; a wrong host |
+| `key` | `GET <base>/v1/auth/check` (no side effects) with `TYPETORCH_API_KEY` says role `game` (write-only) and that the fleet and analytics parts run | put the backend's API key in the game repo's `.env` |
+| `admin` | the same with `TYPETORCH_ADMIN_TOKEN` says role `admin` | put the backend's admin token in `.env` |
 
 A failure prints each failing step with a `fix:` line in red, writes nothing (no record, no ping, no typetorch.json
-change) and exits 1; `--force` writes anyway and prints the failures as warnings. `--dry-run` runs the checks too.
-Basin streams have no `/healthz` and no side-effect-free authenticated call: their URLs must answer (any status) and a
-401/403 is a refused token; whether the token is right is otherwise only seen on the first upload. `doctor` lists
-`fleet url / healthz / token` and `analytics url / healthz / token` from the live record as ok / FAIL, `typetorch.json
-fleet` for the file's `fleet.url`, and warns when the file's URL differs from the record's. Tokens are never printed.
+change) and exits 1; `--force` writes anyway and prints the failures as warnings, **except** when the value in the key's
+place is the admin token or anything else that isn't the game key (the same value for both, or role `admin`): that is
+refused with `--force` too, because the record is readable by every server script (security review M2). `--dry-run`
+runs the checks too. Server text in messages has terminal escapes and control characters removed, and a redirect's
+`Location` is scrubbed of the key (L5). `doctor` lists `backend url / healthz / key / admin` for typetorch.json's
+`backend.url` with your keys, the record's own backend (or the old fleet / analytics sections of a CLI 0.8 record),
+and compares the backend's owner list (`GET /v1/access`) with the signed record's owners.
 
 `--no-registry` (deploy, rollback, promote, approve, kernel deploy) is accepted and prints a one-line note.
-`--require-registry` now means `--require-shared-seq`.
+`--require-shared-seq` and `--require-registry` are gone (CLI 0.9).
 
 ### The shared seq
 
@@ -379,8 +394,7 @@ heads by seq and ignore one at or below the seq they applied. The next seq is th
 plus one. When the key also has `universe-datastores.objects:create` and `:update`, the seq is **claimed** with one
 atomic increment of `seq` (by enough to clear every source), so two machines deploying at once never share a number,
 whether servers run or not. The deployment line records where it came from (`seqSource`: `counter`, `read` or `local`).
-Without the read scope a deploy warns and uses this machine's log only; `--require-shared-seq` (CI) stops before the
-upload instead.
+Without the read scope a deploy warns and uses this machine's log only.
 
 ### The durable head
 
@@ -502,13 +516,16 @@ Kernel 0.3.2+ posts a heartbeat per server, one report per deploy outcome per se
 `rolled_back`, `skipped`, `booted`) and alerts to the **fleet API**, a small service (`@typetorch/analytics`'s server)
 you host. The CLI reads it:
 
-- **Setup:** `typetorch fleet setup --url https://<host>` writes `fleet` = `{url, token}` into the signed settings
-  record (see "Settings"; kernel 0.3.8), with the write-only ingest token from `TYPETORCH_FLEET_INGEST_TOKEN`, pings
-  the servers, and sets typetorch.json `"fleet": { "url": ... }`. It first checks the address and the token (URL,
-  `GET /healthz`, `GET /v1/auth/check`; see "Settings > Endpoint checks") and refuses a broken one (`--force` to write
-  it anyway). Reads use the admin token in
-  `TYPETORCH_FLEET_TOKEN`. Both tokens come from the environment or the env file and are never printed or passed to a
-  child process. Without them, `servers`, `report` and `alerts` say so in one line, and `--wait` is skipped with a note.
+- **Setup:** `typetorch backend setup --url https://<host>` (see "Settings > Endpoint checks") writes the record's
+  `backend` = `{url, key, analytics?: {flushSeconds, recordShare}}` and, for kernels before 0.4 and frameworks before 0.4,
+  the old `fleet` = `{url, token}` and `analytics` (DuckDB ingest at `<url>/v1/ingest`, the same key; an existing
+  section keeps its experiments) derived from it, with the game key from `TYPETORCH_API_KEY`, pings the servers, sends
+  the owner list (`PUT /v1/access`) and sets typetorch.json `"backend": { "url": ... }` (dropping CLI 0.8's `"fleet"`,
+  which is still read with a warning). Reads use the admin token in `TYPETORCH_ADMIN_TOKEN`; alerts the CLI posts use the
+  game key (the backend refuses the admin token on its game routes). Both come from the environment or the game repo's
+  `.env` and are never printed or passed to a child process. Without them, `servers`, `report` and `alerts` say so in
+  one line, and `--wait` is skipped with a note. `typetorch fleet setup` and `typetorch settings set analytics` moved
+  here (CLI 0.9; both print where).
 - `typetorch servers [--branch <b>] [--watch]`: job, branch, artifact, applied seq, health (`ok`, `failed`,
   `unverified`, `degraded`), players, kernel, age (uptime), seen (last heartbeat); `--watch` redraws every 5 s.
   Reserved-server access codes are never printed.
@@ -547,8 +564,8 @@ signed A/B pins: `typetorch pin <artifact> --branch prod --pct <1-99>`).
 ### No GitHub Actions
 
 TypeTorch doesn't use or ship GitHub Actions (owner decision: they are a common supply-chain risk). Builds,
-cloud tests and deploys run from a developer's machine. `--require-shared-seq` and `approve --import <dir>` work in
-any automation you choose to run yourself.
+cloud tests and deploys run from a developer's machine. `approve --import <dir>` works in any automation you choose to
+run yourself.
 
 ### Kernel deploy
 
