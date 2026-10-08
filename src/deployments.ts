@@ -290,19 +290,25 @@ export function ago(iso: string, now = Date.now()): string {
 	return "";
 }
 
-/** The `typetorch deployments` table. `*` marks each branch's live head. */
-export function formatDeploymentsTable(rows: DeploymentRow[], heads: Map<string, LiveHead>, now = Date.now()): string {
+/**
+ * The `typetorch deployments` table. `*` marks each branch's live head. `channelOf` (CLI 0.8.1, the kernel 0.3.9 rule):
+ * the channel column is what the BRANCH is (prod: the default branch or one configured prod; every other branch dev),
+ * with the build's own channel in brackets when it differs ("dev (prod build)"); without it, the build's channel.
+ */
+export function formatDeploymentsTable(rows: DeploymentRow[], heads: Map<string, LiveHead>, now = Date.now(), channelOf?: (branch: string) => Channel): string {
 	const body = rows.map((d) => {
 		const live = heads.get(d.branch);
 		const isLive = live !== undefined && live.seq === d.seq && live.assetId === d.assetId;
 		const git = `${d.branch}@${d.commit || "uncommitted"}${d.dirty ? "*" : ""}`;
 		const action = (d.action === "rollback" || d.action === "promote") && d.fromArtifactId ? `${d.action} (from ${d.fromArtifactId})` : d.action;
+		const channel = channelOf ? channelOf(d.branch) : d.channel;
+		const build = channelOf && d.channel && d.channel !== channel ? ` (${d.channel} build)` : "";
 		return [
 			isLive ? "*" : " ",
 			`#${d.seq}`,
 			ago(d.at, now) ? `${time(d.at)} ${dim(`(${ago(d.at, now)})`)}` : time(d.at),
-			d.channel === "prod" ? green(d.channel) : (d.channel ?? ""),
-			d.channel === "prod" ? `${green(d.branch)}${git.slice(d.branch.length)}` : git,
+			channel === "prod" ? `${green(channel)}${build}` : `${channel ?? ""}${build}`,
+			channel === "prod" ? `${green(d.branch)}${git.slice(d.branch.length)}` : git,
 			d.artifactId,
 			String(d.assetId),
 			d.source === "local" ? `${action} [local]` : action,

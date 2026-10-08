@@ -37,7 +37,8 @@ export async function deploymentsCommand(args: ParsedArgs) {
 		info(`no deployments${branch ? ` on ${branch}` : ""} yet (${SOURCE_NOTE})`);
 		return;
 	}
-	info(formatDeploymentsTable([...rows].reverse(), history.heads)); // newest first (--json keeps oldest first)
+	// newest first (--json keeps oldest first); the channel column is the branch's (kernel 0.3.9's rule), not the build's
+	info(formatDeploymentsTable([...rows].reverse(), history.heads, Date.now(), (name) => branchChannel(proj.config, name)));
 	info(dim(`* = live head of its branch; # = deploy number (seq); times UTC; ${SOURCE_NOTE}`));
 	for (const upload of pending) {
 		info(

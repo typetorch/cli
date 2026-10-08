@@ -18,6 +18,11 @@
  * the kernel's `replaces` rule decides (a higher seq; or the same deploy re-sent later with another rollout %), and a
  * signed head is never replaced by an unsigned one. Scopes: universe-datastores.objects:read, :create and :update (the
  * shared seq's). Without them the deploy still succeeds, with one warning line.
+ *
+ * CLI 0.8.1 (kernel 0.3.9): `heads.<branch>` also keeps the branch's last PREV_HEADS_KEPT (3) heads before it as `prev`
+ * (newest first, the same shape without a `prev` of its own), so `/tt rollback` on a server that booted straight into a
+ * bad build can still go back (a server-local swap; prod servers take only a previous head whose signature verifies).
+ * Kernels 0.3.9+ keep the list on their own durable writes too; older kernels and older records simply have none.
  */
 import { createHash } from "node:crypto";
 import { debug, info, warn } from "./log.ts";
@@ -47,7 +52,12 @@ export interface KernelHead {
 	t: number;
 	sig?: string;
 	sigF?: string;
+	/** CLI 0.8.1 / kernel 0.3.9: the branch's previous heads, newest first (DataStore copy only). */
+	prev?: KernelHead[];
 }
+
+/** How many previous heads `heads.<branch>.prev` keeps (kernel Constants.PREV_HEADS_KEPT). */
+export const PREV_HEADS_KEPT = 3;
 
 /** A deployment history entry as the kernel stores it (Registry.luau cleanDeployment). */
 export interface KernelDeployment {
@@ -113,11 +123,46 @@ function plainObject(value: unknown): Record<string, unknown> | undefined {
 	return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
-/** `heads` with the branch's head merged in, or undefined when it already holds this (or a newer) head. */
+/** One `prev` entry: the head's own fields (as stored), never a `prev` of its own. */
+function prevEntry(value: unknown): KernelHead | undefined {
+	if (!isHead(value)) return undefined;
+	const entry: Record<string, unknown> = { ...value };
+	delete entry.prev;
+	return entry as unknown as KernelHead;
+}
+
+/**
+ * `head` as stored over `stored` (the branch's head before it): with `prev` = `stored` then its own `prev`, newest
+ * first, at most PREV_HEADS_KEPT, never `head` itself; the same deploy written again keeps the list it had. The same
+ * rule as the kernel's Registry.luau withPrev.
+ */
+export function withPrev(head: KernelHead, stored: unknown): KernelHead {
+	const copy: KernelHead = { ...head };
+	delete copy.prev;
+	const list: KernelHead[] = [];
+	const seen = new Set<string>();
+	const add = (value: unknown) => {
+		const entry = prevEntry(value);
+		if (!entry || list.length >= PREV_HEADS_KEPT) return;
+		if (entry.assetId === copy.assetId && entry.seq === copy.seq) return;
+		const key = `${entry.assetId}#${entry.seq}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		list.push(entry);
+	};
+	if (isHead(stored)) {
+		if (!(stored.assetId === head.assetId && stored.seq === head.seq)) add(stored);
+		const storedPrev = (stored as { prev?: unknown }).prev;
+		if (Array.isArray(storedPrev)) for (const entry of storedPrev) add(entry);
+	}
+	return list.length > 0 ? { ...copy, prev: list } : copy;
+}
+
+/** `heads` with the branch's head merged in (its `prev` kept), or undefined when it already holds this (or a newer) head. */
 export function mergeHeads(existing: unknown, branch: string, head: KernelHead): Record<string, unknown> | undefined {
 	const heads = { ...(plainObject(existing) ?? {}) };
 	if (!headReplaces(heads[branch], head)) return undefined;
-	heads[branch] = head;
+	heads[branch] = withPrev(head, heads[branch]);
 	return heads;
 }
 

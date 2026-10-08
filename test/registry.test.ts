@@ -137,6 +137,17 @@ describe("history", () => {
 		expect(lines.filter((l) => l.startsWith("*"))).toHaveLength(2);
 		expect(text).toContain("[local]");
 	});
+	test("CLI 0.8.1: the channel column is the branch's channel (a prod build on a dev branch says so)", () => {
+		const mixed = [{ ...dep(1), branch: "dev", channel: "prod" as const, source: "local" as const }, { ...dep(2), branch: "feature-x", channel: "dev" as const, source: "local" as const }];
+		const heads = liveHeads(undefined, mixed);
+		const text = formatDeploymentsTable(mixed, heads, Date.now(), (branch) => (branch === "prod" ? "prod" : "dev"));
+		const lines = text.split("\n");
+		const devLine = lines.find((line) => line.includes("#1"))!;
+		expect(devLine).toContain("dev (prod build)");
+		const featureLine = lines.find((line) => line.includes("#2"))!;
+		expect(featureLine).toContain("dev");
+		expect(featureLine).not.toContain("build)");
+	});
 });
 
 describe("deploy entries and messages", () => {

@@ -377,6 +377,13 @@ scopes (`universe-datastores.objects:read`, `:create`, `:update`); without them 
 warning: "the head isn't stored durably: deploys reach only running servers". `typetorch doctor` checks the write
 scopes (`scope datastore write`, a tiny value under the key `doctor`).
 
+CLI 0.8.1 (kernel 0.3.9): `heads.<branch>` also keeps the branch's last 3 heads before it as `prev` (newest first, the
+same shape). `/tt rollback` on a server that booted straight into a bad build uses them (a server-local swap; prod
+servers take only a previous head whose signature verifies); `typetorch rollback <branch>` still rolls the whole
+branch back. Records written before have no `prev` (the kernel falls back to the deployment history).
+`typetorch deployments` shows each row's branch channel (prod: the default branch or one configured prod), with the
+build's channel in brackets when it differs.
+
 ### Hot assets
 
 Builders edit models and UI templates in the real place and publish it as usual; running servers pick up the new

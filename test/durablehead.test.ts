@@ -20,8 +20,11 @@ import {
 	mergeDeploymentList,
 	mergeHeads,
 	NOT_DURABLE,
+	PREV_HEADS_KEPT,
 	reportDurableHead,
 	storeDurableHead,
+	withPrev,
+	type KernelHead,
 } from "../src/durablehead";
 import { Settings, useSettings } from "../src/env";
 import { setOutputMode, Stopwatch } from "../src/log";
@@ -124,6 +127,29 @@ describe("merge rules", () => {
 		const merged = mergeHeads({ dev: head(44), prod: { assetId: 1, seq: 9 } }, "dev", head(47));
 		expect(merged).toMatchObject({ dev: { seq: 47 }, prod: { seq: 9 } });
 		expect(mergeHeads({ dev: head(50) }, "dev", head(47))).toBeUndefined();
+	});
+	test("CLI 0.8.1 (kernel 0.3.9): the head it replaces goes into prev (newest first, at most 3, the same shape without its own prev)", () => {
+		const first = mergeHeads({}, "dev", head(44))!;
+		expect((first.dev as KernelHead).prev).toBeUndefined();
+		const second = mergeHeads(first, "dev", head(45))!;
+		expect((second.dev as KernelHead).prev!.map((entry) => entry.seq)).toEqual([44]);
+		const third = mergeHeads(second, "dev", head(46))!;
+		const fourth = mergeHeads(third, "dev", head(47))!;
+		const fifth = mergeHeads(fourth, "dev", head(48))!;
+		const prev = (fifth.dev as KernelHead).prev!;
+		expect(prev.map((entry) => entry.seq)).toEqual([47, 46, 45]);
+		expect(PREV_HEADS_KEPT).toBe(3);
+		for (const entry of prev) expect((entry as { prev?: unknown }).prev).toBeUndefined();
+		expect(prev[0]).toMatchObject({ assetId: 1047, artifactId: "dev-47", channel: "dev" });
+	});
+	test("prev: an old record without prev is readable (it becomes the first entry); the same deploy re-sent keeps the list; signatures ride along", () => {
+		const old = { assetId: 1, artifactId: "prod-1", seq: 9, commit: "a", channel: "prod", deployedAt: "2026-10-01T00:00:00Z", t: 1, sig: "S", sigF: "F" };
+		const merged = mergeHeads({ prod: old }, "prod", { ...head(10), channel: "prod", sig: "S2", sigF: "F2" })!;
+		expect((merged.prod as KernelHead).prev).toEqual([old]);
+		const resent = { ...(merged.prod as KernelHead), rollout: 50, t: (merged.prod as KernelHead).t + 1 };
+		const again = mergeHeads(merged, "prod", resent)!;
+		expect((again.prod as KernelHead).prev).toEqual([old]);
+		expect(withPrev(head(3), undefined).prev).toBeUndefined();
 	});
 	test("the same deploy re-sent with another rollout and a newer t replaces it; an unsigned head never replaces a signed one", () => {
 		const first = head(47, { rollout: 10, t: 100 });
