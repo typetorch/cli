@@ -139,7 +139,8 @@ function failedRequest(step: StepName, what: string, host: string, outcome: Outc
 		const message = scrub(outcome.error.message, token);
 		if (outcome.timedOut) return fail(step, `${what} didn't answer within ${timeoutMs / 1000} s`, `check that the server and its tunnel are running (a tunnel that just started can take a minute); ${LOCAL_FLEET_HINT}`, outcome.ms);
 		const hint = fleetNetworkHint(outcome.error, host) ?? `check the URL and that the server is running; ${LOCAL_FLEET_HINT}`;
-		const code = (outcome.error as { cause?: { code?: string } }).cause?.code;
+		// Node puts the code on `cause`, Bun on the error itself ("ConnectionRefused", also for names that don't resolve).
+		const code = (outcome.error as { cause?: { code?: string } }).cause?.code ?? (outcome.error as { code?: string }).code;
 		return fail(step, `${what} didn't answer (${code ?? message})`, hint, outcome.ms);
 	}
 	const { status, text, location } = outcome.reply;

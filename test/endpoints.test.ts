@@ -96,6 +96,13 @@ describe("fleet endpoint: GET /healthz", () => {
 		expect(stepOf(b, "healthz").hint).toContain("the server behind it doesn't answer");
 		const c = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: fakeServer({ throws: connectionError("ECONNREFUSED") }).fetch });
 		expect(stepOf(c, "healthz").hint).toContain("nothing listens");
+		// Bun's fetch: code "ConnectionRefused" on the error itself, for refused connections and unresolvable names alike.
+		const bunError = () => Object.assign(new Error("Unable to connect. Is the computer able to access the url?"), { code: "ConnectionRefused" });
+		const d = await checkFleetEndpoint({ url: tunnel, token: INGEST, fetch: fakeServer({ throws: bunError }).fetch });
+		expect(stepOf(d, "healthz").detail).toContain("didn't answer (ConnectionRefused)");
+		expect(stepOf(d, "healthz").hint).toContain("quick tunnel URLs die with their cloudflared");
+		const e = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: fakeServer({ throws: bunError }).fetch });
+		expect(stepOf(e, "healthz").hint).toContain("nothing listens");
 	});
 	test("no answer within the time limit fails, with the limit in the message", async () => {
 		const server = fakeServer({ delayMs: 2000 });
