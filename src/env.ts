@@ -18,9 +18,11 @@
  *   OPENCLOUD_DEPLOY_KEY  deploy messages, the shared seq (seqstore.ts), the durable heads and the signed settings
  *                         record (settings.ts: `settings`, `fleet setup`, `access push`):
  *                         universe-messaging-service:publish; universe-datastores.objects:read, :create and :update
- *   OPENCLOUD_PLACE_KEY   kernel deploy / restore (manual only)      universe.place:write (publish), asset:read (place
- *                         versions). Downloading the place needs legacy-asset:manage, which can't be granted to API
- *                         keys today: kernel deploy takes --place-file (a copy downloaded in Studio)
+ *   OPENCLOUD_PLACE_KEY   kernel deploy / restore (manual only)      universe.place.luau-execution-session:read + :write
+ *                         (the default luau engine: a task patches and saves the place), asset:read (place versions);
+ *                         universe.place:write only to publish files (--place-file / restore <file> / --replace-place).
+ *                         Roblox has no API-key route for downloading place files (legacy-asset:manage can't be
+ *                         granted; universe.place:read only covers the version history)
  *   shared fallback: TYPETORCH_API_KEY, OPENCLOUD_API_KEY or ROBLOX_API_KEY
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -41,7 +43,7 @@ export const JOB_KEY_VARS: Record<KeyJob, string> = {
 export const JOB_SCOPES: Record<KeyJob, string> = {
 	assets: "asset:read, asset:write (+ universe.place.luau-execution-session:read/write for test --cloud, assets sync/status and doctor's place check)",
 	deploy: "universe-messaging-service:publish, universe-datastores.objects:read, :create and :update (seqs, durable heads, the signed settings)",
-	place: "universe.place:write, asset:read (place downloads need legacy-asset:manage, which API keys can't get today: use --place-file)",
+	place: "universe.place.luau-execution-session:read/write, asset:read (+ universe.place:write to publish --place-file patches; no API key can download a place)",
 };
 
 export const ENV_FILE_VAR = "TYPETORCH_ENV_FILE";

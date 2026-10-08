@@ -30,6 +30,23 @@ export class ApiError extends Error {
 	}
 }
 
+/** A Luau Execution task still QUEUED/PROCESSING a minute past its own timeout: it may still finish (and act). */
+export class TaskStillRunningError extends Error {
+	override name = "TaskStillRunningError";
+	constructor(
+		readonly taskPath: string,
+		readonly state: string,
+	) {
+		super(`Luau Execution task ${taskPath} still ${state}`);
+	}
+}
+
+/** How long a rate-limited (429) task creation waits before trying again, times the attempt (tests shorten it). */
+let luauRetryDelayMs = 12_000;
+export function setLuauRetryDelay(ms: number) {
+	luauRetryDelayMs = ms;
+}
+
 export interface ApiResponse {
 	status: number;
 	ok: boolean;
@@ -241,27 +258,36 @@ export class OpenCloud {
 	 * `version`: run against that place version (`/versions/{n}/...`) instead of the latest one.
 	 * `binaryOutput`: `enableBinaryOutput`; the script then returns `{BinaryOutput = buffer, ReturnValues = {...}}`,
 	 * `results` are the ReturnValues and `binaryOutputUri` (valid 15 min) holds the buffer (`downloadBinaryOutput`).
+	 * `binaryInput`: the path of a binary input (`createBinaryInput` + `uploadBinaryInput`); the script reads it as
+	 * `({...})[1].BinaryInput` (a buffer).
+	 * Creating a task is rate-limited (5 a minute per API key owner, 10 open tasks per place): a 429 waits and tries
+	 * again, up to 4 times. Nothing else is retried (a task that was created must not be created twice). A task still
+	 * running a minute past its timeout throws TaskStillRunningError (it may still finish).
 	 */
 	async runLuau(
 		universeId: number,
 		placeId: number,
 		script: string,
 		timeoutSeconds = 60,
-		options: { version?: number; binaryOutput?: boolean } = {},
+		options: { version?: number; binaryOutput?: boolean; binaryInput?: string } = {},
 	): Promise<LuauTaskResult> {
 		const base = `/cloud/v2/universes/${universeId}/places/${placeId}${options.version !== undefined ? `/versions/${options.version}` : ""}`;
 		const job = progress().job("Luau Execution task: creating");
 		let task: any;
 		let current: any;
 		try {
-			task = await this.call("POST", `${base}/luau-execution-session-tasks`, {
-				json: { script, timeout: `${timeoutSeconds}s`, ...(options.binaryOutput ? { enableBinaryOutput: true } : {}) },
-			});
+			const body = {
+				script,
+				timeout: `${timeoutSeconds}s`,
+				...(options.binaryOutput ? { enableBinaryOutput: true } : {}),
+				...(options.binaryInput ? { binaryInput: options.binaryInput } : {}),
+			};
+			task = await this.createWithRateLimit(`${base}/luau-execution-session-tasks`, body, job);
 			current = task;
 			const started = performance.now();
 			while (current?.state === "QUEUED" || current?.state === "PROCESSING") {
 				job.update(`Luau Execution task: ${String(current.state).toLowerCase()}`);
-				if ((performance.now() - started) / 1000 > timeoutSeconds + 60) throw new Error(`Luau Execution task ${task?.path} still ${current.state}`);
+				if ((performance.now() - started) / 1000 > timeoutSeconds + 60) throw new TaskStillRunningError(String(task?.path), String(current.state));
 				await sleep(1500);
 				current = await this.call("GET", `/cloud/v2/${task.path}`, { label: "Luau Execution task status" });
 			}
@@ -275,6 +301,73 @@ export class OpenCloud {
 			path: typeof (current?.path ?? task?.path) === "string" ? (current?.path ?? task?.path) : undefined,
 			...(typeof current?.binaryOutputUri === "string" ? { binaryOutputUri: current.binaryOutputUri } : {}),
 		};
+	}
+
+	/** POST that creates a Luau Execution resource; a 429 (rate limit) waits and tries again, nothing else does. */
+	private async createWithRateLimit(path: string, json: unknown, job?: { update(label: string): void }): Promise<any> {
+		for (let attempt = 1; ; attempt++) {
+			const response = await this.request("POST", path, { json, retry: false });
+			if (response.ok) return response.body;
+			if (response.status !== 429 || attempt >= 5) throw new ApiError("POST", path, response.status, response.body, response.text);
+			const after = Number(response.headers.get("retry-after"));
+			const wait = Number.isFinite(after) && after > 0 ? Math.min(after * 1000, 60_000) : luauRetryDelayMs * attempt;
+			job?.update(`Luau Execution: rate limited, waiting ${Math.round(wait / 1000)} s`);
+			await sleep(wait);
+		}
+	}
+
+	/**
+	 * Creates a Luau Execution binary input (up to 100 MiB; valid 15 minutes, for any number of tasks of this universe;
+	 * scope universe.place.luau-execution-session:write). Returns its path and the presigned URI to upload to (never
+	 * logged).
+	 */
+	async createBinaryInput(universeId: number, size: number): Promise<{ path: string; uploadUri: string }> {
+		const body = await this.createWithRateLimit(`/cloud/v2/universes/${universeId}/luau-execution-session-task-binary-inputs`, { size });
+		if (typeof body?.path !== "string" || typeof body?.uploadUri !== "string") {
+			throw new Error(`creating the binary input answered no path or upload URI (fields: ${Object.keys(body ?? {}).join(", ") || "none"})`);
+		}
+		return { path: body.path, uploadUri: body.uploadUri };
+	}
+
+	/**
+	 * Uploads a binary input's bytes to its presigned `uploadUri` with PUT (unverified until the first live run: Roblox
+	 * documents only "upload the binary input object using this URI"). First with `content-type:
+	 * application/octet-stream`; a 4xx then tries once without a content type (a URL signed without one may refuse
+	 * any). The API key goes only to apis.roblox.com; the URI is never logged.
+	 */
+	async uploadBinaryInput(uploadUri: string, bytes: Uint8Array, timeoutMs = 300_000): Promise<void> {
+		const url = new URL(uploadUri);
+		if (url.protocol !== "https:") throw new Error(`refusing a binary input upload URI that isn't https (${url.protocol}//${url.hostname})`);
+		const key: Record<string, string> = url.hostname === "apis.roblox.com" ? { "x-api-key": this.apiKey } : {};
+		await withJob("upload task input", async () => {
+			let last = "";
+			for (const headers of [{ ...key, "content-type": "application/octet-stream" }, key]) {
+				for (let attempt = 1; attempt <= 3; attempt++) {
+					try {
+						const response = await fetch(url, { method: "PUT", headers, body: bytes as Uint8Array<ArrayBuffer>, signal: AbortSignal.timeout(timeoutMs) });
+						debug(`PUT binary input to ${url.hostname} -> ${response.status}`);
+						if (response.ok) return;
+						last = `${response.status} ${(await response.text()).slice(0, 300)}`;
+						if (response.status !== 429 && response.status < 500) break;
+					} catch (error) {
+						last = String((error as Error)?.message ?? error);
+					}
+					if (attempt < 3) await sleep(500 * 2 ** (attempt - 1));
+				}
+			}
+			throw new Error(redact(`uploading the task's binary input to ${url.hostname} failed: ${last}`));
+		});
+	}
+
+	/** The first page of a task's logs (`print` output); empty when they can't be read. */
+	async taskLogs(taskPath: string): Promise<string[]> {
+		try {
+			const body = await this.call("GET", `/cloud/v2/${taskPath}/logs`, { label: "Luau Execution task logs" });
+			const messages = body?.luauExecutionSessionTaskLogs?.[0]?.messages;
+			return Array.isArray(messages) ? messages.map(String) : [];
+		} catch {
+			return [];
+		}
 	}
 
 	/**
@@ -331,7 +424,11 @@ export class OpenCloud {
 	 * Downloads a place file (Open Cloud Asset Delivery, spike S12): `GET /asset-delivery-api/v1/assetId/{placeId}`
 	 * (or `/version/{n}`) answers `{location}`, a presigned CDN URL fetched WITHOUT the key. Needs the
 	 * `legacy-asset:manage` scope (asset:read is not enough: 403 "Forbidden" without it), which can't be granted to API
-	 * keys today; Roblox staff say universe.place:read is coming (devforum 4044027). The URL is never logged.
+	 * keys today. Roblox has no API-key route for downloading place files: `universe.place:read` shipped, but it only
+	 * covers the place version history (`/place-version-history-api/v1/{placeId}/history` and `/contributors`; a key
+	 * limited to one experience even gets 403 "Scope must be configured to allow all resources" there). The splice
+	 * engine therefore takes `--place-file` (a copy downloaded in Studio), and `kernel deploy` patches through a Luau
+	 * Execution task by default (the luau engine, no download). The URL is never logged.
 	 */
 	async downloadPlace(placeId: number, version?: number): Promise<{ bytes: Uint8Array; seconds: number }> {
 		const started = performance.now();
