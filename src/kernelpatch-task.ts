@@ -567,7 +567,8 @@ local function manifest(phase, serialize, refs)
 	for _, service in childrenOf(game) or {} do
 		m.services += 1
 		local serviceKey = service.ClassName .. "|" .. service.Name
-		m.entries[serviceKey] = { d = hashString(service.ClassName .. "|" .. attributesOf(service) .. "|" .. tagsOf(service)), n = 0 }
+		local serviceMarks = attributesOf(service) .. "|" .. tagsOf(service)
+		m.entries[serviceKey] = { d = hashString(service.ClassName .. "|" .. serviceMarks), n = 0, bare = serviceMarks == "|", kids = 0 }
 		table.insert(m.keys, serviceKey)
 		local children = childrenOf(service)
 		if children == nil then
@@ -575,11 +576,14 @@ local function manifest(phase, serialize, refs)
 			m.entries[serviceKey].d = "unreadable"
 			continue
 		end
-		local index = 0
+		-- Keys by name and occurrence, not position: the check and the save run in two task sessions, and the cross-task
+		-- comparison (rootD) must not depend on the order the engine lists things in.
+		local seen = {}
 		for _, child in children do
 			if not isSlotChild(service, child) then
-				index += 1
-				local key = serviceKey .. "/" .. index .. ":" .. child.Name
+				seen[child.Name] = (seen[child.Name] or 0) + 1
+				m.entries[serviceKey].kids += 1
+				local key = serviceKey .. "/" .. child.Name .. "#" .. seen[child.Name]
 				local ok, text, count = pcall(describeTree, child, phase, refs)
 				local entry
 				if ok then
@@ -609,8 +613,13 @@ local function manifest(phase, serialize, refs)
 	for _, key in m.keys do
 		local entry = m.entries[key]
 		table.insert(lines, key .. "\t" .. entry.d .. "\t" .. tostring(entry.s))
-		table.insert(dlines, key .. "\t" .. entry.d)
+		-- rootD skips services with nothing in them (the engine creates some on demand, so one session may have them and
+		-- the next not) and is sorted, so it compares across task sessions.
+		if not (entry.bare and entry.kids == 0) then
+			table.insert(dlines, key .. "\t" .. entry.d)
+		end
 	end
+	table.sort(dlines)
 	m.root = hashString(table.concat(lines, "\n"))
 	m.rootD = hashString(table.concat(dlines, "\n"))
 	return m
