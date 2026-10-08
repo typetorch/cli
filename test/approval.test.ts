@@ -37,12 +37,12 @@ const request = (patch: Partial<ReleaseRequest> = {}): ReleaseRequest => ({ kind
 const dir = (proj: Project) => join(proj.root, ".typetorch");
 
 describe("approval policy", () => {
-	test("typetorch.json approval: all (default), prod, none; an old signingPublicKey is ignored without a warning", () => {
+	test("typetorch.json approval: all (default), prod, none; CLI 0.9: the old signingPublicKey is an unknown key", () => {
 		expect(validateConfig({ project: "p", universeId: 1, placeId: 2, creator: { userId: 3 } }).config?.approval).toBe("all");
 		expect(validateConfig({ project: "p", universeId: 1, placeId: 2, creator: { userId: 3 }, approval: "maybe" }).errors).toContain('"approval" must be one of all, prod, none');
 		const old = validateConfig({ project: "p", universeId: 1, placeId: 2, creator: { userId: 3 }, signingPublicKey: "anything" });
 		expect(old.errors).toEqual([]);
-		expect(old.warnings).toEqual([]);
+		expect(old.warnings).toEqual(['unknown key "signingPublicKey" (ignored)']);
 		expect(approvalRequired("all", "dev")).toBe(true);
 		expect(approvalRequired("prod", "dev")).toBe(false);
 		expect(approvalRequired("prod", "prod")).toBe(true);

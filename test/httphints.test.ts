@@ -14,8 +14,8 @@ describe("fleet hints", () => {
 	test("502 behind a tunnel, 404 from a config.yml ingress, fleet part off, tokens, 429", () => {
 		expect(fleetHint(502, "Bad gateway cloudflare", tunnel)).toContain("server behind it doesn't answer");
 		expect(fleetHint(404, "", tunnel)).toContain("config.yml");
-		expect(fleetHint(404, '{"error":"the fleet part is off on this server"}', "fleet.example.com")).toContain("TT_SERVER_PARTS");
-		expect(fleetHint(401, "{}", "fleet.example.com")).toContain("TT_ANALYTICS_ADMIN_TOKEN");
+		expect(fleetHint(404, '{"error":"the fleet part is off on this server"}', "fleet.example.com")).toContain("TYPETORCH_PARTS");
+		expect(fleetHint(401, "{}", "fleet.example.com")).toContain("TYPETORCH_ADMIN_TOKEN");
 		expect(fleetHint(429, "", "fleet.example.com")).toContain("rate-limiting");
 	});
 	test("no known fix: undefined, and the body is shortened", () => {

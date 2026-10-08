@@ -154,7 +154,7 @@ describe("non-interactive deploys never wait on stdin", () => {
 		45_000,
 	);
 	test(
-		"--require-shared-seq (and the old --require-registry) stop before the upload when no shared seq source answers",
+		"CLI 0.9: --require-shared-seq and --require-registry are gone (unknown options, nothing uploaded)",
 		async () => {
 			const root = game();
 			dataStoreStatus = 403;
@@ -170,10 +170,9 @@ describe("non-interactive deploys never wait on stdin", () => {
 					});
 					const code = await child.exited;
 					const output = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text());
-					expect(code).toBe(1);
-					expect(output).toContain("--require-shared-seq: no shared seq source is readable");
-					expect(output).toContain("universe-datastores.objects:read");
-					expect(requests.filter((r) => r !== "seq read refused")).toEqual([]); // nothing uploaded
+					expect(code).toBe(2);
+					expect(output).toContain(`unknown option ${flag}`);
+					expect(requests).toEqual([]); // nothing read or uploaded
 				}
 			} finally {
 				dataStoreStatus = 0;

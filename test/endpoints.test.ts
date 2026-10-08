@@ -1,20 +1,20 @@
 /**
  * The endpoint checks that guard the signed settings record (endpoints.ts): the URL, GET /healthz within 5 s and the
- * token (GET /v1/auth/check), for settings.fleet and settings.analytics; `fleet setup` / `settings set analytics`
- * refusing to sign a broken value (and --force going ahead); the changeSettings guard; and doctor's version of the
- * same checks against the live record. Fake servers only: tokens here are made up.
+ * key (GET /v1/auth/check), for settings.backend and the old fleet / analytics sections; what --force can and can't
+ * override (security review M2); server text made safe to print (L5); the changeSettings guard; and doctor's backend
+ * checks against the live record. `backend setup` itself: test/backend.test.ts. Fake servers only: keys are made up.
  */
 import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "../src/args";
-import { configFleetChecks, reportChecks, settingsEndpointChecks } from "../src/commands/doctor";
-import { fleetCommand, fleetFlags } from "../src/commands/fleet";
-import { changeSettings, settingsCommand, settingsFlags } from "../src/commands/settings";
+import { backendChecks, reportChecks } from "../src/commands/doctor";
+import { changeSettings } from "../src/commands/settings";
 import { validateConfig, type Project } from "../src/config";
 import {
 	checkAnalyticsEndpoint,
+	checkBackendEndpoint,
 	checkFleetEndpoint,
 	EndpointCheckError,
 	enforceEndpoints,
@@ -24,8 +24,9 @@ import {
 	type EndpointReport,
 } from "../src/endpoints";
 import { Settings, useSettings } from "../src/env";
-import { fleetNetworkHint, INGEST_TOKEN_HINT } from "../src/httphints";
+import { fleetNetworkHint, GAME_KEY_HINT, safeText, shortBody } from "../src/httphints";
 import { setOutputMode } from "../src/log";
+import type { SettingsBody } from "../src/settings";
 import { generateSigningKey, parseSigningKey, type DualSigner } from "../src/signing";
 import { fakeDataStoreCloud } from "./fixtures/fake-datastore";
 
@@ -40,7 +41,7 @@ describe("fleet endpoint: the URL", () => {
 		const report = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: server.fetch });
 		expect(report.ok).toBe(true);
 		expect(report.steps.map((s) => [s.step, s.ok])).toEqual([["url", true], ["healthz", true], ["token", true]]);
-		expect(stepOf(report, "token").detail).toContain("accepted as the game key (write-only), the server runs fleet");
+		expect(stepOf(report, "token").detail).toContain("accepted as the game key (write-only), the backend runs fleet");
 		expect(server.calls.every((c) => c.method === "GET")).toBe(true);
 		expect(server.calls.map((c) => c.path)).toEqual(["/healthz", "/v1/auth/check"]);
 		expect(JSON.stringify(report)).not.toContain(INGEST);
@@ -48,7 +49,7 @@ describe("fleet endpoint: the URL", () => {
 	test("not a URL, http, credentials, an endpoint path, a query: refused before any request, each with a fix", async () => {
 		const server = fakeServer();
 		for (const [url, expected] of [
-			["not a url", /must be the fleet API's https URL/],
+			["not a url", /must be the backend's https URL/],
 			["http://fleet.example.com", /must be https/],
 			["https://user:pw@fleet.example.com", /credentials/],
 			["https://fleet.example.com/v1/fleet", /endpoint path/],
@@ -122,7 +123,7 @@ describe("fleet endpoint: GET /healthz", () => {
 		expect(stepOf(redirect, "healthz").detail).toContain("redirects (301) to other.example.org");
 		const wrong = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: fakeServer({ everything: () => new Response("<html><title>Welcome to nginx!</title></html>") }).fetch });
 		expect(stepOf(wrong, "healthz").detail).toContain(`not {"ok":true}`);
-		expect(stepOf(wrong, "healthz").hint).toContain("isn't the TypeTorch analytics server");
+		expect(stepOf(wrong, "healthz").hint).toContain("isn't the TypeTorch backend");
 		const wall = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: fakeServer({ everything: () => new Response("Access denied", { status: 403 }) }).fetch });
 		expect(stepOf(wall, "healthz").detail).toContain("/healthz is public");
 	});
@@ -134,8 +135,8 @@ describe("fleet endpoint: the token", () => {
 		expect(report.ok).toBe(false);
 		expect(stepOf(report, "healthz").ok).toBe(true);
 		expect(stepOf(report, "token").detail).toContain("refused the token (HTTP 401)");
-		expect(stepOf(report, "token").hint).toBe(INGEST_TOKEN_HINT("fleet"));
-		expect(stepOf(report, "token").hint).toContain("TT_ANALYTICS_INGEST_TOKENS");
+		expect(stepOf(report, "token").hint).toBe(GAME_KEY_HINT("fleet"));
+		expect(stepOf(report, "token").hint).toContain("TYPETORCH_API_KEY");
 	});
 	test("the ADMIN token is refused: it would sit in a record every script in the game can read", async () => {
 		const report = await checkFleetEndpoint({ url: HOST, token: ADMIN, fetch: fakeServer().fetch });
@@ -147,7 +148,7 @@ describe("fleet endpoint: the token", () => {
 		const report = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: fakeServer({ parts: { analytics: true, fleet: false } }).fetch });
 		expect(stepOf(report, "token").detail).toContain("doesn't run its fleet part");
 		expect(stepOf(report, "token").hint).toContain("TYPETORCH_PARTS");
-		expect(stepOf(report, "token").hint).toContain("TT_SERVER_PARTS");
+
 	});
 	test("the first version of the route (role ingest, valid) and a server that doesn't list its parts both still work", async () => {
 		const legacy = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: fakeServer({ legacyShape: true }).fetch });
@@ -239,7 +240,7 @@ describe("analytics endpoint", () => {
 		expect(stepOf(dead, "healthz").hint).toContain("bun run local");
 		const wrong = await checkAnalyticsEndpoint(duck({ token: "old-token-from-a-previous-run-0123" }), { fetch: fakeServer().fetch });
 		expect(stepOf(wrong, "token").detail).toContain("refused the token");
-		expect(stepOf(wrong, "token").hint).toContain('"token" field');
+		expect(stepOf(wrong, "token").hint).toContain('analytics "token"');
 	});
 	test("DuckDB: the admin token is refused here too", async () => {
 		const report = await checkAnalyticsEndpoint(duck({ token: ADMIN }), { fetch: fakeServer().fetch });
@@ -346,92 +347,6 @@ async function inProject<T>(proj: Project, fn: () => Promise<T>): Promise<{ resu
 	}
 }
 
-describe("fleet setup and settings set analytics refuse a broken endpoint", () => {
-	setOutputMode({ json: false, verbose: false });
-	const stale = () => fakeServer({ throws: connectionError("ENOTFOUND") });
-
-	test("fleet setup: a dead address writes nothing (no record, no ping, typetorch.json untouched)", async () => {
-		const proj = project();
-		const cloud = fakeDataStoreCloud();
-		const before = readFileSync(proj.configPath, "utf8");
-		const done = await inProject(proj, () => fleetCommand(parseArgs(["setup", "--url", "https://stale.trycloudflare.com"], fleetFlags), { oc: cloud.oc, signer: newSigner(), fetch: stale().fetch }));
-		expect(done.error?.message).toContain("refusing to write settings.fleet");
-		expect(done.error?.message).toContain("bun run local");
-		expect(cloud.values.settings).toBeUndefined();
-		expect(cloud.published).toEqual([]);
-		expect(cloud.calls).toEqual([]);
-		expect(readFileSync(proj.configPath, "utf8")).toBe(before);
-		expect(done.error?.message).not.toContain(INGEST);
-	});
-	test("fleet setup: the wrong token (and the admin token) writes nothing; --force writes anyway, with warnings", async () => {
-		const proj = project();
-		const server = fakeServer();
-		const cloud = fakeDataStoreCloud();
-		useSettings(new Settings({ startDir: proj.root, env: { TYPETORCH_FLEET_INGEST_TOKEN: "stale-token-from-last-week-01234" } }));
-		const wrong = await inProject(proj, () => fleetCommand(parseArgs(["setup", "--url", HOST], fleetFlags), { oc: cloud.oc, signer: newSigner(), fetch: server.fetch }));
-		expect(wrong.error?.message).toContain("refused the token");
-		useSettings(new Settings({ startDir: proj.root, env: { TYPETORCH_FLEET_INGEST_TOKEN: ADMIN } }));
-		const admin = await inProject(proj, () => fleetCommand(parseArgs(["setup", "--url", HOST], fleetFlags), { oc: cloud.oc, signer: newSigner(), fetch: server.fetch }));
-		expect(admin.error?.message).toContain("ADMIN token");
-		expect(cloud.values.settings).toBeUndefined();
-		const forced = await inProject(proj, () => fleetCommand(parseArgs(["setup", "--url", HOST, "--force"], fleetFlags), { oc: cloud.oc, signer: newSigner(), fetch: server.fetch }));
-		expect(forced.error).toBeUndefined();
-		expect(forced.out).toContain("--force: writing settings.fleet although 1 check failed");
-		expect(cloud.values.settings).toBeDefined();
-		expect(forced.out).not.toContain(ADMIN);
-	});
-	test("fleet setup --dry-run runs the checks too and fails when they do", async () => {
-		const proj = project();
-		const cloud = fakeDataStoreCloud();
-		const dry = await inProject(proj, () => fleetCommand(parseArgs(["setup", "--url", "https://stale.trycloudflare.com", "--dry-run"], fleetFlags), { oc: cloud.oc, signer: newSigner(), fetch: stale().fetch }));
-		expect(dry.error?.message).toContain("refusing to write settings.fleet");
-		const good = await inProject(proj, () => fleetCommand(parseArgs(["setup", "--url", HOST, "--dry-run"], fleetFlags), { oc: cloud.oc, signer: newSigner(), fetch: fakeServer().fetch }));
-		expect(good.error).toBeUndefined();
-		expect(good.out).toContain("dry run: would write settings.fleet");
-		expect(cloud.values.settings).toBeUndefined();
-	});
-	test("fleet setup with a good address and token writes the record, once the checks pass", async () => {
-		const proj = project();
-		const cloud = fakeDataStoreCloud();
-		const done = await inProject(proj, () => fleetCommand(parseArgs(["setup", "--url", HOST], fleetFlags), { oc: cloud.oc, signer: newSigner(), fetch: fakeServer().fetch }));
-		expect(done.error).toBeUndefined();
-		expect(done.out).toContain("fleet healthz");
-		expect(JSON.parse((cloud.values.settings as { body: string }).body).fleet).toEqual({ url: HOST, token: INGEST });
-		expect(done.out).not.toContain(INGEST);
-	});
-	test("settings set analytics: a broken value is refused before the record is read or signed", async () => {
-		const proj = project();
-		const cloud = fakeDataStoreCloud();
-		const value = JSON.stringify({ backend: "duckdb", events: "https://stale.trycloudflare.com/v1/ingest", token: INGEST });
-		const refused = await inProject(proj, () => settingsCommand(parseArgs(["set", "analytics", "-"], settingsFlags), { oc: cloud.oc, signer: newSigner(), stdin: async () => value, fetch: stale().fetch }));
-		expect(refused.error?.message).toContain("refusing to write settings.analytics");
-		expect(refused.error?.message).not.toContain(INGEST);
-		expect(cloud.calls).toEqual([]);
-		const badUrl = JSON.stringify({ backend: "duckdb", events: "http://fleet.example.com/ingest", token: INGEST });
-		const refused2 = await inProject(proj, () => settingsCommand(parseArgs(["set", "analytics", "-"], settingsFlags), { oc: cloud.oc, signer: newSigner(), stdin: async () => badUrl, fetch: fakeServer().fetch }));
-		expect(refused2.error?.message).toMatch(/must be https/);
-		expect(cloud.values.settings).toBeUndefined();
-	});
-	test("settings set analytics: a good value passes (--force for a bad one writes it with warnings); set game.* needs no check", async () => {
-		const proj = project();
-		const cloud = fakeDataStoreCloud();
-		const signer = newSigner();
-		const good = JSON.stringify({ backend: "duckdb", events: `${HOST}/v1/ingest`, token: INGEST });
-		const ok = await inProject(proj, () => settingsCommand(parseArgs(["set", "analytics", "-"], settingsFlags), { oc: cloud.oc, signer, stdin: async () => good, fetch: fakeServer().fetch }));
-		expect(ok.error).toBeUndefined();
-		expect(ok.out).toContain("analytics token");
-		const bad = JSON.stringify({ backend: "duckdb", events: `${HOST}/v1/ingest`, token: "an-old-token-0123456789abcdefgh" });
-		const forced = await inProject(proj, () => settingsCommand(parseArgs(["set", "analytics", "-", "--force"], settingsFlags), { oc: cloud.oc, signer, stdin: async () => bad, fetch: fakeServer().fetch }));
-		expect(forced.error).toBeUndefined();
-		expect(forced.out).toContain("--force: writing settings.analytics");
-		const noFetch = (async () => {
-			throw new Error("no network for game values");
-		}) as unknown as typeof fetch;
-		const game = await inProject(proj, () => settingsCommand(parseArgs(["set", "game.x", "1"], settingsFlags), { oc: cloud.oc, signer, fetch: noFetch }));
-		expect(game.error).toBeUndefined();
-	});
-});
-
 describe("changeSettings: no unchecked write to fleet or analytics", () => {
 	test("changing fleet or analytics without `checked` is refused before anything is written; re-signing and other fields are fine", async () => {
 		const proj = project();
@@ -451,45 +366,148 @@ describe("changeSettings: no unchecked write to fleet or analytics", () => {
 	});
 });
 
-describe("doctor: the endpoints in the live settings record", () => {
-	const stale = { url: "https://stale.trycloudflare.com", token: INGEST };
+describe("backend endpoint (typetorch backend setup)", () => {
+	test("url, healthz, the game key (role game, both parts) and the admin token (role admin) pass, with GETs only", async () => {
+		const server = fakeServer();
+		const report = await checkBackendEndpoint({ url: HOST, key: INGEST, admin: ADMIN, requireAdmin: true, fetch: server.fetch });
+		expect(report.steps.map((s) => `${s.step}:${s.ok}`)).toEqual(["url:true", "healthz:true", "key:true", "admin:true"]);
+		expect(stepOf(report, "key").detail).toContain("fleet and analytics");
+		expect(server.calls.every((c) => c.method === "GET")).toBe(true);
+		expect(JSON.stringify(report)).not.toContain(INGEST);
+		expect(JSON.stringify(report)).not.toContain(ADMIN);
+	});
+	test("the admin token as the game key is a FATAL failure; the game key as the admin token fails (not fatal)", async () => {
+		const server = fakeServer();
+		const swapped = await checkBackendEndpoint({ url: HOST, key: ADMIN, admin: INGEST, requireAdmin: true, fetch: server.fetch });
+		expect(stepOf(swapped, "key")).toMatchObject({ ok: false, fatal: true });
+		expect(stepOf(swapped, "key").detail).toContain("ADMIN token");
+		expect(stepOf(swapped, "admin")).toMatchObject({ ok: false });
+		expect(stepOf(swapped, "admin").fatal).toBeUndefined();
+		expect(stepOf(swapped, "admin").detail).toContain("GAME key");
+	});
+	test("the same value for both is fatal even when the server doesn't answer", async () => {
+		const dead = fakeServer({ throws: connectionError("ENOTFOUND") });
+		const report = await checkBackendEndpoint({ url: "https://stale.trycloudflare.com", key: INGEST, admin: INGEST, fetch: dead.fetch });
+		expect(stepOf(report, "healthz").ok).toBe(false);
+		expect(stepOf(report, "key")).toMatchObject({ ok: false, fatal: true });
+	});
+	test("a part that is off, no admin token (required or not), http for the record but not for typetorch.json", async () => {
+		const off = await checkBackendEndpoint({ url: HOST, key: INGEST, admin: ADMIN, fetch: fakeServer({ parts: { analytics: false, fleet: true } }).fetch });
+		expect(stepOf(off, "key").detail).toContain("analytics part");
+		expect(stepOf(off, "key").hint).toContain("TYPETORCH_PARTS");
+		const required = await checkBackendEndpoint({ url: HOST, key: INGEST, requireAdmin: true, fetch: fakeServer().fetch });
+		expect(stepOf(required, "admin")).toMatchObject({ ok: false });
+		const optional = await checkBackendEndpoint({ url: HOST, key: INGEST, fetch: fakeServer().fetch });
+		expect(stepOf(optional, "admin")).toMatchObject({ ok: true, skipped: true });
+		const http = await checkBackendEndpoint({ url: "http://127.0.0.1:8787", key: INGEST, fetch: fakeServer().fetch });
+		expect(stepOf(http, "url").ok).toBe(false);
+		const local = await checkBackendEndpoint({ url: "http://127.0.0.1:8787", key: INGEST, kernelRules: false, fetch: fakeServer().fetch });
+		expect(stepOf(local, "url").ok).toBe(true);
+	});
+});
 
-	test("a stale fleet address and an invalid analytics URL are FAILs with fixes (the problem doctor used to miss)", async () => {
-		const checks = await settingsEndpointChecks({
-			body: { fleet: stale, analytics: { backend: "duckdb", events: "http://nope.example/ingest", token: INGEST } },
+describe("enforcing the checks: what --force can't override (security review M2)", () => {
+	setOutputMode({ json: false, verbose: false });
+	test("the admin token in the key's place is refused with --force too, and says why", async () => {
+		const report = await checkFleetEndpoint({ url: HOST, token: ADMIN, fetch: fakeServer().fetch });
+		expect(stepOf(report, "token").fatal).toBe(true);
+		let error: Error | undefined;
+		try {
+			enforceEndpoints({ reports: [report], what: "settings.fleet", force: true });
+		} catch (e) {
+			error = e as Error;
+		}
+		expect(error).toBeInstanceOf(EndpointCheckError);
+		expect(error!.message).toContain("--force cannot override this");
+		expect(error!.message).toContain("admin token must never reach game servers");
+		expect(error!.message).not.toContain(ADMIN);
+	});
+	test("a role that isn't the game key is fatal too; a refused or unreachable key stays forceable", async () => {
+		const weird = fakeServer({ everything: undefined });
+		const odd = (async (input: string | URL | Request, init?: RequestInit) =>
+			new URL(String(input)).pathname === "/v1/auth/check" ? new Response(JSON.stringify({ ok: true, role: "explorer" }), { status: 200 }) : weird.fetch(input, init)) as typeof fetch;
+		const report = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: odd });
+		expect(stepOf(report, "token")).toMatchObject({ ok: false, fatal: true });
+		expect(() => enforceEndpoints({ reports: [report], what: "settings.fleet", force: true })).toThrow(/cannot override/);
+		const refused = await checkFleetEndpoint({ url: HOST, token: "some-other-token-0123456789", fetch: fakeServer().fetch });
+		expect(stepOf(refused, "token").fatal).toBeUndefined();
+		const err = console.error;
+		console.error = () => {};
+		try {
+			expect(enforceEndpoints({ reports: [refused], what: "settings.fleet", force: true })).toBe(true);
+		} finally {
+			console.error = err;
+		}
+	});
+});
+
+describe("server text is safe to print (security review L5)", () => {
+	test("escape sequences and control characters never reach the terminal; Location is scrubbed of the token", async () => {
+		expect(safeText("a\u001b[2J\u001b[31mred\u001b[0m\u0007b\r\nc\u009bd")).toBe("aredb cd");
+		expect(shortBody('{"error":"bad \\u001b]0;pwned\\u0007 title"}')).toBe("bad title");
+		const evil = fakeServer({ everything: () => new Response("\u001b[2Jhello\u001b[1A", { status: 500 }) });
+		const report = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: evil.fetch });
+		expect(stepOf(report, "healthz").detail).not.toContain("\u001b");
+		const redirect = fakeServer({ everything: () => new Response("", { status: 302, headers: { location: `https://evil.example/?t=${INGEST}&x=\u001b[2J` } }) });
+		const leaked = await checkFleetEndpoint({ url: HOST, token: INGEST, fetch: redirect.fetch });
+		const text = JSON.stringify(leaked);
+		expect(text).not.toContain(INGEST);
+		expect(text).not.toContain("\\u001b");
+		expect(stepOf(leaked, "healthz").hint).toContain("<token>");
+	});
+});
+
+describe("doctor: the backend", () => {
+	const creds = (key = INGEST, admin: string | null = ADMIN) => ({ key: { value: key, name: "TYPETORCH_API_KEY", source: "environment" }, ...(admin ? { admin: { value: admin, name: "TYPETORCH_ADMIN_TOKEN", source: "environment" } } : {}), notes: [] });
+	const body = (patch: object = {}): SettingsBody => ({ backend: { url: HOST, key: INGEST }, fleet: { url: HOST, token: INGEST }, access: { members: { "15": "owner", "16": "dev" }, revoked: {}, devBadgeId: null }, ...patch });
+
+	test("healthy: typetorch.json's backend with both keys, the record matches, the owner list matches", async () => {
+		const server = fakeServer({ access: { seq: 4, owners: [15] } });
+		const checks = await backendChecks({ configUrl: HOST, creds: creds(), body: body(), seq: 5, fetch: server.fetch });
+		expect(checks.map((c) => `${c.name}:${c.status}`)).toEqual(["backend url:ok", "backend healthz:ok", "backend key:ok", "backend admin:ok", "fleet API:ok", "record backend:ok", "owners:ok"]);
+		expect(checks.find((c) => c.name === "owners")!.detail).toContain("settings #4");
+		expect(JSON.stringify(checks)).not.toContain(INGEST);
+		expect(JSON.stringify(checks)).not.toContain(ADMIN);
+		expect(server.calls.filter((c) => c.method !== "GET")).toEqual([]);
+	});
+	test("the owner list differs or was never sent: warn with access push", async () => {
+		const differs = await backendChecks({ configUrl: HOST, creds: creds(), body: body(), seq: 5, fetch: fakeServer({ access: { seq: 5, owners: [15, 99] } }).fetch });
+		expect(differs.find((c) => c.name === "owners")).toMatchObject({ status: "warn" });
+		expect(differs.find((c) => c.name === "owners")!.detail).toContain("access push");
+		const never = await backendChecks({ configUrl: HOST, creds: creds(), body: body(), seq: 5, fetch: fakeServer().fetch });
+		expect(never.find((c) => c.name === "owners")!.detail).toContain("no owner list yet");
+	});
+	test("a record with another address or key gets its own checks and a mismatch warning; a stale fleet section warns", async () => {
+		const server = fakeServer({ ingest: [INGEST, "other-game-key-0123456789abcdef"] });
+		const checks = await backendChecks({
+			configUrl: HOST,
+			creds: creds(),
+			body: body({ backend: { url: "https://other.example.com", key: "other-game-key-0123456789abcdef" } }),
+			fetch: server.fetch,
+		});
+		const names = checks.map((c) => c.name);
+		expect(names).toContain("record backend url");
+		expect(names).toContain("record backend key");
+		expect(checks.find((c) => c.name === "record backend url")!.detail).toContain("other.example.com");
+		expect(checks.find((c) => c.name === "record fleet")).toMatchObject({ status: "warn" });
+	});
+	test("a CLI 0.8 record (fleet and analytics, no backend): their endpoints are checked and backend setup is the fix", async () => {
+		const checks = await backendChecks({
+			creds: { notes: [] },
+			body: { fleet: { url: "https://stale.trycloudflare.com", token: INGEST }, analytics: { backend: "duckdb", events: "http://nope.example/ingest", token: INGEST } },
 			fetch: fakeServer({ throws: connectionError("ENOTFOUND") }).fetch,
 		});
 		const byName = Object.fromEntries(checks.map((c) => [c.name, c]));
-		expect(byName["fleet url"]).toMatchObject({ status: "ok" });
-		expect(byName["fleet healthz"]).toMatchObject({ status: "fail" });
-		expect(byName["fleet healthz"]!.detail).toContain("Fix:");
-		expect(byName["fleet healthz"]!.detail).toContain("bun run local");
-		expect(byName["fleet token"]).toMatchObject({ status: "info" });
-		expect(byName["analytics url"]).toMatchObject({ status: "fail" });
-		expect(byName["analytics url"]!.detail).toMatch(/must be https/);
-		expect(JSON.stringify(checks)).not.toContain(INGEST);
+		expect(byName["backend"]).toMatchObject({ status: "info" });
+		expect(byName["record fleet healthz"]).toMatchObject({ status: "fail" });
+		expect(byName["record analytics url"]!.detail).toMatch(/must be https/);
+		expect(byName["record backend"]).toMatchObject({ status: "warn" });
+		expect(byName["record backend"]!.detail).toContain("backend setup");
 	});
-	test("a healthy record: every step ok; a missing section is info; typetorch.json's url must match the record's", async () => {
-		const server = fakeServer();
-		const healthy = await settingsEndpointChecks({ body: { fleet: { url: HOST, token: INGEST }, analytics: { backend: "duckdb", events: `${HOST}/v1/ingest`, token: INGEST } }, configFleetUrl: HOST, fetch: server.fetch });
-		expect(healthy.map((c) => `${c.name}:${c.status}`)).toEqual(["fleet url:ok", "fleet healthz:ok", "fleet token:ok", "analytics url:ok", "analytics healthz:ok", "analytics token:ok"]);
-		const none = await settingsEndpointChecks({ body: {}, fetch: server.fetch });
-		expect(none.map((c) => c.status)).toEqual(["info", "info"]);
-		const missing = await settingsEndpointChecks({ body: {}, configFleetUrl: HOST, fetch: server.fetch });
-		expect(missing[0]).toMatchObject({ name: "fleet", status: "warn" });
-		const mismatch = await settingsEndpointChecks({ body: { fleet: { url: HOST, token: INGEST } }, configFleetUrl: "https://other-tunnel.trycloudflare.com", fetch: server.fetch });
-		expect(mismatch.find((c) => c.name === "fleet url mismatch")).toMatchObject({ status: "warn" });
-		expect(mismatch.find((c) => c.name === "fleet url mismatch")!.detail).toContain("other-tunnel.trycloudflare.com");
-		// Trailing slash and case don't count as a difference.
-		const same = await settingsEndpointChecks({ body: { fleet: { url: HOST, token: INGEST } }, configFleetUrl: `${HOST.toUpperCase().replace("HTTPS", "https")}/`, fetch: server.fetch });
-		expect(same.find((c) => c.name === "fleet url mismatch")).toBeUndefined();
-	});
-	test("typetorch.json fleet.url: reachable or a FAIL with the fix (no token needed)", async () => {
-		const ok = await configFleetChecks("http://127.0.0.1:8787", { fetch: fakeServer().fetch });
-		expect(ok).toEqual([{ name: "typetorch.json fleet", status: "ok", detail: expect.stringContaining("answered in") }]);
-		const dead = await configFleetChecks("https://stale.trycloudflare.com", { fetch: fakeServer({ throws: connectionError("ENOTFOUND") }).fetch });
-		expect(dead[0]).toMatchObject({ name: "typetorch.json fleet", status: "fail" });
-		expect(dead[0]!.detail).toContain("Fix:");
+	test("no admin token: a warning naming what is off, and no owner check", async () => {
+		const checks = await backendChecks({ configUrl: HOST, creds: creds(INGEST, null), body: body(), fetch: fakeServer().fetch });
+		expect(checks.find((c) => c.name === "backend admin")).toMatchObject({ status: "warn" });
+		expect(checks.find((c) => c.name === "owners")).toBeUndefined();
 	});
 	test("reportChecks maps steps to doctor statuses", async () => {
 		const report = await checkFleetEndpoint({ url: "https://x.example.com", token: INGEST, fetch: fakeServer({ throws: connectionError("ECONNREFUSED") }).fetch });

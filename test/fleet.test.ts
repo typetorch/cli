@@ -7,8 +7,6 @@ import { autoRollbackHook, countdown } from "../src/commands/autorollback";
 import {
 	alertsCommand,
 	alertsFlags,
-	fleetCommand,
-	fleetFlags,
 	reportCommand,
 	rollbackThreshold,
 	serversCommand,
@@ -104,7 +102,7 @@ describe("rows from the fleet API", () => {
 		expect(parseReport(report(42, 3, "booted"))).toMatchObject({ seq: 42, jobId: job(3), result: "booted" });
 		expect(parseReport({ seq: 42, job: job(4), result: "failed", error: "x", at: "2026-10-05T10:00:00Z" })).toMatchObject({ result: "failed", error: "x" });
 	});
-	test("the HTTP client: paths, the admin token for reads and the ingest token for alerts, errors without tokens", async () => {
+	test("the HTTP client: paths, the admin token for reads and the game key (TYPETORCH_API_KEY) for alerts, errors without tokens", async () => {
 		const calls: { url: string; auth?: string; method: string; body?: string }[] = [];
 		const fakeFetch = (async (url: string, init: RequestInit) => {
 			calls.push({ url, method: init.method!, auth: (init.headers as Record<string, string>).authorization, body: init.body as string | undefined });
@@ -113,7 +111,7 @@ describe("rows from the fleet API", () => {
 			if (url.endsWith("/alert")) return new Response("{}");
 			return new Response(JSON.stringify({ servers: [server(1)] }));
 		}) as unknown as typeof fetch;
-		const client = httpFleetClient({ url: "https://fleet.example/", token: "admin-token-0000", ingestToken: "ingest-token-0000", fetch: fakeFetch });
+		const client = httpFleetClient({ url: "https://fleet.example/", adminToken: "admin-token-0000", apiKey: "ingest-token-0000", fetch: fakeFetch });
 		expect(await client.servers({ branch: "dev" })).toHaveLength(1);
 		expect((await client.reports({ seq: 42 }))[0].result).toBe("swapped");
 		expect((await client.alerts({ since: 5, level: "warning" }))[0]).toMatchObject({ code: "server_stuck", at: NOW * 1000 });
@@ -127,9 +125,9 @@ describe("rows from the fleet API", () => {
 		// the alert body has the kernel's shape (kernel src/server/Fleet.luau)
 		expect(JSON.parse(calls[3].body!)).toMatchObject({ level: "critical", code: "auto_rollback", message: "x", j: "cli", t: expect.any(Number) });
 		expect(alertBody({ level: "warning", code: "server_stuck", message: "2 stuck", branch: "dev", seq: 42, artifact: "a", jobs: [job(1), job(2)] })).toMatchObject({ b: "dev", s: 42, a: "a", message: `2 stuck [${job(1)}, ${job(2)}]` });
-		const refused = httpFleetClient({ url: "https://fleet.example", token: "admin-token-0000", fetch: (async () => new Response("no", { status: 401 })) as unknown as typeof fetch });
+		const refused = httpFleetClient({ url: "https://fleet.example", adminToken: "admin-token-0000", fetch: (async () => new Response("no", { status: 401 })) as unknown as typeof fetch });
 		const error = (await refused.servers().catch((e: Error) => e)) as Error;
-		expect(error.message).toContain("check TYPETORCH_FLEET_TOKEN");
+		expect(error.message).toContain("check TYPETORCH_ADMIN_TOKEN");
 		expect(error.message).not.toContain("admin-token");
 		expect(await httpFleetClient({ url: "https://fleet.example", fetch: fakeFetch }).postAlert({ level: "info", code: "x", message: "y" })).toBe(false);
 	});
@@ -187,9 +185,9 @@ describe("commands", () => {
 	test("not configured: one line, nothing thrown", async () => {
 		const proj = project();
 		const text = await inProject(proj, () => capture(() => serversCommand(parseArgs([], { branch: "string", watch: "boolean" }))));
-		expect(text).toBe(`the fleet API isn't configured: set typetorch.json "fleet": { "url": ... } (typetorch fleet setup --url <url>)`);
-		const proj2 = project({ fleet: { url: "https://fleet.example" } });
-		expect(await inProject(proj2, () => capture(() => serversCommand(parseArgs([], { branch: "string", watch: "boolean" }))))).toContain("TYPETORCH_FLEET_TOKEN");
+		expect(text).toBe(`the backend isn't configured: set typetorch.json "backend": { "url": ... } (typetorch backend setup --url <url>)`);
+		const proj2 = project({ backend: { url: "https://fleet.example" } });
+		expect(await inProject(proj2, () => capture(() => serversCommand(parseArgs([], { branch: "string", watch: "boolean" }))))).toContain("TYPETORCH_ADMIN_TOKEN");
 	});
 	test("servers --branch --json, and --watch rounds", async () => {
 		const proj = project();

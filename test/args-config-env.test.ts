@@ -64,12 +64,28 @@ describe("validateConfig", () => {
 		expect(validateConfig({ ...good, revoked: { "5": true, "6": false } }).config?.revoked).toEqual({ "5": true });
 	});
 	test("warns about unknown keys", () => expect(validateConfig({ ...good, extra: 1 }).warnings).toHaveLength(1));
-	test("roles: owner and dev; the old admin is a dev, with a warning (kernel 0.3.4)", () => {
-		const { config, errors, warnings } = validateConfig({ ...good, members: { "1": "owner", "2": "admin", "3": "dev" } });
+	test("roles: owner and dev; CLI 0.9 refuses the old admin role (gone since kernel 0.3.4) with the fix", () => {
+		const { config, errors, warnings } = validateConfig({ ...good, members: { "1": "owner", "3": "dev" } });
 		expect(errors).toEqual([]);
-		expect(config?.members).toEqual({ "1": "owner", "2": "dev", "3": "dev" });
-		expect(warnings).toEqual([`"members.2": role admin no longer exists: use owner or dev (treated as dev)`]);
-		expect(validateConfig({ ...good, members: { "4": "god" } }).errors[0]).toMatch(/must be one of owner, dev/);
+		expect(warnings).toEqual([]);
+		expect(config?.members).toEqual({ "1": "owner", "3": "dev" });
+		const admin = validateConfig({ ...good, members: { "2": "admin" } });
+		expect(admin.config).toBeUndefined();
+		expect(admin.errors[0]).toMatch(/"members.2" must be one of owner, dev \(the admin role is gone since kernel 0.3.4: use "dev"/);
+		expect(validateConfig({ ...good, members: { "4": "god" } }).errors[0]).toMatch(/must be one of owner, dev$/);
+	});
+	test("backend.url (CLI 0.9) and the old fleet.url, read with a warning; both: fleet ignored", () => {
+		const backend = validateConfig({ ...good, backend: { url: "https://backend.example.com" } });
+		expect(backend.config?.backend).toEqual({ url: "https://backend.example.com" });
+		expect(backend.warnings).toEqual([]);
+		const fleet = validateConfig({ ...good, fleet: { url: "https://old.example.com" } });
+		expect(fleet.config?.backend).toEqual({ url: "https://old.example.com" });
+		expect(fleet.warnings[0]).toMatch(/"fleet" is now "backend"/);
+		const both = validateConfig({ ...good, backend: { url: "https://new.example.com" }, fleet: { url: "https://old.example.com" } });
+		expect(both.config?.backend).toEqual({ url: "https://new.example.com" });
+		expect(both.warnings[0]).toMatch(/"fleet" is ignored/);
+		expect(validateConfig({ ...good, backend: { url: "http://backend.example.com" } }).errors[0]).toMatch(/backend.url.*https/);
+		expect(validateConfig({ ...good, backend: { url: "https://user:pw@backend.example.com" } }).errors[0]).toMatch(/credentials/);
 	});
 	test("signing fields: base64 32-byte keys, no duplicates, a separate fallback, no test-vector keys, a numeric key asset", () => {
 		const a = generateSigningKey().publicKey;
@@ -95,39 +111,67 @@ describe("env", () => {
 			D: "plain",
 		});
 	});
-	test("nearest .env wins, real env vars win over files, and nothing is copied into process.env", () => {
+	test("the game repo's .env (the folder with typetorch.json, found from a subfolder) is the only file; real env vars win; nothing is copied into process.env", () => {
 		const root = mkdtempSync(join(tmpdir(), "tt-env-"));
-		const child = join(root, "a", "b");
+		const game = join(root, "game");
+		const child = join(game, "src", "server");
 		mkdirSync(child, { recursive: true });
-		writeFileSync(join(root, ".env"), "TT_TEST_FAR=far\nTT_TEST_BOTH=far\nTT_TEST_REAL=file\n");
+		writeFileSync(join(game, "typetorch.json"), "{}");
+		writeFileSync(join(root, ".env"), "TT_TEST_FAR=far\nOPENCLOUD_API_KEY=parent-key-0000\n");
+		writeFileSync(join(game, ".env"), "TT_TEST_BOTH=game\nTT_TEST_REAL=file\n");
 		writeFileSync(join(child, ".env"), "TT_TEST_BOTH=near\n");
 		const settings = new Settings({ startDir: child, env: { TT_TEST_REAL: "real" } });
-		expect(settings.get("TT_TEST_FAR")).toEqual({ value: "far", source: join(root, ".env") });
-		expect(settings.get("TT_TEST_BOTH")?.value).toBe("near");
+		expect(settings.gameDir).toBe(game);
+		expect(settings.files).toEqual([join(game, ".env")]);
+		expect(settings.get("TT_TEST_BOTH")).toEqual({ value: "game", source: join(game, ".env") });
+		expect(settings.get("TT_TEST_FAR")).toBeUndefined(); // a parent folder's .env no longer counts (CLI 0.9)
+		expect(settings.get("OPENCLOUD_API_KEY")).toBeUndefined();
 		expect(settings.get("TT_TEST_REAL")).toEqual({ value: "real", source: "environment" });
+		expect(settings.describeSources()).toContain(join(game, ".env"));
 		expect(process.env.TT_TEST_FAR).toBeUndefined();
 		expect(process.env.TT_TEST_BOTH).toBeUndefined();
+		// --config's folder wins over the search.
+		expect(new Settings({ gameDir: root, env: {} }).get("TT_TEST_FAR")?.value).toBe("far");
 	});
-	test("TYPETORCH_ENV_FILE (relative to the .env that names it) wins over .env files; --env-file wins over both", () => {
+	test("--env-file / TYPETORCH_ENV_FILE replace the game's .env; a TYPETORCH_ENV_FILE line inside .env still works for one release, with a warning", () => {
 		const root = mkdtempSync(join(tmpdir(), "tt-envfile-"));
 		const repo = join(root, "repo");
 		mkdirSync(join(root, "secrets"), { recursive: true });
 		mkdirSync(repo);
-		writeFileSync(join(repo, ".env"), "TYPETORCH_ENV_FILE=../secrets/game.env\nOPENCLOUD_API_KEY=repo-key-0000\n");
+		writeFileSync(join(repo, "typetorch.json"), "{}");
+		writeFileSync(join(repo, ".env"), "TYPETORCH_ENV_FILE=../secrets/game.env\nOPENCLOUD_API_KEY=repo-key-0000\nTYPETORCH_ADMIN_TOKEN=repo-admin-0000\n");
 		writeFileSync(join(root, "secrets", "game.env"), "OPENCLOUD_API_KEY=outside-key-0000\nOPENCLOUD_ASSETS_KEY=assets-key-0000\n");
-		const settings = new Settings({ startDir: repo, env: {} });
-		expect(settings.envFile).toBe(join(root, "secrets", "game.env"));
-		expect(settings.get("OPENCLOUD_API_KEY")?.value).toBe("outside-key-0000");
+		// The CLI 0.8 layout: the named file wins over the .env, and the .env still fills the rest.
+		const declared = new Settings({ startDir: repo, env: {} });
+		expect(declared.envFile).toBeUndefined();
+		expect(declared.declaredEnvFile).toBe(join(root, "secrets", "game.env"));
+		expect(declared.get("OPENCLOUD_API_KEY")?.value).toBe("outside-key-0000");
+		expect(declared.get("TYPETORCH_ADMIN_TOKEN")?.value).toBe("repo-admin-0000");
+		expect(declared.warnings.join("\n")).toMatch(/names another env file.*for this release only/);
+		expect(declared.warnings.join("\n")).not.toContain("outside-key");
+		// The override (flag or environment) replaces the .env entirely.
 		writeFileSync(join(root, "other.env"), "OPENCLOUD_API_KEY=flag-key-0000\n");
-		expect(new Settings({ startDir: repo, env: {}, envFile: join(root, "other.env") }).get("OPENCLOUD_API_KEY")?.value).toBe("flag-key-0000");
+		const flag = new Settings({ startDir: repo, env: {}, envFile: join(root, "other.env") });
+		expect(flag.get("OPENCLOUD_API_KEY")?.value).toBe("flag-key-0000");
+		expect(flag.get("TYPETORCH_ADMIN_TOKEN")).toBeUndefined();
+		expect(flag.envFileFrom).toBe("--env-file");
+		const fromEnv = new Settings({ startDir: repo, env: { TYPETORCH_ENV_FILE: join(root, "other.env") } });
+		expect(fromEnv.envFileFrom).toBe("TYPETORCH_ENV_FILE");
+		expect(fromEnv.get("OPENCLOUD_API_KEY")).toEqual({ value: "flag-key-0000", source: join(root, "other.env") });
 		const missing = new Settings({ startDir: repo, env: { TYPETORCH_ENV_FILE: join(root, "nope.env") } });
 		expect(missing.envFileMissing).toBe(true);
+		expect(missing.get("OPENCLOUD_API_KEY")).toBeUndefined();
 	});
 	test("a key per job, falling back to the shared key", () => {
-		const settings = new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-keys-")), env: { OPENCLOUD_ASSETS_KEY: "assets-key-0000", TYPETORCH_API_KEY: "shared-key-0000" } });
+		const settings = new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-keys-")), env: { OPENCLOUD_ASSETS_KEY: "assets-key-0000", OPENCLOUD_API_KEY: "shared-key-0000" } });
 		expect(settings.apiKey("assets")).toMatchObject({ key: "assets-key-0000", name: "OPENCLOUD_ASSETS_KEY", dedicated: true });
-		expect(settings.apiKey("deploy")).toMatchObject({ key: "shared-key-0000", name: "TYPETORCH_API_KEY", dedicated: false });
+		expect(settings.apiKey("deploy")).toMatchObject({ key: "shared-key-0000", name: "OPENCLOUD_API_KEY", dedicated: false });
 		expect(settings.apiKey("place")?.key).toBe("shared-key-0000");
+		// CLI 0.9: TYPETORCH_API_KEY is the backend's game key, never an Open Cloud key; the error says to rename it.
+		const old = new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-oldkey-")), env: { TYPETORCH_API_KEY: "old-roblox-key-0000" } });
+		expect(old.apiKey("deploy")).toBeUndefined();
+		expect(() => old.requireApiKey("deploy")).toThrow(/rename it to OPENCLOUD_API_KEY/);
+		expect(new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-alias-")), env: { ROBLOX_API_KEY: "alias-key-0000" } }).apiKey("assets")?.name).toBe("ROBLOX_API_KEY");
 		const none = new Settings({ startDir: mkdtempSync(join(tmpdir(), "tt-nokeys-")), env: { OPENCLOUD_DEPLOY_KEY: "deploy-key-0000" } });
 		expect(none.apiKey("deploy")?.key).toBe("deploy-key-0000");
 		expect(() => none.requireApiKey("place")).toThrow(/OPENCLOUD_PLACE_KEY/);

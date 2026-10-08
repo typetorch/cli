@@ -17,8 +17,8 @@ function projectAt(dir: string, patch: Record<string, unknown> = {}): Project {
 }
 
 describe("the access lists", () => {
-	test("sorted ids, roles as typetorch.json has them (admin already read as dev), revoked as {id: true}, badge or null", () => {
-		const { config } = validateConfig({ project: "g", universeId: 1, placeId: 2, creator: { userId: 3 }, members: { "900": "dev", "15": "owner", "16": "admin" }, revoked: ["77", "8"], devBadgeId: 123 });
+	test("sorted ids, roles as typetorch.json has them, revoked as {id: true}, badge or null", () => {
+		const { config } = validateConfig({ project: "g", universeId: 1, placeId: 2, creator: { userId: 3 }, members: { "900": "dev", "15": "owner", "16": "dev" }, revoked: ["77", "8"], devBadgeId: 123 });
 		const value = accessValue(config!);
 		expect(value).toEqual({ v: 1, members: { "15": "owner", "16": "dev", "900": "dev" }, revoked: { "8": true, "77": true }, devBadgeId: 123 });
 		expect(Object.keys(value.members)).toEqual(["15", "16", "900"]);
