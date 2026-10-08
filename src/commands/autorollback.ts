@@ -83,7 +83,7 @@ export function autoRollbackHook(input: AutoRollbackInput, threshold: number): A
 			const alertText = `auto-rollback of ${deployed.branch}: #${deployed.seq} ${deployed.artifactId} -> ${target.artifactId} (#${target.seq}): ${reason}`;
 			try {
 				const sent = await input.fleet.postAlert({ level: "critical", code: "auto_rollback", message: alertText, branch: deployed.branch, seq: deployed.seq, artifact: deployed.artifactId });
-				if (!sent) info(red(`ALERT auto_rollback (not posted: no ingest token): ${alertText}`));
+				if (!sent) info(red(`ALERT auto_rollback (not posted: no TYPETORCH_API_KEY): ${alertText}`));
 			} catch (error) {
 				warn(`posting the auto_rollback alert failed (${(error as Error).message}): ${alertText}`);
 			}

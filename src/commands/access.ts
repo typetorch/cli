@@ -23,6 +23,8 @@ typetorch access status
   and "devBadgeId". Servers (kernel 0.3.8+) read them from the signed settings record's \`access\` field, which only the
   CLI can write: it is signed with both prod keys, so game code (which can write DataStores) can't make itself a dev.
   push     write the lists into the settings record (signed, seq + 1) and ping servers: they apply it within seconds.
+           Then the owners go to the backend (PUT /v1/access with TYPETORCH_ADMIN_TOKEN): only they may Sign in with
+           Roblox there. Run it again to re-send them when the backend lost its copy (doctor compares both).
            .typetorch/access.json remembers a hash of what was pushed, so deploy and doctor warn when typetorch.json
            changed since.
   status   the record's lists (read back) vs typetorch.json
@@ -36,6 +38,8 @@ export interface PushAccessInput {
 	dryRun: boolean;
 	noPing?: boolean;
 	now?: () => Date;
+	/** The owner-list PUT to the backend (tests pass a fake). */
+	fetch?: typeof fetch;
 }
 
 export interface PushAccessResult {
@@ -57,6 +61,7 @@ export async function pushAccess(input: PushAccessInput): Promise<PushAccessResu
 		signer: input.signer,
 		what: "access push",
 		noPing: input.noPing,
+		fetch: input.fetch,
 		now: input.now,
 		mutate: (body) => ({ ...body, access: { members: value.members, revoked: value.revoked, devBadgeId: value.devBadgeId } }),
 	});
@@ -72,7 +77,7 @@ function storedAccess(raw: unknown): AccessValue | undefined {
 	return accessValue({ members: value.members ?? {}, revoked: value.revoked ?? {}, devBadgeId: value.devBadgeId ?? null });
 }
 
-export async function accessCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner } = {}) {
+export async function accessCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; fetch?: typeof fetch } = {}) {
 	const [sub, extra] = args.positionals;
 	if (sub !== "push" && sub !== "status") throw new UsageError(`unknown access subcommand "${sub ?? ""}" (push, status)`);
 	if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
@@ -115,7 +120,7 @@ export async function accessCommand(args: ParsedArgs, deps: { oc?: Pick<OpenClou
 		return;
 	}
 	const signer = deps.signer ?? settingsSigner(proj, args);
-	const result = await pushAccess({ proj, oc: deps.oc ?? openCloud("deploy")!, signer, dryRun: false, noPing: flagBool(args, "no-ping") });
-	if (isJson()) return emitJson({ field: "access", value: result.status.value, sha256: result.status.sha256, settingsSeq: result.write?.seq ?? null, outcome: result.write?.outcome ?? null });
+	const result = await pushAccess({ proj, oc: deps.oc ?? openCloud("deploy")!, signer, dryRun: false, noPing: flagBool(args, "no-ping"), fetch: deps.fetch });
+	if (isJson()) return emitJson({ field: "access", value: result.status.value, sha256: result.status.sha256, settingsSeq: result.write?.seq ?? null, outcome: result.write?.outcome ?? null, owners: result.write?.owners ?? null });
 	reportChange(result.write!, `access push (${describeAccess(result.status.value)})`);
 }

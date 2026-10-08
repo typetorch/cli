@@ -88,6 +88,36 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 
 /** The [start, end) span of a top-level key's value in a JSON object's text (string and nesting aware). */
 export function topLevelValueSpan(text: string, key: string): [number, number] | undefined {
+	const entry = topLevelEntries(text).find((e) => e.key === key);
+	return entry ? [entry.valueStart, entry.valueEnd] : undefined;
+}
+
+interface Entry {
+	key: string;
+	keyStart: number;
+	valueStart: number;
+	valueEnd: number;
+}
+
+/** Removes a top-level key and its value from a JSON object's text, keeping everything else as written. */
+export function removeJsonField(text: string, key: string): string {
+	const entries = topLevelEntries(text);
+	const index = entries.findIndex((e) => e.key === key);
+	if (index === -1) return text;
+	const entry = entries[index];
+	const next =
+		index > 0
+			? text.slice(0, entries[index - 1].valueEnd) + text.slice(entry.valueEnd)
+			: index + 1 < entries.length
+				? text.slice(0, entry.keyStart) + text.slice(entries[index + 1].keyStart)
+				: text.slice(0, entry.keyStart).replace(/\s*$/, "") + text.slice(entry.valueEnd);
+	const parsed = JSON.parse(next) as Record<string, unknown>;
+	if (key in parsed) throw new Error(`could not remove "${key}"`);
+	return next;
+}
+
+/** Every top-level key of a JSON object's text with its spans (string and nesting aware); [] when it isn't an object. */
+function topLevelEntries(text: string): Entry[] {
 	const skipString = (from: number): number => {
 		let j = from + 1;
 		while (j < text.length && text[j] !== '"') j += text[j] === "\\" ? 2 : 1;
@@ -121,27 +151,29 @@ export function topLevelValueSpan(text: string, key: string): [number, number] |
 		while (j < text.length && !/[,}\]\s]/.test(text[j])) j++;
 		return j;
 	};
+	const entries: Entry[] = [];
 	let i = skipSpace(0);
-	if (text[i] !== "{") return undefined;
+	if (text[i] !== "{") return entries;
 	i++;
 	while (i < text.length) {
 		i = skipSpace(i);
-		if (text[i] === "}") return undefined;
+		if (text[i] === "}") return entries;
 		if (text[i] === ",") {
 			i++;
 			continue;
 		}
-		if (text[i] !== '"') return undefined;
+		if (text[i] !== '"') return entries;
+		const keyStart = i;
 		const keyEnd = skipString(i);
-		const name = JSON.parse(text.slice(i, keyEnd));
+		const name = JSON.parse(text.slice(i, keyEnd)) as string;
 		i = skipSpace(keyEnd);
-		if (text[i] !== ":") return undefined;
+		if (text[i] !== ":") return entries;
 		const valueStart = skipSpace(i + 1);
 		const valueEnd = skipValue(valueStart);
-		if (name === key) return [valueStart, valueEnd];
+		entries.push({ key: name, keyStart, valueStart, valueEnd });
 		i = valueEnd;
 	}
-	return undefined;
+	return entries;
 }
 
 /**

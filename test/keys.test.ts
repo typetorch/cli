@@ -62,7 +62,7 @@ function project(patch: Record<string, unknown> = {}): Project {
 	const root = mkdtempSync(join(tmpdir(), "tt-keys-game-"));
 	const raw = { project: "game", universeId: 42, placeId: 2, creator: { groupId: 3 }, channels: { prod: "prod" }, ...patch };
 	writeFileSync(join(root, "typetorch.json"), JSON.stringify(raw, null, "\t") + "\n");
-	useSettings(new Settings({ startDir: root, env: { TYPETORCH_API_KEY: FAKE_API_KEY } }));
+	useSettings(new Settings({ startDir: root, env: { OPENCLOUD_API_KEY: FAKE_API_KEY } }));
 	return loadProject(undefined, root);
 }
 

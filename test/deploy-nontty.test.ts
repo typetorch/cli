@@ -107,7 +107,7 @@ function childEnv(home: string): Record<string, string> {
 	for (const name of ["PATH", "Path", "PATHEXT", "SYSTEMROOT", "SystemRoot", "WINDIR", "COMSPEC", "TEMP", "TMP", "TMPDIR", "BUN_INSTALL"]) {
 		if (process.env[name]) env[name] = process.env[name]!;
 	}
-	return { ...env, HOME: home, USERPROFILE: home, NO_COLOR: "1", TYPETORCH_API_KEY: "fake-not-real-key-0000" };
+	return { ...env, HOME: home, USERPROFILE: home, NO_COLOR: "1", OPENCLOUD_API_KEY: "fake-not-real-key-0000" };
 }
 
 describe("non-interactive deploys never wait on stdin", () => {

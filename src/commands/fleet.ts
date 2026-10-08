@@ -1,15 +1,15 @@
 /**
- * Fleet visibility through the fleet API (fleet.ts): `typetorch servers`, `report`, `alerts`, `fleet setup`, and the
+ * Fleet visibility through the backend's fleet API (fleet.ts): `typetorch servers`, `report`, `alerts`, and the
  * `--wait` that deploy, promote, rollback and approve run after the deploy message.
  *
  *   typetorch servers [--branch <b>] [--watch] [--json]
  *   typetorch report <seq|artifact|latest> [--branch <b>] [--json]
  *   typetorch alerts [--follow] [--level info|warning|critical] [--since <minutes>] [--json]
- *   typetorch fleet setup --url <url> [--dry-run]
  *
- * Configured by typetorch.json `fleet.url`, the admin token in TYPETORCH_FLEET_TOKEN (reads) and the write-only ingest
- * token in TYPETORCH_FLEET_INGEST_TOKEN (alerts the CLI posts; `fleet setup` gives it to game servers). Without them
- * the commands say so in one line and `--wait` is skipped with a note.
+ * Configured by typetorch.json `backend.url`, the admin token in TYPETORCH_ADMIN_TOKEN (reads) and the write-only game
+ * key in TYPETORCH_API_KEY (alerts the CLI posts: the backend refuses the admin token on game routes), from the
+ * environment or the game repo's .env (backend.ts). Without them the commands say so in one line and `--wait` is
+ * skipped with a note. `typetorch fleet setup` moved to `typetorch backend setup` (CLI 0.9; a stub says so).
  *
  * `--wait` (default 90 s on prod-channel branches): polls the reports of the seq; at ~30 s re-sends the same deploy
  * message once when servers are still below it and haven't reported (idempotent: kernels ignore a seq they applied);
@@ -18,15 +18,13 @@
  * servers alone never roll anything back: they are listed and raised as a `server_stuck` warning.
  */
 import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
-import { fleetUrlError, updateProjectConfig, type Project, type ProjectConfig } from "../config.ts";
-import { checkFleetEndpoint, enforceEndpoints, reportsJson } from "../endpoints.ts";
+import { backendCredentialsWarned, backendUrl } from "../backend.ts";
+import type { Project, ProjectConfig } from "../config.ts";
 import { DEFAULT_FAILED_PCT, FAILED_PCT_BOUNDS } from "../health.ts";
 import { matchDeployment } from "../deployments.ts";
-import { settings } from "../env.ts";
+import { ADMIN_TOKEN_VAR, BACKEND_KEY_VAR } from "../env.ts";
 import {
 	ALERT_LEVELS,
-	FLEET_INGEST_TOKEN_VAR,
-	FLEET_TOKEN_VAR,
 	FleetError,
 	formatAlert,
 	formatCounts,
@@ -44,17 +42,16 @@ import {
 } from "../fleet.ts";
 import { bold, dim, emitJson, formatSeconds, green, info, isJson, red, table, warn, yellow } from "../log.ts";
 import { branchNameError, type Channel } from "../naming.ts";
-import type { OpenCloud } from "../opencloud.ts";
 import { progress } from "../progress.ts";
 import { sleep } from "../runtime.ts";
-import { KEY_FILE_FLAGS, openCloud, project, readHistory } from "./common.ts";
-import { changeSettings, reportChange, settingsSigner } from "./settings.ts";
-import type { DualSigner } from "../signing.ts";
+import { project, readHistory } from "./common.ts";
+import { MOVED_TO_BACKEND_SETUP } from "./settings.ts";
 
 export const serversFlags = { branch: "string", watch: "boolean" } as const;
 export const reportFlags = { branch: "string", "no-registry": "boolean" } as const;
 export const alertsFlags = { follow: "boolean", level: "string", since: "string" } as const;
-export const fleetFlags = { url: "string", "dry-run": "boolean", "no-ping": "boolean", force: "boolean", ...KEY_FILE_FLAGS } as const;
+/** CLI 0.9: `fleet setup` is a stub that points at `backend setup` (its old flags still parse, so the message shows). */
+export const fleetFlags = { url: "string", "dry-run": "boolean", "no-ping": "boolean", force: "boolean", "key-file": "string", "fallback-key-file": "string" } as const;
 /** The flags releasing commands take for the wait. */
 export const WAIT_FLAGS = { wait: "optional", "no-wait": "boolean", "no-auto-rollback": "boolean", "rollback-at": "string" } as const;
 export const DEFAULT_WAIT_SECONDS = 90;
@@ -72,15 +69,14 @@ export interface FleetDeps {
 
 export type FleetSetup = { client: FleetClient; url: string; ingest: boolean } | { client?: undefined; missing: string };
 
-/** The fleet API for this project, or why it isn't configured (one line). */
+/** The backend's fleet API for this project, or why it isn't configured (one line). */
 export function fleetFor(proj: Project, deps: FleetDeps = {}): FleetSetup {
-	const url = proj.config.fleet?.url;
-	const token = settings().get(FLEET_TOKEN_VAR)?.value;
-	const ingestToken = settings().get(FLEET_INGEST_TOKEN_VAR)?.value;
+	const url = backendUrl(proj);
 	if (deps.fleet) return { client: deps.fleet, url: url ?? "(test)", ingest: true };
-	if (!url) return { missing: `the fleet API isn't configured: set typetorch.json "fleet": { "url": ... } (typetorch fleet setup --url <url>)` };
-	if (!token) return { missing: `the fleet API's admin token isn't set: put ${FLEET_TOKEN_VAR} in the environment or the env file` };
-	return { client: httpFleetClient({ url, token, ingestToken }), url, ingest: Boolean(ingestToken) };
+	if (!url) return { missing: `the backend isn't configured: set typetorch.json "backend": { "url": ... } (typetorch backend setup --url <url>)` };
+	const creds = backendCredentialsWarned();
+	if (!creds.admin) return { missing: `the backend's admin token isn't set: put ${ADMIN_TOKEN_VAR} in the game repo's .env (or the environment)` };
+	return { client: httpFleetClient({ url, adminToken: creds.admin.value, apiKey: creds.key?.value }), url, ingest: Boolean(creds.key) };
 }
 
 function requireFleet(proj: Project, deps: FleetDeps): FleetClient | undefined {
@@ -230,42 +226,10 @@ export async function alertsCommand(args: ParsedArgs, deps: FleetDeps = {}) {
 	}
 }
 
-export async function fleetCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; fetch?: typeof fetch } = {}) {
-	const [sub, extra] = args.positionals;
-	if (sub !== "setup") throw new UsageError(`unknown fleet subcommand "${sub ?? ""}" (setup)`);
-	if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
-	const proj = project(args);
-	const url = flagString(args, "url") ?? proj.config.fleet?.url;
-	if (!url) throw new UsageError("which fleet API? pass --url https://<host>");
-	const problem = fleetUrlError(url);
-	if (problem) throw new UsageError(`--url ${problem}`);
-	const ingest = settings().get(FLEET_INGEST_TOKEN_VAR);
-	if (!ingest) throw new Error(`${FLEET_INGEST_TOKEN_VAR} isn't set: game servers post with the fleet API's write-only ingest token (put it in the environment or the env file; it is never printed)`);
-	const dryRun = flagBool(args, "dry-run");
-	// Game servers will post to this address with this token: test the URL, GET /healthz and the token (GET
-	// /v1/auth/check) before anything is signed or written. --force writes it anyway; the failures print as warnings.
-	const report = await checkFleetEndpoint({ url, token: ingest.value, fetch: deps.fetch });
-	enforceEndpoints({ reports: [report], what: "settings.fleet", force: flagBool(args, "force") });
-	if (dryRun) {
-		if (isJson()) return emitJson({ dryRun: true, field: "fleet", value: { url, token: "<ingest token>" }, checks: reportsJson([report]) });
-		info(bold(`dry run: would write settings.fleet = {"url":"${url}","token":"<${FLEET_INGEST_TOKEN_VAR}>"} into the signed settings record and ping servers`));
-		return;
-	}
-	const signer = deps.signer ?? settingsSigner(proj, args);
-	const token = ingest.value;
-	const result = await changeSettings({
-		proj,
-		oc: deps.oc ?? openCloud("deploy")!,
-		signer,
-		what: `fleet setup ${new URL(url).host}`,
-		noPing: flagBool(args, "no-ping"),
-		checked: ["fleet"],
-		mutate: (body) => ({ ...body, fleet: { url, token } }),
-	});
-	if (proj.config.fleet?.url !== url) updateProjectConfig(proj, { fleet: { url } });
-	if (isJson()) return emitJson({ field: "fleet", url, settingsSeq: result.seq ?? null, outcome: result.outcome ?? null, checks: reportsJson([report]) });
-	reportChange(result, `fleet setup: game servers post to ${url}`);
-	info(dim(`  typetorch.json fleet.url = ${url}; reads use ${FLEET_TOKEN_VAR}. The token sits in the signed settings record, never printed.`));
+/** CLI 0.9: `fleet setup` moved to `backend setup` (this stub stays for one release). */
+export async function fleetCommand(args: ParsedArgs) {
+	const [sub] = args.positionals;
+	throw new UsageError(MOVED_TO_BACKEND_SETUP(`fleet${sub ? ` ${sub}` : ""}`));
 }
 
 // --wait ----------------------------------------------------------------------------------------------------------------
@@ -429,7 +393,7 @@ export async function waitForFleet(input: {
 		warn(`${summary.waiting.length} server(s) of ${input.branch} never reported #${input.seq}: ${summary.waiting.slice(0, 10).join(", ")}${summary.waiting.length > 10 ? ", ..." : ""} (they keep polling the head every 60 s)`);
 		try {
 			const sent = await input.fleet.postAlert({ level: "warning", code: "server_stuck", message: `${summary.waiting.length} server(s) didn't report #${input.seq} within ${input.seconds} s`, branch: input.branch, seq: input.seq, artifact: input.artifactId, jobs: summary.waiting.slice(0, 50) });
-			if (!sent) info(dim(`  (alert server_stuck not posted: no ${FLEET_INGEST_TOKEN_VAR})`));
+			if (!sent) info(dim(`  (alert server_stuck not posted: no ${BACKEND_KEY_VAR})`));
 		} catch (error) {
 			warn(`posting the server_stuck alert failed: ${(error as Error).message}`);
 		}
@@ -449,7 +413,7 @@ export const WAIT_USAGE = `  --wait [seconds]     after the message, wait for th
 
 export const SERVERS_USAGE = `typetorch servers [--branch <b>] [--watch] [--json]
 
-  Live servers from the fleet API (typetorch.json fleet.url, ${FLEET_TOKEN_VAR}): JobId, branch, artifact, applied
+  Live servers from the backend (typetorch.json backend.url, ${ADMIN_TOKEN_VAR}): JobId, branch, artifact, applied
   seq, health, players, kernel version, age (uptime) and seen (last heartbeat). --watch redraws every 5 s.`;
 
 export const REPORT_USAGE = `typetorch report <seq|artifact|latest> [--branch <b>] [--json]
@@ -463,14 +427,4 @@ export const ALERTS_USAGE = `typetorch alerts [--follow] [--level info|warning|c
   Alerts from the fleet API (servers, deploys, auto-rollbacks), the last --since minutes (default 60). --follow keeps
   printing new ones (polls every 5 s).`;
 
-export const FLEET_USAGE = `typetorch fleet setup --url <https url> [--dry-run] [--no-ping] [--force] [--key-file <path>] [--fallback-key-file <path>]
-
-  Points game servers at the fleet API: writes settings.fleet = {url, token} into the signed settings record (kernel
-  0.3.8; \`typetorch settings\`) with the write-only ingest token from ${FLEET_INGEST_TOKEN_VAR} (never printed),
-  signed with both prod keys, pings servers, and sets typetorch.json fleet.url. Needs both signing keys and the deploy
-  key's DataStore read/create/update scopes.
-  Checked first (--dry-run too), so a broken address or token never reaches game servers: the URL parses, is https and
-  the server's base address; GET <url>/healthz answers within 5 s; GET <url>/v1/auth/check accepts the token as a
-  write-only ingest token for the fleet part (the admin token is refused). A failure prints what is wrong and how to
-  fix it, writes nothing and exits 1; --force writes it anyway (the failures print as warnings).
-  Reads (servers, report, alerts, --wait) use the admin token in ${FLEET_TOKEN_VAR}.`;
+export const FLEET_USAGE = `typetorch fleet setup   (moved in CLI 0.9: typetorch backend setup [--url <https url>])`;

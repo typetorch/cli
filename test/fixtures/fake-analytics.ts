@@ -25,9 +25,15 @@ export interface FakeOptions {
 	prefix?: string;
 }
 
-/** A fake of the analytics server's public surface: /healthz, /v1/auth/check, /v1/settings. Records every request. */
-export function fakeServer(options: FakeOptions = {}) {
+/**
+ * A fake of the backend's surface: /healthz, /v1/auth/check, /v1/settings, and the owner list (GET / PUT /v1/access,
+ * admin token only, with the backend's seq rules: a lower seq or the same seq with another list is 409). Records every
+ * request and every PUT body.
+ */
+export function fakeServer(options: FakeOptions & { access?: { seq: number | null; owners: number[] }; accessStatus?: number } = {}) {
 	const calls: { method: string; path: string; auth: boolean }[] = [];
+	const access = options.access ?? { seq: null as number | null, owners: [] as number[] };
+	const puts: { seq: number; owners: number[] }[] = [];
 	const parts = options.parts ?? { analytics: true, fleet: true };
 	const ingest = options.ingest ?? [INGEST];
 	const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
@@ -57,8 +63,23 @@ export function fakeServer(options: FakeOptions = {}) {
 			return json(200, { ok: true, role: role === "ingest" ? "game" : role, via: "bearer", service: "typetorch-backend", version: "0.0.0-test", parts });
 		}
 		if (url.pathname === "/v1/settings") return role ? json(200, {}) : json(401, { error: "token required" });
+		if (url.pathname === "/v1/access") {
+			if (role !== "admin") return json(401, { error: "admin token required" });
+			if (options.accessStatus) return json(options.accessStatus, { error: "the fake says no" });
+			if ((init?.method ?? "GET") === "GET") return json(200, { ...access, updatedAt: access.seq === null ? null : "2026-10-09T12:00:00.000Z" });
+			const body = JSON.parse(String(init?.body)) as { seq: number; owners: number[] };
+			puts.push(body);
+			const owners = [...body.owners].sort((a, b) => a - b);
+			if (access.seq !== null && body.seq < access.seq) return json(409, { error: `seq ${body.seq} is older than the stored seq ${access.seq}`, seq: access.seq });
+			if (access.seq !== null && body.seq === access.seq && owners.join(",") !== access.owners.join(",")) return json(409, { error: "same seq, other list", seq: access.seq });
+			const changed = access.seq !== body.seq;
+			access.seq = body.seq;
+			access.owners = owners;
+			return json(200, { seq: body.seq, owners, updatedAt: "2026-10-09T12:00:00.000Z", changed, sessionsEnded: 0 });
+		}
+		if (url.pathname === "/v1/fleet/servers") return role === "admin" ? json(200, { servers: [] }) : json(401, { error: "admin token required" });
 		return json(404, { error: "not found" });
 	}) as typeof fetch;
-	return { fetch: fetchFake, calls };
+	return { fetch: fetchFake, calls, access, puts };
 }
 

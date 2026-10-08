@@ -4,22 +4,42 @@
  * --wait), which on a dev's PC usually sits behind a Cloudflare quick tunnel.
  */
 
-/** How to start the local fleet API again (analytics repo). */
-export const LOCAL_FLEET_HINT =
-	"start it again on the dev PC: in analytics/, bun run local -- --env-file <server env file> --game <game repo> (a new tunnel URL; it updates the game settings and typetorch.json)";
+/** How to start the local backend again (the backend repo, for a test place without Coolify). */
+export const LOCAL_BACKEND_HINT =
+	"a local test backend: start it again on the dev PC (in the backend repo: bun run local -- --game <game repo>; a new tunnel URL, it runs typetorch backend setup for you)";
 
 /**
- * How to get the right token for a fleet / analytics endpoint. The server has two secrets: the API key
- * (TYPETORCH_API_KEY, TT_ANALYTICS_INGEST_TOKENS before the rename; write-only: what game servers hold in the settings
- * record) and the admin token (TYPETORCH_ADMIN_TOKEN, TT_ANALYTICS_ADMIN_TOKEN before; reads: stays on the dev's PC).
+ * How to get the right key for the backend. It has two secrets: the API key (TYPETORCH_API_KEY; write-only: what game
+ * servers hold in the settings record) and the admin token (TYPETORCH_ADMIN_TOKEN; reads: it stays on the dev's PC).
+ * Both sit in the game repo's .env with the same names as on the backend.
  */
-export function INGEST_TOKEN_HINT(part: "fleet" | "analytics"): string {
-	const where = part === "fleet" ? "TYPETORCH_FLEET_INGEST_TOKEN (the CLI's env file)" : 'the "token" field of the analytics settings';
-	return `put the server's API key (TYPETORCH_API_KEY, or one of TT_ANALYTICS_INGEST_TOKENS on a server before the rename) in ${where}; the admin token is the read token and never goes to game servers`;
+export function GAME_KEY_HINT(target: "backend" | "fleet" | "analytics"): string {
+	const where =
+		target === "backend"
+			? "TYPETORCH_API_KEY in the game repo's .env"
+			: `the record's ${target === "fleet" ? "fleet token" : 'analytics "token"'} (run typetorch backend setup: it writes the backend's key there)`;
+	return `${where} must be the backend's API key (its TYPETORCH_API_KEY); the admin token is the read token and never goes to game servers`;
 }
 
-/** The response as one short line: JSON `error`/`message`, an HTML page's title, else the text. */
+/**
+ * Server-supplied text made safe for a terminal (security review L5): ANSI escape sequences and every C0/C1 control
+ * character (ESC, CSI, BEL, carriage returns...) are removed, whitespace runs collapse to one space. A hostile server
+ * can't move the cursor, rewrite earlier lines or change the window title through an error message.
+ */
+export function safeText(text: string): string {
+	return text
+		.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+		.replace(/\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/g, "")
+		.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "")
+		.replace(/\s+/g, " ");
+}
+
+/** The response as one short line: JSON `error`/`message`, an HTML page's title, else the text (always `safeText`). */
 export function shortBody(text: string, max = 160): string {
+	return safeText(rawShortBody(text, max)).slice(0, max);
+}
+
+function rawShortBody(text: string, max: number): string {
 	const trimmed = text.trim();
 	if (!trimmed) return "(empty response)";
 	try {
@@ -43,21 +63,21 @@ export function fleetHint(status: number, body: string, host: string): string | 
 	const quickTunnel = /\.trycloudflare\.com$/i.test(host);
 	const cloudflarePage = /cloudflare/i.test(body) || quickTunnel;
 	if (status === 530 || (cloudflarePage && /error code:? *1033|\b1033\b/.test(body))) {
-		return `the tunnel ${host} has nothing running behind it (Cloudflare ${status}): the fleet API or its tunnel stopped; ${LOCAL_FLEET_HINT}`;
+		return `the tunnel ${host} has nothing running behind it (Cloudflare ${status}): the backend or its tunnel stopped; ${LOCAL_BACKEND_HINT}`;
 	}
 	if ((status === 502 || status === 504) && cloudflarePage) {
-		return `the tunnel ${host} is up but the server behind it doesn't answer (${status}): start the analytics server, or ${LOCAL_FLEET_HINT}`;
+		return `the tunnel ${host} is up but the server behind it doesn't answer (${status}): start the backend, or ${LOCAL_BACKEND_HINT}`;
 	}
 	if (status === 404 && quickTunnel && !body.trim().startsWith("{")) {
 		return `the tunnel answers 404 without reaching the server: a ~/.cloudflared/config.yml with a catch-all ingress overrides --url; run cloudflared with an empty --config (bun run local does)`;
 	}
 	if (status === 404 && /part is off/i.test(body)) {
-		return `the fleet part is off on that server: set TT_SERVER_PARTS=analytics,fleet (or fleet) in its env file and restart it`;
+		return `the fleet part is off on that backend: set TYPETORCH_PARTS=analytics,fleet (or leave it unset) in its environment and restart it`;
 	}
 	if (status === 401 || status === 403) {
-		return `the fleet API refused the token (${status}): TYPETORCH_FLEET_TOKEN must equal the server's TT_ANALYTICS_ADMIN_TOKEN (reads) and TYPETORCH_FLEET_INGEST_TOKEN one of its TT_ANALYTICS_INGEST_TOKENS (posts)`;
+		return `the backend refused the key (${status}): TYPETORCH_ADMIN_TOKEN (reads) and TYPETORCH_API_KEY (alerts) in the game repo's .env must equal the backend's own TYPETORCH_ADMIN_TOKEN and TYPETORCH_API_KEY`;
 	}
-	if (status === 429) return `the fleet API is rate-limiting this client (429): wait a minute and try again`;
+	if (status === 429) return `the backend is rate-limiting this client (429): wait a minute and try again`;
 	return undefined;
 }
 
@@ -66,12 +86,12 @@ export function fleetNetworkHint(error: Error, host: string): string | undefined
 	const code = (error as { cause?: { code?: string } }).cause?.code ?? (error as { code?: string }).code ?? "";
 	const text = `${code} ${error.message}`;
 	if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(text) && /\.trycloudflare\.com$/i.test(host)) {
-		return `${host} no longer exists (quick tunnel URLs die with their cloudflared); ${LOCAL_FLEET_HINT}`;
+		return `${host} no longer exists (quick tunnel URLs die with their cloudflared); ${LOCAL_BACKEND_HINT}`;
 	}
 	// Bun's fetch says "ConnectionRefused" for a refused connection AND for a host name that doesn't resolve.
 	if (/ECONNREFUSED|ConnectionRefused|FailedToOpenSocket|Unable to connect/i.test(text)) {
-		if (/\.trycloudflare\.com$/i.test(host)) return `${host} doesn't answer: quick tunnel URLs die with their cloudflared (a new run gets a new URL), or the server behind it stopped; ${LOCAL_FLEET_HINT}`;
-		return `nothing listens at ${host} (or the host name doesn't exist): start the analytics server (or ${LOCAL_FLEET_HINT})`;
+		if (/\.trycloudflare\.com$/i.test(host)) return `${host} doesn't answer: quick tunnel URLs die with their cloudflared (a new run gets a new URL), or the server behind it stopped; ${LOCAL_BACKEND_HINT}`;
+		return `nothing listens at ${host} (or the host name doesn't exist): start the backend (or ${LOCAL_BACKEND_HINT})`;
 	}
 	if (/timeout|timed out|ETIMEDOUT|aborted/i.test(text)) return `${host} didn't answer in time: check that the server and its tunnel are running`;
 	if (/ENOTFOUND|EAI_AGAIN|getaddrinfo/i.test(text)) return `${host} doesn't resolve: check the URL for typos (and this PC's internet connection)`;
@@ -79,7 +99,7 @@ export function fleetNetworkHint(error: Error, host: string): string | undefined
 		return `${host} has no valid TLS certificate (Roblox servers refuse it too): use a host with a real certificate (the Cloudflare tunnel, or Caddy on a VPS)`;
 	}
 	if (/ECONNRESET|socket hang up|UND_ERR_SOCKET|closed unexpectedly/i.test(text)) {
-		return `${host} dropped the connection: the server or its tunnel is restarting or overloaded; ${LOCAL_FLEET_HINT}`;
+		return `${host} dropped the connection: the server or its tunnel is restarting or overloaded; ${LOCAL_BACKEND_HINT}`;
 	}
 	return undefined;
 }

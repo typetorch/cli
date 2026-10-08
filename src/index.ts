@@ -8,8 +8,8 @@ import { readFileSync } from "node:fs";
 import { flagBool, flagString, parseArgs, UsageError, type FlagSpec, type ParsedArgs } from "./args.ts";
 import { ACCESS_USAGE, accessCommand, accessFlags } from "./commands/access.ts";
 import { assetsCommand, assetsFlags } from "./commands/assets.ts";
+import { BACKEND_USAGE, backendCommand, backendFlags } from "./commands/backend.ts";
 import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands/build.ts";
-import { configCommand, configFlags } from "./commands/config.ts";
 import { SETTINGS_USAGE, settingsCommand, settingsFlags } from "./commands/settings.ts";
 import { deployCommand, deployFlags } from "./commands/deploy.ts";
 import { doctorCommand, doctorFlags } from "./commands/doctor.ts";
@@ -40,10 +40,11 @@ import { promoteCommand, promoteFlags } from "./commands/promote.ts";
 import { REMOTE_CLAUDE_USAGE, remoteClaudeCommand } from "./commands/remote-claude.ts";
 import { rollbackCommand, rollbackFlags } from "./commands/rollback.ts";
 import { UPDATE_USAGE, updateCommandRun, updateFlags } from "./commands/update.ts";
-import { redact, Settings, useSettings } from "./env.ts";
+import { gameDirFor, redact, Settings, useSettings } from "./env.ts";
 import { closestCommand, renderHelp } from "./help.ts";
-import { red, setOutputMode } from "./log.ts";
+import { red, setOutputMode, warn } from "./log.ts";
 import { progress } from "./progress.ts";
+import { dirname, resolve } from "node:path";
 
 /** package.json sits one level above both src/ (Bun) and dist/ (Node). */
 const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
@@ -55,6 +56,8 @@ interface Command {
 	summary: string;
 	/** Takes the arguments as they are (no option parsing, --help included) and returns the exit code. */
 	raw?: (argv: string[]) => Promise<number>;
+	/** Not listed in the help (a one-release stub that says where the command moved). */
+	hidden?: boolean;
 }
 
 const COMMANDS: Record<string, Command> = {
@@ -100,8 +103,6 @@ const COMMANDS: Record<string, Command> = {
   --no-build     deploy the last build (.typetorch/payload.rbxm)
   --force        allow a dev-channel or dirty artifact on a prod-channel branch
   --no-registry  does nothing since CLI 0.8 (there is no ConfigService registry; accepted for old scripts)
-  --require-shared-seq  stop before the upload when no shared seq source is readable (CI: no local log to take a seq
-                 from): the DataStore (universe-datastores.objects:read). --require-registry: old name
   Prod-channel branches: the message is signed with both keys (sig + sigF) when it is published; the key files are
   checked before the upload. Dev-channel messages are unsigned. See \`typetorch keys\`.
 ${GATE_USAGE}
@@ -158,15 +159,6 @@ ${WAIT_USAGE}`,
 		run: branchCommand,
 		summary: "branches, channels and live heads",
 		usage: `typetorch branch ls [--json]`,
-	},
-	config: {
-		flags: configFlags,
-		run: configCommand,
-		summary: "gone: use settings push",
-		usage: `typetorch config push   (gone in CLI 0.8)
-
-  Wrote the ConfigService registry key, which needed universe:read (never grantable to API keys). Kernel 0.3.8 reads
-  one signed settings record instead: \`typetorch settings push\`.`,
 	},
 	settings: {
 		flags: settingsFlags,
@@ -256,11 +248,18 @@ ${ROLLOUT_USAGE}`,
 		summary: "server, deploy and auto-rollback alerts",
 		usage: ALERTS_USAGE,
 	},
+	backend: {
+		flags: backendFlags,
+		run: (args) => backendCommand(args),
+		summary: "point game servers at the TypeTorch backend (checked first)",
+		usage: BACKEND_USAGE,
+	},
 	fleet: {
 		flags: fleetFlags,
 		run: (args) => fleetCommand(args),
-		summary: "point game servers at the fleet API",
+		summary: "moved: typetorch backend setup",
 		usage: FLEET_USAGE,
+		hidden: true,
 	},
 	pin: {
 		flags: pinFlags,
@@ -381,7 +380,15 @@ typetorch assets list
 };
 
 function help(): string {
-	return renderHelp(pkg.version, Object.fromEntries(Object.entries(COMMANDS).map(([name, c]) => [name, c.summary])));
+	return renderHelp(pkg.version, Object.fromEntries(Object.entries(COMMANDS).filter(([, c]) => !c.hidden).map(([name, c]) => [name, c.summary])));
+}
+
+/** The settings of this run: the game repo's .env (the folder of --config, else the nearest typetorch.json). */
+function loadSettings(options: { config?: string; envFile?: string }) {
+	const gameDir = options.config ? dirname(resolve(options.config)) : gameDirFor(process.cwd());
+	const loaded = new Settings({ gameDir, envFile: options.envFile });
+	useSettings(loaded);
+	for (const line of loaded.warnings) warn(line);
 }
 
 const HELP_WORDS = new Set(["help", "--help", "-h", "-H", "-?", "/?"]);
@@ -411,7 +418,7 @@ async function main(argv: string[]): Promise<number> {
 		return 2;
 	}
 	if (command.raw) {
-		useSettings(new Settings({ startDir: process.cwd() }));
+		loadSettings({});
 		return command.raw(rest);
 	}
 	let args: ParsedArgs;
@@ -427,9 +434,9 @@ async function main(argv: string[]): Promise<number> {
 		return 0;
 	}
 	setOutputMode({ json: flagBool(args, "json"), verbose: flagBool(args, "verbose") });
-	// Settings stay in this object: nothing from an env file is copied into process.env (S-H2).
-	useSettings(new Settings({ startDir: process.cwd(), envFile: flagString(args, "env-file") }));
 	try {
+		// Settings stay in this object: nothing from an env file is copied into process.env (S-H2).
+		loadSettings({ config: flagString(args, "config"), envFile: flagString(args, "env-file") });
 		await command.run(args);
 		return typeof process.exitCode === "number" ? process.exitCode : 0;
 	} catch (error) {

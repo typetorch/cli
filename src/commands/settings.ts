@@ -1,12 +1,13 @@
 /**
  * `typetorch settings`: the signed settings record (kernel 0.3.8, plans/20; settings.ts). Every write reads the record,
  * checks it was signed by your keys, changes one part, signs it with both prod keys, writes it back (guarded by the
- * entry version) and pings servers so they read it within seconds. Nothing here prints a token.
+ * entry version) and pings servers so they read it within seconds. Then the record's owners go to the backend
+ * (`PUT /v1/access`, backend.ts; plans/21 E). Nothing here prints a token.
  */
 import { flagBool, UsageError, type ParsedArgs } from "../args.ts";
 import { accessValue } from "../access.ts";
+import { describeOwnerSync, syncOwnerList, type OwnerSync } from "../backend.ts";
 import type { Project } from "../config.ts";
-import { checkAnalyticsEndpoint, enforceEndpoints, reportsJson, type EndpointReport } from "../endpoints.ts";
 import { bold, dim, emitJson, info, isJson, warn } from "../log.ts";
 import type { OpenCloud } from "../opencloud.ts";
 import {
@@ -30,30 +31,31 @@ export const settingsFlags = { "dry-run": "boolean", force: "boolean", "no-ping"
 export const SETTINGS_USAGE = `typetorch settings status
 typetorch settings get [field | game.<key>]
 typetorch settings set game.<key> <json | ->       (- reads the JSON from stdin)
-typetorch settings set analytics <json | ->        (the analytics sink; use - so tokens never sit in a command line)
-                                                   (checked first: URL, GET /healthz, the token; refused when broken)
-typetorch settings unset game.<key> | analytics | fleet
+typetorch settings unset game.<key> | backend | fleet | analytics
 typetorch settings push                            (defaultBranch, channels and dev access from typetorch.json)
   [--dry-run] [--force] [--no-ping] [--key-file <path>] [--fallback-key-file <path>]
 
   Kernel 0.3.8 reads ONE settings record from the game's DataStore (TypeTorch / settings), signed with both prod keys:
-  defaultBranch, channels, access (members, revoked, devBadgeId), fleet, analytics, and game (your own live values,
-  read with TypeTorch.liveConfig; at most 16 KB). It replaces every ConfigService key. Servers refuse a record that
-  doesn't verify, so game code (which can write DataStores) can't change it.
-  status  seq, age, whether it verifies with your keys, the fields (tokens hidden)
-  get     one field as JSON (tokens hidden), or all of them
-  set     change one field: read, check it was signed by your keys, change, sign (seq + 1), write, ping servers
+  defaultBranch, channels, access (members, revoked, devBadgeId), backend (and, for kernels before 0.4, the fleet and
+  analytics sections derived from it), and game (your own live values, read with TypeTorch.liveConfig; at most 16 KB).
+  Servers refuse a record that doesn't verify, so game code (which can write DataStores) can't change it.
+  status  seq, age, whether it verifies with your keys, the fields (keys hidden)
+  get     one field as JSON (keys hidden), or all of them
+  set     change a game value: read, check it was signed by your keys, change, sign (seq + 1), write, ping servers
+  unset   drop a game value; \`unset backend\` drops backend, fleet and analytics together
   push    defaultBranch, channels and access from typetorch.json (access push writes access alone)
   --force     replace a record your keys didn't sign (lost both keys, or game code wrote junk); its fields are
-              dropped, never re-signed, so write them again afterwards. For \`set analytics\` it also writes a
-              value whose checks failed (the failures print as warnings)
-  Before \`set analytics\` signs anything it checks the endpoint like \`typetorch doctor\` does: the URL parses, is
-  https and (DuckDB) ends in /v1/ingest; GET <server>/healthz answers within 5 s; the token is accepted by
-  GET /v1/auth/check as a write-only ingest token (never the admin token). A failure prints what is wrong and how to
-  fix it, writes nothing and exits 1. Basin streams: the URLs must answer; the token can't be verified.
+              dropped, never re-signed, so write them again afterwards
   --no-ping   don't ping servers (they still read it within about a minute)
+  After every write the record's owners go to the backend (PUT /v1/access with TYPETORCH_ADMIN_TOKEN; only owners may
+  Sign in with Roblox). A failure there is a warning: the record is written anyway.
   Needs both signing keys (\`typetorch keys init\`, \`typetorch keys init --fallback\`) and the deploy key's
-  ${DS_READ_SCOPE} and ${DS_WRITE_SCOPES}, plus messaging for the ping. Fleet: \`typetorch fleet setup\`.`;
+  ${DS_READ_SCOPE} and ${DS_WRITE_SCOPES}, plus messaging for the ping. The backend's address and key:
+  \`typetorch backend setup\` (CLI 0.9 moved \`fleet setup\` and \`settings set analytics\` there).`;
+
+/** CLI 0.9: what `settings set analytics` and `fleet setup` say (one release; then they are unknown). */
+export const MOVED_TO_BACKEND_SETUP = (what: string) =>
+	`\`typetorch ${what}\` moved to \`typetorch backend setup [--url <https url>]\` in CLI 0.9: it writes the record's backend section (one URL and the backend's game key, TYPETORCH_API_KEY, from the game repo's .env) and, for kernels before 0.4, the fleet and analytics sections from it`;
 
 /** Loads both keys, or explains that the settings need them. */
 export function settingsSigner(proj: Project, args: ParsedArgs): DualSigner {
@@ -67,34 +69,46 @@ export interface ChangeSettingsInput {
 	mutate: (body: SettingsBody) => SettingsBody | undefined;
 	what: string;
 	/**
-	 * The sections whose endpoint the caller checked (endpoints.ts: URL, /healthz, token) or deliberately forced past.
-	 * A change to `fleet` or `analytics` that isn't listed here is refused before anything is signed, so no new write
-	 * path can push a URL or token nobody tested.
+	 * The sections whose endpoint the caller checked (endpoints.ts: URL, /healthz, key) or deliberately forced past.
+	 * A new or changed `backend`, `fleet` or `analytics` that isn't listed here is refused before anything is signed, so
+	 * no new write path can push a URL or key nobody tested. Removing a section needs no check.
 	 */
-	checked?: readonly ("fleet" | "analytics")[];
+	checked?: readonly EndpointSection[];
 	force?: boolean;
 	/** Re-sign with a new seq even when nothing changed (keys rotate / resign). */
 	resign?: boolean;
 	noPing?: boolean;
 	now?: () => Date;
+	/** The owner-list PUT to the backend (tests pass a fake). */
+	fetch?: typeof fetch;
 }
+
+/** The record's sections that hold an endpoint and a key game servers use. */
+export const ENDPOINT_SECTIONS = ["backend", "fleet", "analytics"] as const;
+export type EndpointSection = (typeof ENDPOINT_SECTIONS)[number];
 
 export interface ChangeSettingsResult extends SettingsWrite {
 	pinged?: boolean;
 	pingError?: string;
+	/** The owner list sent to the backend after the write (PUT /v1/access). */
+	owners?: OwnerSync;
 }
 
-/** One settings change, end to end (write + ping). Throws on refusals and failed writes with what to do. */
+/**
+ * One settings change, end to end (write + ping + the backend's owner list). Throws on refusals and failed writes with
+ * what to do; the owner list only ever warns.
+ */
 export async function changeSettings(input: ChangeSettingsInput): Promise<ChangeSettingsResult> {
 	const { proj } = input;
 	const checked = new Set(input.checked ?? []);
 	let unchecked: string | undefined;
 	const mutate = (body: SettingsBody): SettingsBody | undefined => {
-		const before = { fleet: encodeBody({ fleet: body.fleet }), analytics: encodeBody({ analytics: body.analytics }) };
+		const before = Object.fromEntries(ENDPOINT_SECTIONS.map((field) => [field, encodeBody({ [field]: body[field] })]));
 		const next = input.mutate(body);
 		if (next === undefined) return undefined;
-		for (const field of ["fleet", "analytics"] as const) {
-			if (!checked.has(field) && encodeBody({ [field]: next[field] }) !== before[field]) unchecked = field;
+		for (const field of ENDPOINT_SECTIONS) {
+			if (checked.has(field) || next[field] === undefined) continue;
+			if (encodeBody({ [field]: next[field] }) !== before[field]) unchecked = field;
 		}
 		return unchecked ? undefined : next;
 	};
@@ -112,23 +126,33 @@ export async function changeSettings(input: ChangeSettingsInput): Promise<Change
 			result.pingError = (error as Error).message;
 		}
 	}
+	// The signed owners to the backend (Sign in with Roblox lets only them in). Also when nothing changed: the same seq and
+	// list again is a no-op there, and it repairs a backend that lost or never got its copy.
+	result.owners = await syncOwnerList({ proj, seq: write.seq, body: write.after, fetch: input.fetch });
 	return result;
 }
 
-/** One line about a change (and the ping), or the "already there" note. */
+/** One line about a change (and the ping and the owner list), or the "already there" note. */
 export function reportChange(result: ChangeSettingsResult, what: string) {
+	const owners = result.owners ? describeOwnerSync(result.owners) : undefined;
+	const ownerLine = () => {
+		if (owners?.level === "warn") warn(owners.text);
+		else if (owners) info(dim(`  ${owners.text}`));
+	};
 	if (result.outcome === "unchanged") {
 		info(`${what}: already set (settings #${result.seq ?? "-"}); nothing written`);
+		ownerLine();
 		return;
 	}
 	info(bold(`${what}: written as settings #${result.seq}`));
 	if (result.untrusted) {
 		const dropped = result.dropped?.length ? ` (dropped: ${result.dropped.join(", ")})` : "";
-		warn(`replaced a record your keys didn't sign${dropped}: write those fields again (typetorch settings push, fleet setup, settings set analytics -)`);
+		warn(`replaced a record your keys didn't sign${dropped}: write those fields again (typetorch settings push, access push, backend setup)`);
 	}
 	if (result.pinged) info(dim("  servers pinged (kernel 0.3.8 reads it within seconds; older kernels ignore it)"));
 	else if (result.pingError) warn(`the ping failed (${result.pingError}); servers still read the record within about a minute`);
 	else info(dim("  not pinged (--no-ping); servers read it within about a minute"));
+	ownerLine();
 }
 
 function parseJson(text: string, what: string): unknown {
@@ -153,22 +177,18 @@ function gameKey(path: string): string | undefined {
 	return key;
 }
 
-function plainObject(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 export async function settingsCommand(
 	args: ParsedArgs,
 	deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; stdin?: () => Promise<string>; now?: () => Date; fetch?: typeof fetch } = {},
 ) {
 	const [sub, path, valueArg, extra] = args.positionals;
 	if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
+	if (sub === "set" && path === "analytics") throw new UsageError(MOVED_TO_BACKEND_SETUP("settings set analytics"));
 	const proj = project(args);
 	const dryRun = flagBool(args, "dry-run");
 	const force = flagBool(args, "force");
 	const noPing = flagBool(args, "no-ping");
 	let cloud: Pick<OpenCloud, "request" | "publishMessage"> | undefined = deps.oc;
-	// The deploy key is only needed once the record is read: `set analytics` tests its endpoint first (no key needed).
 	const client = () => (cloud ??= openCloud("deploy")!);
 
 	if (sub === "status" || sub === "get") {
@@ -208,8 +228,8 @@ export async function settingsCommand(
 			});
 		}
 		if (read.missing) {
-			info("no settings record yet: servers use the defaults (defaultBranch prod, only the creator as a dev, no fleet API)");
-			info(dim("  start one with: typetorch settings push (and typetorch fleet setup, typetorch access push)"));
+			info("no settings record yet: servers use the defaults (defaultBranch prod, only the creator as a dev, no backend)");
+			info(dim("  start one with: typetorch settings push (and typetorch backend setup, typetorch access push)"));
 			return;
 		}
 		if (!read.record) {
@@ -226,7 +246,6 @@ export async function settingsCommand(
 	if (sub !== "set" && sub !== "unset" && sub !== "push") throw new UsageError(`unknown settings subcommand "${sub ?? ""}" (status, get, set, unset, push)`);
 	let mutate: (body: SettingsBody) => SettingsBody | undefined;
 	let what: string;
-	let checks: EndpointReport[] = [];
 	if (sub === "push") {
 		if (path !== undefined) throw new UsageError(`unexpected argument "${path}"`);
 		const access = accessValue(proj.config);
@@ -238,10 +257,12 @@ export async function settingsCommand(
 		});
 		what = "settings push (defaultBranch, channels, access from typetorch.json)";
 	} else if (sub === "unset") {
-		if (path === undefined) throw new UsageError("typetorch settings unset game.<key> | analytics | fleet");
+		if (path === undefined) throw new UsageError("typetorch settings unset game.<key> | backend | fleet | analytics");
 		if (valueArg !== undefined) throw new UsageError(`unexpected argument "${valueArg}"`);
 		const key = gameKey(path);
-		if (key === undefined && path !== "analytics" && path !== "fleet") throw new UsageError(`can unset game.<key>, analytics or fleet, not "${path}"`);
+		if (key === undefined && !(ENDPOINT_SECTIONS as readonly string[]).includes(path)) throw new UsageError(`can unset game.<key>, backend, fleet or analytics, not "${path}"`);
+		// The old fleet/analytics sections are derived from backend: dropping backend drops them too.
+		const fields = path === "backend" ? ENDPOINT_SECTIONS : [path];
 		mutate = (body) => {
 			if (key !== undefined) {
 				if (body.game?.[key] === undefined) return undefined;
@@ -249,41 +270,38 @@ export async function settingsCommand(
 				delete nextGame[key];
 				return { ...body, game: nextGame };
 			}
-			if ((body as Record<string, unknown>)[path] === undefined) return undefined;
+			if (fields.every((field) => (body as Record<string, unknown>)[field] === undefined)) return undefined;
 			const next = { ...body } as Record<string, unknown>;
-			delete next[path];
+			for (const field of fields) delete next[field];
 			return next as SettingsBody;
 		};
 		what = `settings unset ${path}`;
 	} else {
-		if (path === undefined || valueArg === undefined) throw new UsageError("typetorch settings set game.<key> <json | ->  /  typetorch settings set analytics <json | ->");
+		if (path === undefined || valueArg === undefined) throw new UsageError("typetorch settings set game.<key> <json | ->");
 		const key = gameKey(path);
-		if (key === undefined && path !== "analytics") throw new UsageError(`can set game.<key> or analytics (fleet: typetorch fleet setup; access: typetorch access push), not "${path}"`);
+		if (key === undefined) {
+			const where = path === "fleet" || path === "backend" ? "typetorch backend setup" : path === "access" ? "typetorch access push" : "typetorch settings push";
+			throw new UsageError(`can set game.<key> only, not "${path}" (${path}: ${where})`);
+		}
 		const text = valueArg === "-" ? await (deps.stdin ?? readStdin)() : valueArg;
 		const value = parseJson(text, valueArg === "-" ? "stdin" : "the value");
-		if (key === undefined && !plainObject(value)) throw new UsageError("analytics must be a JSON object (the sink settings)");
-		mutate = (body) => (key !== undefined ? { ...body, game: { ...(body.game ?? {}), [key]: value } } : { ...body, analytics: value as Record<string, unknown> });
+		mutate = (body) => ({ ...body, game: { ...(body.game ?? {}), [key]: value } });
 		what = `settings set ${path}`;
-		// The analytics sink goes to every game server: test the URL, /healthz and the token before anything is signed.
-		if (key === undefined) {
-			checks = [await checkAnalyticsEndpoint(value, { fetch: deps.fetch })];
-			enforceEndpoints({ reports: checks, what: "settings.analytics", force });
-		}
 	}
 	if (dryRun) {
 		const read = await readSettings(client(), proj.config.universeId);
 		if (read.error) throw new Error(`reading the settings record failed: ${read.error}`);
 		const next = mutate(JSON.parse(JSON.stringify(read.body ?? {})) as SettingsBody);
 		const changed = next !== undefined && encodeBody(next) !== encodeBody(read.body ?? {});
-		if (isJson()) return emitJson({ dryRun: true, seq: read.record ? read.record.seq + 1 : 1, changed, after: maskSecrets(next ?? read.body ?? {}), ...(checks.length ? { checks: reportsJson(checks) } : {}) });
+		if (isJson()) return emitJson({ dryRun: true, seq: read.record ? read.record.seq + 1 : 1, changed, after: maskSecrets(next ?? read.body ?? {}) });
 		info(bold(`dry run: ${changed ? `would write settings #${read.record ? read.record.seq + 1 : 1}` : "nothing to change"}`));
 		for (const line of describeFields(next ?? read.body ?? {})) info(`  ${line}`);
 		return;
 	}
 	const signer = deps.signer ?? settingsSigner(proj, args);
-	const result = await changeSettings({ proj, oc: client(), signer, mutate, what, force, noPing, now: deps.now, checked: checks.map((report) => report.target) });
+	const result = await changeSettings({ proj, oc: client(), signer, mutate, what, force, noPing, now: deps.now, fetch: deps.fetch });
 	if (isJson()) {
-		return emitJson({ outcome: result.outcome ?? null, seq: result.seq ?? null, pinged: result.pinged ?? false, fields: result.after ? Object.keys(result.after).sort() : [], ...(checks.length ? { checks: reportsJson(checks) } : {}) });
+		return emitJson({ outcome: result.outcome ?? null, seq: result.seq ?? null, pinged: result.pinged ?? false, fields: result.after ? Object.keys(result.after).sort() : [], owners: result.owners ?? null });
 	}
 	reportChange(result, what);
 }

@@ -212,7 +212,7 @@ function gameProject(lock?: AssetsLock, patch: Record<string, unknown> = {}) {
 	const raw = { project: "game", universeId: 42, placeId: 2, creator: { groupId: 3 }, channels: { prod: "prod" }, ...patch };
 	writeFileSync(join(root, "typetorch.json"), JSON.stringify(raw, null, "\t") + "\n");
 	if (lock) writeFileSync(join(root, ASSETS_LOCK_FILE), formatAssetsLock(lock));
-	useSettings(new Settings({ startDir: root, env: { TYPETORCH_API_KEY: FAKE_API_KEY } }));
+	useSettings(new Settings({ startDir: root, env: { OPENCLOUD_API_KEY: FAKE_API_KEY } }));
 	return root;
 }
 

@@ -6,7 +6,7 @@ export const HELP_GROUPS: [title: string, commands: string[]][] = [
 	["Ship a build", ["deploy", "build", "upload", "test", "promote", "rollback"]],
 	["Approvals", ["approve", "proposals", "reject"]],
 	["Live servers", ["servers", "report", "alerts", "deployments", "branch", "pin"]],
-	["Setup", ["doctor", "keys", "settings", "access", "fleet", "kernel", "assets", "config"]],
+	["Setup", ["doctor", "keys", "settings", "access", "backend", "kernel", "assets"]],
 	["Tools", ["dev", "migrate", "update"]],
 ];
 
@@ -35,9 +35,10 @@ export function renderHelp(version: string, summaries: Record<string, string>): 
 		bold("Options"),
 		"  --json (machine output)  --verbose  --config <typetorch.json>  --env-file <path>  --help",
 		"",
-		bold("API keys"),
-		"  OPENCLOUD_ASSETS_KEY, OPENCLOUD_DEPLOY_KEY, OPENCLOUD_PLACE_KEY per job, else TYPETORCH_API_KEY / OPENCLOUD_API_KEY",
-		"  read from the environment, the TYPETORCH_ENV_FILE file, or .env here or above; never passed to child processes",
+		bold("Keys (the game repo's .env; the environment wins; never passed to child processes)"),
+		"  Roblox Open Cloud: OPENCLOUD_API_KEY, or per job OPENCLOUD_ASSETS_KEY, OPENCLOUD_DEPLOY_KEY, OPENCLOUD_PLACE_KEY",
+		"  TypeTorch backend: TYPETORCH_API_KEY (its game key), TYPETORCH_ADMIN_TOKEN (its admin token)",
+		"  --env-file <path> or TYPETORCH_ENV_FILE: read that file instead of .env",
 		"",
 		"Details: typetorch help <command>, or typetorch <command> --help",
 	);

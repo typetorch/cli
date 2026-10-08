@@ -1,31 +1,28 @@
 /**
- * Fleet visibility (plans/12 P-O1, reader side) through the **fleet API**: a small service (analytics/server, SQLite)
+ * Fleet visibility (plans/12 P-O1, reader side) through the TypeTorch backend's **fleet API** (@typetorch/backend, SQLite)
  * that game kernels post their heartbeats, deploy reports and alerts to. `typetorch servers`, `report`, `alerts` and
- * `--wait` read it; `fleet setup` tells game servers where it is.
+ * `--wait` read it; `backend setup` tells game servers where it is.
  *
  *   GET  /v1/fleet/servers?branch=<b>                 { servers: [...] }   latest heartbeat per live server
  *   GET  /v1/fleet/reports?seq=<n>|artifact=<id>|latest[&branch=<b>]  { reports: [...] }
  *   GET  /v1/fleet/alerts?since=<unix ms>&level=<l>   { alerts: [...] }
- *   POST /v1/fleet/alert                              { level, code, message, branch?, seq?, artifact? } (ingest token)
+ *   POST /v1/fleet/alert                              { level, code, message, branch?, seq?, artifact? } (the game key)
  *   GET  /v1/fleet/stream                             (SSE; not used: the CLI polls)
- * Reads send the admin token (`TYPETORCH_FLEET_TOKEN`, Authorization: Bearer), posts the write-only ingest token
- * (`TYPETORCH_FLEET_INGEST_TOKEN`). Tokens come from the environment or the env file and are never printed. The URL is
- * typetorch.json `fleet.url`.
+ * Reads send the admin token (`TYPETORCH_ADMIN_TOKEN`, Authorization: Bearer), posts the write-only game key
+ * (`TYPETORCH_API_KEY`). Both come from the environment or the game repo's .env (backend.ts) and are never printed. The
+ * URL is typetorch.json `backend.url`.
  *
  * The rows keep the kernel's contract (kernel src/server/Reports.luau); the parsers take the short field names the
  * kernel posts ({t, b, c, a, n, m, s, u, p, k?, x?, v, q, g, h, e?, sv} and {s, b, a, j, r, e?, d?, t, g, k, p}) or the
  * long names a server may answer with (job, branch, artifact, players, appliedSeq, health...). Reserved-server access
  * codes are never kept: only whether a server has one.
  *
- * @typetorch/analytics will export `createFleetClient({url, token})` for the same API; the CLI keeps this small
- * fetch client so it stays dependency-free (analytics pulls in DuckDB).
+ * The CLI keeps this small fetch client so it stays dependency-free (the backend pulls in DuckDB).
  */
+import { ADMIN_TOKEN_VAR, BACKEND_KEY_VAR } from "./env.ts";
 import { fleetHint, fleetNetworkHint, shortBody } from "./httphints.ts";
 import { table } from "./log.ts";
 import { withJob } from "./progress.ts";
-
-export const FLEET_TOKEN_VAR = "TYPETORCH_FLEET_TOKEN";
-export const FLEET_INGEST_TOKEN_VAR = "TYPETORCH_FLEET_INGEST_TOKEN";
 
 export class FleetError extends Error {
 	override name = "FleetError";
@@ -68,7 +65,7 @@ export interface FleetClient {
 	servers(query?: { branch?: string }): Promise<ServerRow[]>;
 	reports(query: { seq?: number; artifact?: string; latest?: boolean; branch?: string }): Promise<ReportRow[]>;
 	alerts(query?: { since?: number; level?: string }): Promise<AlertRow[]>;
-	/** With the ingest token; false when there is none (nothing sent). */
+	/** With the game key (TYPETORCH_API_KEY); false when there is none (nothing sent). */
 	postAlert(alert: NewAlert): Promise<boolean>;
 }
 
@@ -112,8 +109,11 @@ export function alertBody(alert: NewAlert): Record<string, unknown> {
 	};
 }
 
-/** One configured fleet API over fetch (tests pass `fetch`). */
-export function httpFleetClient(options: { url: string; token?: string; ingestToken?: string; fetch?: typeof fetch; timeoutMs?: number }): FleetClient {
+/**
+ * One configured fleet API over fetch (tests pass `fetch`): reads with the admin token, alerts with the game key (the
+ * backend refuses the admin token on its game routes).
+ */
+export function httpFleetClient(options: { url: string; adminToken?: string; apiKey?: string; fetch?: typeof fetch; timeoutMs?: number }): FleetClient {
 	const base = options.url.replace(/\/+$/, "");
 	const doFetch = options.fetch ?? fetch;
 	const request = async (method: string, path: string, token: string | undefined, body?: unknown): Promise<unknown> => {
@@ -131,7 +131,7 @@ export function httpFleetClient(options: { url: string; token?: string; ingestTo
 			}
 			const text = await response.text();
 			if (response.status === 401 || response.status === 403) {
-				throw new FleetError(`the fleet API refused the token (${response.status}): check ${method === "GET" ? FLEET_TOKEN_VAR : FLEET_INGEST_TOKEN_VAR}`, response.status);
+				throw new FleetError(`the backend refused the ${method === "GET" ? "admin token" : "game key"} (${response.status}): check ${method === "GET" ? ADMIN_TOKEN_VAR : BACKEND_KEY_VAR} in the game repo's .env`, response.status);
 			}
 			if (!response.ok) {
 				// A known cause gets its fix; anything else shows the response, shortened (HTML pages reduced to their title).
@@ -153,20 +153,20 @@ export function httpFleetClient(options: { url: string; token?: string; ingestTo
 	};
 	return {
 		async servers(q = {}) {
-			const body = await request("GET", `/v1/fleet/servers${query({ branch: q.branch })}`, options.token);
+			const body = await request("GET", `/v1/fleet/servers${query({ branch: q.branch })}`, options.adminToken);
 			return rowsOf(body, "servers").map(parseServer).filter((s): s is ServerRow => s !== undefined);
 		},
 		async reports(q) {
-			const body = await request("GET", `/v1/fleet/reports${query({ seq: q.seq, artifact: q.artifact, latest: q.latest, branch: q.branch })}`, options.token);
+			const body = await request("GET", `/v1/fleet/reports${query({ seq: q.seq, artifact: q.artifact, latest: q.latest, branch: q.branch })}`, options.adminToken);
 			return rowsOf(body, "reports").map(parseReport).filter((r): r is ReportRow => r !== undefined);
 		},
 		async alerts(q = {}) {
-			const body = await request("GET", `/v1/fleet/alerts${query({ since: q.since, level: q.level })}`, options.token);
+			const body = await request("GET", `/v1/fleet/alerts${query({ since: q.since, level: q.level })}`, options.adminToken);
 			return rowsOf(body, "alerts").map(parseAlert).filter((a): a is AlertRow => a !== undefined);
 		},
 		async postAlert(alert) {
-			if (!options.ingestToken) return false;
-			await request("POST", "/v1/fleet/alert", options.ingestToken, alertBody(alert));
+			if (!options.apiKey) return false;
+			await request("POST", "/v1/fleet/alert", options.apiKey, alertBody(alert));
 			return true;
 		},
 	};

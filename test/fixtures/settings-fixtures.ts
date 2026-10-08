@@ -18,8 +18,8 @@ const settingsBody: SettingsBody = {
 	game: { "shop.price": 50, flags: { pvp: true } },
 };
 
-/** name -> [seq, body]. */
-export const FIXTURE_BODIES: Record<string, [number, SettingsBody]> = {
+/** name -> [seq, body, at?] (default FIXTURE_AT). */
+export const FIXTURE_BODIES: Record<string, [number, SettingsBody, string?]> = {
 	fleet: [1, { fleet }],
 	fleetSlash: [1, { fleet: { url: "https://fleet.example.test/api/", token: FLEET_TOKEN } }],
 	// `--fleet`: the owner turns the fleet API off (a record without `fleet`), then on again.
@@ -33,12 +33,18 @@ export const FIXTURE_BODIES: Record<string, [number, SettingsBody]> = {
 	s1: [1, settingsBody],
 	s2: [2, { ...settingsBody, game: { "shop.price": 75, flags: { pvp: false } } }],
 	s5: [5, { ...settingsBody, game: { "shop.price": 999 } }],
+	// CLI 0.9 / kernel 0.4 (plans/21): a `backend` section wins over an old `fleet` section that disagrees with it.
+	backend: [
+		1,
+		{ backend: { url: "https://backend.example.test/api", key: FLEET_TOKEN }, fleet: { url: "https://old-fleet.example.test", token: "smoke-old-fleet-token-0123456789" } },
+		"2026-10-09T12:00:00.000Z",
+	],
 };
 
 export function fixtures(): Record<string, unknown> {
 	const signer = { main: parseSigningKey(TEST_VECTOR_MAIN_SEED), fallback: parseSigningKey(TEST_VECTOR_FALLBACK_SEED) };
 	const out: Record<string, unknown> = {};
-	for (const [name, [seq, body]] of Object.entries(FIXTURE_BODIES)) out[name] = signSettings(signer, seq, FIXTURE_AT, body);
+	for (const [name, [seq, body, at]] of Object.entries(FIXTURE_BODIES)) out[name] = signSettings(signer, seq, at ?? FIXTURE_AT, body);
 	return out;
 }
 

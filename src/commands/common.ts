@@ -61,14 +61,14 @@ export interface History {
 let registryFlagNoted = false;
 
 /**
- * CLI 0.8: `--no-registry` and `--require-registry` are accepted and do nothing (scripts pass them); one note per run.
- * There is no ConfigService registry any more (kernel 0.3.8 reads the signed settings record; plans/20).
+ * CLI 0.8: `--no-registry` is accepted and does nothing (scripts pass it); one note per run. There is no ConfigService
+ * registry any more (kernel 0.3.8 reads the signed settings record; plans/20). CLI 0.9 dropped `--require-registry`
+ * with `--require-shared-seq`.
  */
 export function noteRegistryFlags(args: ParsedArgs) {
-	const used = ["no-registry", "require-registry"].filter((flag) => args.flags[flag] !== undefined);
-	if (used.length === 0 || registryFlagNoted) return;
+	if (args.flags["no-registry"] === undefined || registryFlagNoted) return;
 	registryFlagNoted = true;
-	info(dim(`note: --${used.join(" and --")} ${used.length > 1 ? "do" : "does"} nothing since CLI 0.8 (no ConfigService registry; settings live in the signed settings record)`));
+	info(dim("note: --no-registry does nothing since CLI 0.8 (no ConfigService registry; settings live in the signed settings record)"));
 }
 
 /** The local log, with each branch's live head. */

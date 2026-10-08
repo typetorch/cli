@@ -9,7 +9,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "../src/args";
 import { accessCommand, accessFlags } from "../src/commands/access";
-import { fleetCommand, fleetFlags } from "../src/commands/fleet";
 import { changeSettings, settingsCommand, settingsFlags } from "../src/commands/settings";
 import { validateConfig, type Project } from "../src/config";
 import { Settings, useSettings } from "../src/env";
@@ -29,7 +28,6 @@ import {
 	type SettingsRecord,
 } from "../src/settings";
 import { generateSigningKey, parseSigningKey, verifyCanonicalStrict, type DualSigner } from "../src/signing";
-import { fakeServer } from "./fixtures/fake-analytics";
 import { fakeDataStoreCloud } from "./fixtures/fake-datastore";
 import { FIXTURE_BODIES, fixtures } from "./fixtures/settings-fixtures";
 
@@ -200,15 +198,12 @@ describe("commands", () => {
 		const proj = project();
 		const signer = newSigner();
 		const cloud = fakeDataStoreCloud();
-		// `set analytics` checks the endpoint first (endpoints.ts): a fake server whose ingest token is the one below.
-		const server = fakeServer({ ingest: ["analytics-secret-0123456789"] });
-		const deps = { oc: cloud.oc, signer, now: AT, fetch: server.fetch };
+		const deps = { oc: cloud.oc, signer, now: AT };
 		await run(proj, () => settingsCommand(parseArgs(["set", "game.shop.price", "75"], settingsFlags), deps));
 		await run(proj, () => settingsCommand(parseArgs(["set", "game.flags", '{"pvp":true}'], settingsFlags), deps));
 		const got = await run(proj, () => settingsCommand(parseArgs(["get", "game.shop.price"], settingsFlags), deps));
 		expect(got.out.trim()).toBe("75");
-		const stdin = '{"backend":"duckdb","events":"https://fleet.example.com/v1/ingest","token":"analytics-secret-0123456789"}';
-		const set = await run(proj, () => settingsCommand(parseArgs(["set", "analytics", "-"], settingsFlags), { ...deps, stdin: async () => stdin }));
+		const set = await run(proj, () => settingsCommand(parseArgs(["set", "game.secret_token", "-"], settingsFlags), { ...deps, stdin: async () => '"analytics-secret-0123456789"' }));
 		expect(set.out).toContain("settings #3");
 		const status = await run(proj, () => settingsCommand(parseArgs(["status"], settingsFlags), deps));
 		expect(status.out).toContain("settings #3");
@@ -219,10 +214,11 @@ describe("commands", () => {
 		expect(all.out).toContain("hidden");
 		await run(proj, () => settingsCommand(parseArgs(["unset", "game.flags"], settingsFlags), deps));
 		const body = JSON.parse((cloud.values.settings as SettingsRecord).body);
-		expect(body.game).toEqual({ "shop.price": 75 });
-		expect(body.analytics.token).toBe("analytics-secret-0123456789");
+		expect(body.game).toEqual({ "shop.price": 75, secret_token: "analytics-secret-0123456789" });
 		expect(cloud.published.map((p) => JSON.parse(p.message).s)).toEqual([1, 2, 3, 4]);
-		await expect(run(proj, () => settingsCommand(parseArgs(["set", "fleet", "{}"], settingsFlags), deps))).rejects.toThrow(/fleet setup/);
+		await expect(run(proj, () => settingsCommand(parseArgs(["set", "fleet", "{}"], settingsFlags), deps))).rejects.toThrow(/backend setup/);
+		// CLI 0.9: `set analytics` moved to `backend setup` (a one-release pointer), before anything is read.
+		await expect(run(proj, () => settingsCommand(parseArgs(["set", "analytics", "-"], settingsFlags), deps))).rejects.toThrow(/moved to `typetorch backend setup/);
 		await expect(run(proj, () => settingsCommand(parseArgs(["set", "game.x", "{bad"], settingsFlags), deps))).rejects.toThrow(/valid JSON/);
 	});
 	test("settings push: defaultBranch, channels and access from typetorch.json", async () => {
@@ -252,20 +248,9 @@ describe("commands", () => {
 		const status = await run(proj, () => accessCommand(parseArgs(["status"], accessFlags), { oc: cloud.oc, signer }));
 		expect(status.out).toContain("matches typetorch.json");
 	});
-	test("fleet setup writes settings.fleet with the ingest token from the environment, never printed", async () => {
-		const proj = project();
-		useSettings(new Settings({ startDir: proj.root, env: { TYPETORCH_FLEET_INGEST_TOKEN: "ingest-secret-1234567890" } }));
-		const cloud = fakeDataStoreCloud();
-		// The endpoint is checked before anything is signed (endpoints.ts): a fake server that knows this ingest token.
-		const fetch = fakeServer({ ingest: ["ingest-secret-1234567890"] }).fetch;
-		const done = await run(proj, () => fleetCommand(parseArgs(["setup", "--url", "https://fleet.example"], fleetFlags), { oc: cloud.oc, signer: newSigner(), fetch }));
-		expect(JSON.parse((cloud.values.settings as SettingsRecord).body).fleet).toEqual({ url: "https://fleet.example", token: "ingest-secret-1234567890" });
-		expect(done.out).not.toContain("ingest-secret");
-		expect(JSON.parse(readFileSync(proj.configPath, "utf8")).fleet).toEqual({ url: "https://fleet.example" });
-		await expect(run(proj, () => fleetCommand(parseArgs(["setup", "--url", "http://fleet.example"], fleetFlags), { oc: cloud.oc, signer: newSigner(), fetch }))).rejects.toThrow(/https/);
-	});
-	test("config push is gone with a pointer to settings push", async () => {
-		const { configCommand } = await import("../src/commands/config");
-		await expect(configCommand(parseArgs(["push"], {}))).rejects.toThrow(/settings push/);
+	test("fleet setup and config are gone: fleet points at backend setup; config is an unknown command", async () => {
+		const { fleetCommand, fleetFlags } = await import("../src/commands/fleet");
+		await expect(fleetCommand(parseArgs(["setup", "--url", "https://fleet.example"], fleetFlags))).rejects.toThrow(/moved to `typetorch backend setup/);
+		expect(existsSync(join(import.meta.dir, "..", "src", "commands", "config.ts"))).toBe(false);
 	});
 });

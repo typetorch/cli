@@ -1,13 +1,19 @@
 /**
- * Settings from the real environment and env files, held in an explicit object. Nothing read from a file is ever
- * copied into process.env (security audit S-H2), and child processes get an explicit, minimal environment
+ * Settings from the real environment and the game repo's `.env`, held in an explicit object. Nothing read from a file is
+ * ever copied into process.env (security audit S-H2), and child processes get an explicit, minimal environment
  * (`childEnv`): OS, PATH and home-type variables only, never a key.
  *
+ * Per game repo (plans/21 B): secrets in `.env` (gitignored, next to typetorch.json), everything else in typetorch.json.
  * Where a value comes from, highest priority first:
- *   1. the real environment (CI secrets, `export ...`);
- *   2. the env file named by `--env-file` or TYPETORCH_ENV_FILE (recommended: outside the repo tree, e.g.
- *      ~/.config/typetorch/<game>.env, so no tool that reads the repo can see the keys);
- *   3. `.env` files in the working directory and every parent folder (the nearest file wins).
+ *   1. the real environment (`export ...`, a shell, a container);
+ *   2. the game repo's `.env`: the folder holding typetorch.json (`--config`'s folder, else the nearest one at or above
+ *      the working directory, else the working directory). No other `.env` file is read (before CLI 0.9 every parent
+ *      folder's `.env` counted too).
+ * `--env-file <path>` or TYPETORCH_ENV_FILE (real environment) is an override: that file is read INSTEAD of the game's
+ * `.env`. A `TYPETORCH_ENV_FILE=` line inside the game's `.env` (the CLI 0.8 layout) is still followed for one release
+ * (that file wins over the `.env`), with a warning.
+ * Values Bun auto-loads from the working directory's `.env*` files are not "the environment": they count as the file they
+ * came from (and `.env.local` & co. don't count at all), so Bun and Node read the same values.
  * Values are never printed: only variable names and file paths.
  *
  * Open Cloud keys, one per job (decision D4; each falls back to the shared key):
@@ -16,19 +22,24 @@
  *                         pre-publish gate) and doctor's place check, also
  *                         universe.place.luau-execution-session:read + :write
  *   OPENCLOUD_DEPLOY_KEY  deploy messages, the shared seq (seqstore.ts), the durable heads and the signed settings
- *                         record (settings.ts: `settings`, `fleet setup`, `access push`):
+ *                         record (settings.ts: `settings`, `backend setup`, `access push`):
  *                         universe-messaging-service:publish; universe-datastores.objects:read, :create and :update
  *   OPENCLOUD_PLACE_KEY   kernel deploy / restore (manual only)      universe.place:write (publish), asset:read (place
  *                         versions). Downloading the place needs legacy-asset:manage, which can't be granted to API
  *                         keys today: kernel deploy takes --place-file (a copy downloaded in Studio)
- *   shared fallback: TYPETORCH_API_KEY, OPENCLOUD_API_KEY or ROBLOX_API_KEY
+ *   shared: OPENCLOUD_API_KEY (ROBLOX_API_KEY is an alias). Since CLI 0.9 TYPETORCH_API_KEY is never a Roblox key.
+ *
+ * The TypeTorch backend (backend.ts): TYPETORCH_API_KEY = the backend's GAME key (write-only: game servers and the CLI's
+ * alerts post with it; it goes into the signed settings record), TYPETORCH_ADMIN_TOKEN = its admin token (reads, the
+ * owner list; it never leaves this PC). Old names, read for one release with a warning: TYPETORCH_FLEET_TOKEN (the admin
+ * token) and TYPETORCH_FLEET_INGEST_TOKEN (the game key).
  */
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
-/** The shared key variables, in priority order (used by every job without its own key). */
-export const API_KEY_VARS = ["TYPETORCH_API_KEY", "OPENCLOUD_API_KEY", "ROBLOX_API_KEY"] as const;
+/** The shared Open Cloud key variables, in priority order (used by every job without its own key). */
+export const API_KEY_VARS = ["OPENCLOUD_API_KEY", "ROBLOX_API_KEY"] as const;
 
 export type KeyJob = "assets" | "deploy" | "place";
 
@@ -48,12 +59,27 @@ export const ENV_FILE_VAR = "TYPETORCH_ENV_FILE";
 /** Extra variable names (comma-separated) that child processes may inherit; keys are never passed. */
 export const CHILD_ENV_VAR = "TYPETORCH_CHILD_ENV";
 
+/** The TypeTorch backend's game key (write-only; what game servers hold in the settings record). */
+export const BACKEND_KEY_VAR = "TYPETORCH_API_KEY";
+/** The TypeTorch backend's admin token (reads, the owner list). */
+export const ADMIN_TOKEN_VAR = "TYPETORCH_ADMIN_TOKEN";
+/** CLI 0.7-0.8 names of the backend's two secrets: still read in CLI 0.9 (one release), with a warning. */
+export const LEGACY_BACKEND_VARS: Readonly<Record<string, typeof BACKEND_KEY_VAR | typeof ADMIN_TOKEN_VAR>> = {
+	TYPETORCH_FLEET_TOKEN: ADMIN_TOKEN_VAR,
+	TYPETORCH_FLEET_INGEST_TOKEN: BACKEND_KEY_VAR,
+};
+
 /** CLI 0.2's plaintext signing seed variable: no longer read, but still a secret wherever it is left. */
 export const LEGACY_SIGNING_KEY_VAR = "TYPETORCH_SIGNING_KEY";
 /** Variables holding secrets: never passed to a child, always redacted. */
-/** The fleet API's tokens (fleet.ts): admin (reads) and the write-only ingest token game servers get. */
-export const FLEET_TOKEN_VARS = ["TYPETORCH_FLEET_TOKEN", "TYPETORCH_FLEET_INGEST_TOKEN"] as const;
-export const SECRET_VARS: readonly string[] = [...API_KEY_VARS, ...Object.values(JOB_KEY_VARS), LEGACY_SIGNING_KEY_VAR, ...FLEET_TOKEN_VARS];
+export const SECRET_VARS: readonly string[] = [
+	...API_KEY_VARS,
+	...Object.values(JOB_KEY_VARS),
+	BACKEND_KEY_VAR,
+	ADMIN_TOKEN_VAR,
+	...Object.keys(LEGACY_BACKEND_VARS),
+	LEGACY_SIGNING_KEY_VAR,
+];
 
 /** The signing key files (keyfiles.ts). Read from the real environment only; never passed to a child process. */
 export const KEY_FILE_VAR = "TYPETORCH_KEY_FILE";
@@ -91,18 +117,16 @@ export function parseDotEnv(text: string): Record<string, string> {
 	return values;
 }
 
-/** The `.env` files from `startDir` up to the filesystem root, nearest first. */
-export function dotEnvChain(startDir: string): string[] {
-	const files: string[] = [];
-	let dir = resolve(startDir);
+/** The game repo for a folder: the nearest folder at or above it that holds typetorch.json, else the folder itself. */
+export function gameDirFor(startDir: string): string {
+	const start = resolve(startDir);
+	let dir = start;
 	while (true) {
-		const file = join(dir, ".env");
-		if (existsSync(file)) files.push(file);
+		if (existsSync(join(dir, "typetorch.json"))) return dir;
 		const parent = dirname(dir);
-		if (parent === dir) break;
+		if (parent === dir) return start;
 		dir = parent;
 	}
-	return files;
 }
 
 /** `~/x` → home; relative paths against `base`. */
@@ -129,9 +153,11 @@ export interface ApiKeyInfo {
 }
 
 export interface SettingsOptions {
-	/** Where the `.env` search starts (default: the working directory). */
+	/** The game repo whose `.env` is read (default: `gameDirFor(startDir)`). */
+	gameDir?: string;
+	/** Where the typetorch.json search starts (default: the working directory). */
 	startDir?: string;
-	/** `--env-file`; wins over TYPETORCH_ENV_FILE. */
+	/** `--env-file`; wins over TYPETORCH_ENV_FILE. Read instead of the game's `.env`. */
 	envFile?: string;
 	/** The real environment (default: process.env). */
 	env?: Record<string, string | undefined>;
@@ -140,55 +166,81 @@ export interface SettingsOptions {
 export class Settings {
 	/** Every env file read, highest priority first. */
 	readonly files: string[] = [];
-	/** The explicit env file (flag or TYPETORCH_ENV_FILE), resolved; undefined when none is configured. */
+	/** The game repo whose `.env` is the default env file. */
+	readonly gameDir: string;
+	/** The game repo's `.env` (read unless an override replaces it; it may not exist). */
+	readonly dotEnv: string;
+	/** The override (`--env-file`, else TYPETORCH_ENV_FILE from the real environment), resolved; it replaces `.env`. */
 	readonly envFile?: string;
+	/** Where the override came from. */
+	readonly envFileFrom?: "--env-file" | typeof ENV_FILE_VAR;
 	readonly envFileMissing: boolean = false;
+	/** The CLI 0.8 layout: a `TYPETORCH_ENV_FILE=` line inside the game's `.env` (followed for one more release). */
+	readonly declaredEnvFile?: string;
+	readonly declaredEnvFileMissing: boolean = false;
+	/** One-line notes about old layouts (names and paths, never values); the entry point prints them. */
+	readonly warnings: string[] = [];
 	private readonly values = new Map<string, Setting>();
 	private readonly real: Record<string, string | undefined>;
-	/** Values Bun auto-loaded from the working directory's .env files (they look like real env vars). */
-	private readonly autoLoaded = new Map<string, Setting>();
+	/** Values Bun auto-loaded from the working directory's .env files (they look like real env vars, but aren't). */
+	private readonly autoLoaded = new Map<string, string[]>();
 
 	constructor(options: SettingsOptions = {}) {
-		const startDir = resolve(options.startDir ?? process.cwd());
 		this.real = options.env ?? process.env;
-		const chain = dotEnvChain(startDir);
-		const chainValues = chain.map((file) => ({ file, values: readEnvFile(file) }));
+		if (!options.env) for (const [key, values] of autoLoadedDotEnv(process.cwd())) this.autoLoaded.set(key, values);
+		this.gameDir = resolve(options.gameDir ?? gameDirFor(options.startDir ?? process.cwd()));
+		this.dotEnv = join(this.gameDir, ".env");
 
-		// The explicit env file: --env-file, else TYPETORCH_ENV_FILE from the environment or the nearest .env.
-		let envFile: string | undefined;
-		if (options.envFile) envFile = expandPath(options.envFile, process.cwd());
-		else if (this.real[ENV_FILE_VAR]?.trim()) envFile = expandPath(this.real[ENV_FILE_VAR]!.trim(), process.cwd());
-		else {
-			const declared = chainValues.find((c) => c.values?.[ENV_FILE_VAR]?.trim());
-			if (declared) envFile = expandPath(declared.values![ENV_FILE_VAR].trim(), dirname(declared.file));
+		// The override: --env-file, else TYPETORCH_ENV_FILE from the real environment (both relative to the working dir).
+		const fromEnv = this.realValue(ENV_FILE_VAR);
+		let override: string | undefined;
+		if (options.envFile?.trim()) {
+			override = expandPath(options.envFile.trim(), process.cwd());
+			this.envFileFrom = "--env-file";
+		} else if (fromEnv) {
+			override = expandPath(fromEnv, process.cwd());
+			this.envFileFrom = ENV_FILE_VAR;
 		}
-		this.envFile = envFile;
-		const sources: { file: string; values?: Record<string, string> }[] = [];
-		if (envFile) {
-			if (existsSync(envFile)) sources.push({ file: envFile, values: readEnvFile(envFile) });
+		const sources: string[] = [];
+		if (override) {
+			this.envFile = override;
+			if (existsSync(override)) sources.push(override);
 			else this.envFileMissing = true;
+		} else {
+			const declared = readEnvFile(this.dotEnv)?.[ENV_FILE_VAR]?.trim();
+			if (declared) {
+				// CLI 0.8 recommended a repo .env holding only this line, pointing at a file outside the repo.
+				this.declaredEnvFile = expandPath(declared, this.gameDir);
+				if (existsSync(this.declaredEnvFile)) sources.push(this.declaredEnvFile);
+				else this.declaredEnvFileMissing = true;
+				this.warnings.push(
+					`${this.dotEnv} names another env file (${ENV_FILE_VAR}=...${this.declaredEnvFileMissing ? ", which doesn't exist" : ""}). CLI 0.9 still reads it, for this release only: move its keys into the game repo's .env and delete that line (or set ${ENV_FILE_VAR} in the environment)`,
+				);
+			}
+			sources.push(this.dotEnv);
 		}
-		sources.push(...chainValues);
-		for (const { file, values } of sources) {
+		for (const file of sources) {
+			const values = readEnvFile(file);
 			if (!values || this.files.includes(file)) continue;
 			this.files.push(file);
 			for (const [key, value] of Object.entries(values)) {
+				if (key === ENV_FILE_VAR) continue;
 				if (!this.values.has(key) && value !== "") this.values.set(key, { value, source: file });
 			}
 		}
-		// Bun loads .env, .env.local, ... from the working directory into process.env by itself. Those are local
-		// secrets, not environment: remember them so they are reported by file and never passed to children.
-		if (!options.env) {
-			for (const [key, setting] of autoLoadedDotEnv(process.cwd())) this.autoLoaded.set(key, setting);
-		}
+	}
+
+	/** A value from the real environment, unless Bun only auto-loaded it from a `.env*` file in the working directory. */
+	private realValue(name: string): string | undefined {
+		const real = this.real[name]?.trim();
+		if (!real) return undefined;
+		if (this.autoLoaded.get(name)?.some((value) => value.trim() === real)) return undefined;
+		return real;
 	}
 
 	get(name: string): Setting | undefined {
-		const real = this.real[name]?.trim();
-		if (real) {
-			const auto = this.autoLoaded.get(name);
-			return { value: real, source: auto && auto.value === real ? auto.source : "environment" };
-		}
+		const real = this.realValue(name);
+		if (real) return { value: real, source: "environment" };
 		return this.values.get(name);
 	}
 
@@ -198,6 +250,13 @@ export class Settings {
 			if (found) return { ...found, name };
 		}
 		return undefined;
+	}
+
+	/** Where values come from, in words: "the environment, then <file>". */
+	describeSources(): string {
+		if (this.envFile) return `the environment, then ${this.envFile}${this.envFileMissing ? " (missing)" : ""} (${this.envFileFrom}, read instead of ${this.dotEnv})`;
+		const named = this.declaredEnvFile ? `${this.declaredEnvFile}${this.declaredEnvFileMissing ? " (missing)" : ""} (named in it), then ` : "";
+		return `the environment, then ${named}${this.dotEnv}${existsSync(this.dotEnv) ? "" : " (missing)"}`;
 	}
 
 	/** The key for a job: its own variable, else the shared one. Without a job: the shared key only. */
@@ -213,10 +272,11 @@ export class Settings {
 	requireApiKey(job: KeyJob): ApiKeyInfo {
 		const found = this.apiKey(job);
 		if (found) return found;
-		const where = this.envFile
-			? `${this.envFile}${this.envFileMissing ? " (missing)" : ""}, the environment, or a .env file here or in a parent folder`
-			: `the environment, a ${ENV_FILE_VAR} file, or a .env file here or in a parent folder`;
-		throw new Error(`no Open Cloud API key for ${job}: set ${JOB_KEY_VARS[job]} (scopes ${JOB_SCOPES[job]}) or ${API_KEY_VARS.join(", ")} in ${where}`);
+		// CLI 0.8 read TYPETORCH_API_KEY as the shared Open Cloud key: say what changed instead of only "no key".
+		const renamed = this.get(BACKEND_KEY_VAR)
+			? `. ${BACKEND_KEY_VAR} is set, but since CLI 0.9 it is the TypeTorch backend's game key, never a Roblox key: if it holds your Open Cloud key, rename it to OPENCLOUD_API_KEY`
+			: "";
+		throw new Error(`no Open Cloud API key for ${job}: set ${JOB_KEY_VARS[job]} (scopes ${JOB_SCOPES[job]}) or ${API_KEY_VARS.join(" / ")} in ${this.describeSources()}${renamed}`);
 	}
 
 	/** Every secret value known (for redaction): the keys, and seeds read from key files. */
@@ -238,15 +298,18 @@ function readEnvFile(file: string): Record<string, string> | undefined {
 	}
 }
 
-function autoLoadedDotEnv(cwd: string): Map<string, Setting> {
-	const found = new Map<string, Setting>();
+/** Key -> values found in the working directory's `.env*` files (what Bun loads into process.env by itself). */
+function autoLoadedDotEnv(cwd: string): Map<string, string[]> {
+	const found = new Map<string, string[]>();
 	let names: string[] = [];
 	try {
 		names = readdirSync(cwd).filter((name) => /^\.env(\..+)?$/.test(name));
 	} catch {}
 	for (const name of names) {
-		const values = readEnvFile(join(cwd, name)) ?? {};
-		for (const [key, value] of Object.entries(values)) if (!found.has(key)) found.set(key, { value, source: join(cwd, name) });
+		for (const [key, value] of Object.entries(readEnvFile(join(cwd, name)) ?? {})) {
+			if (!found.has(key)) found.set(key, []);
+			found.get(key)!.push(value);
+		}
 	}
 	return found;
 }

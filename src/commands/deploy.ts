@@ -19,7 +19,7 @@ import { finishRelease, modeFor, reportProposal, waitAfterRelease } from "./appr
 import { gatePolicy, skipReason } from "../cloudtest.ts";
 import { describeProtocol } from "../protocol.ts";
 import { checkRollout, parseRollout } from "../rollout.ts";
-import { describeShared, DS_READ_SCOPE, DS_WRITE_SCOPES, readSharedSeq, type SharedSeq } from "../seqstore.ts";
+import { describeShared, readSharedSeq, type SharedSeq } from "../seqstore.ts";
 import { describeRollbackSetting, rollbackSetting, waitSeconds, WAIT_FLAGS } from "./fleet.ts";
 import { describeHealth } from "../health.ts";
 import { describeTest, GATE_FLAGS, gateRelease } from "./test.ts";
@@ -48,9 +48,6 @@ export const deployFlags = {
 	message: "string",
 	force: "boolean",
 	"no-registry": "boolean",
-	"require-shared-seq": "boolean",
-	/** Deprecated alias of --require-shared-seq (0.7.0 before the DataStore seq source). */
-	"require-registry": "boolean",
 	"moderation-timeout": "string",
 	propose: "boolean",
 	"proposed-by": "string",
@@ -151,15 +148,7 @@ export async function deployCommand(args: ParsedArgs) {
 	if (meta.health) info(dim(`  health      ${describeHealth(meta.health)}`));
 	const branch = branchFlag ?? meta.branch;
 
-	// CI: a machine without the deployment log must not guess a seq (servers ignore a seq below the one they applied).
 	const shared = await sharedRead;
-	const requireShared = flagBool(args, "require-shared-seq") || flagBool(args, "require-registry");
-	if (flagBool(args, "require-registry")) warn("--require-registry is now --require-shared-seq (the DataStore seq)");
-	if (requireShared && !shared?.readable) {
-		throw new Error(
-			`--require-shared-seq: no shared seq source is readable, so this machine can't know the next seq (servers ignore a seq at or below the one they applied). Give the deploy key ${DS_READ_SCOPE} (and ${DS_WRITE_SCOPES} to claim seqs atomically). DataStore: ${shared?.error ?? "no deploy key"}`,
-		);
-	}
 	const history = withLocal(proj);
 	// Two payloads with the same id but other bytes (a hash6 collision) must not both go out.
 	assertNoIdCollision(meta, [...history.rows, ...history.uploads]);

@@ -3,7 +3,10 @@
  * every ConfigService key TypeTorch used (`TypeTorch`, `TypeTorchFleet`, `TypeTorchAccess`, `TypeTorchAnalytics`).
  *
  *   { v: 1, seq, at, body, sig, sigF }
- *   body = JSON text: { defaultBranch?, channels?, access?, fleet?, analytics?, game? }
+ *   body = JSON text: { defaultBranch?, channels?, access?, backend?, fleet?, analytics?, game? }
+ *   backend = { url, key, analytics?: { flushSeconds?, recordShare? } } (CLI 0.9, plans/21; `typetorch backend setup`).
+ *   For one release the CLI also writes the old `fleet` = { url, token } and `analytics` = { backend: "duckdb", events,
+ *   token, ... } derived from it (`withLegacySections`): kernels 0.3.8/0.3.9 and their frameworks read only those.
  *   sig / sigF = Ed25519 by the main and the fallback prod key over  tt1settings \n seq \n at \n body
  *
  * The body is signed as the exact text stored, so the kernel (Settings.luau) verifies the bytes it reads: no canonical
@@ -27,10 +30,15 @@ export const SETTINGS_CANONICAL_VERSION = "tt1settings";
 /** Kernel Constants.SETTINGS_BODY_MAX / SETTINGS_GAME_MAX. */
 export const SETTINGS_BODY_MAX = 32_768;
 export const SETTINGS_GAME_MAX = 16_384;
-export const SETTINGS_FIELDS = ["defaultBranch", "channels", "access", "fleet", "analytics", "game"] as const;
-export type SettingsField = (typeof SETTINGS_FIELDS)[number];
 /** A game key: what `TypeTorch.liveConfig(key)` reads. */
 export const GAME_KEY_PATTERN = /^[A-Za-z0-9_.:/-]{1,64}$/;
+/** The backend's analytics dials (`backend.analytics`), the framework's bounds (framework src/analytics/settings.ts). */
+export const FLUSH_SECONDS_BOUNDS = [5, 300] as const;
+export const RECORD_SHARE_BOUNDS = [0, 1] as const;
+/** The kernel's token rule for `fleet.token` (Fleet.luau): 8-1000 visible characters. */
+export const BACKEND_KEY_MIN = 8;
+export const BACKEND_KEY_MAX = 1000;
+export const INGEST_PATH = "/v1/ingest";
 
 export class SettingsError extends Error {
 	override name = "SettingsError";
@@ -42,13 +50,68 @@ export interface AccessLists {
 	devBadgeId: number | null;
 }
 
+export interface BackendAnalytics {
+	flushSeconds?: number;
+	recordShare?: number;
+}
+
+/** The backend section (CLI 0.9): one URL and the game key for heartbeats, reports, alerts, events and errors. */
+export interface BackendSection {
+	url: string;
+	/** The backend's write-only game key (TYPETORCH_API_KEY). Never the admin token. */
+	key: string;
+	analytics?: BackendAnalytics;
+}
+
 export interface SettingsBody {
 	defaultBranch?: string;
 	channels?: Record<string, "prod" | "dev">;
 	access?: AccessLists;
+	backend?: BackendSection;
+	/** Before kernel 0.4: what the kernel's Fleet module reads. CLI 0.9 derives it from `backend`. */
 	fleet?: { url: string; token: string };
+	/** Before framework 0.4: the analytics sink settings. CLI 0.9 derives it from `backend` (other fields kept). */
 	analytics?: Record<string, unknown>;
 	game?: Record<string, unknown>;
+}
+
+/**
+ * The body with `backend` set and, for one release, the old `fleet` and `analytics` sections derived from it (kernels
+ * 0.3.8/0.3.9 and frameworks before 0.4 read only those). The old analytics section keeps its other fields (experiments,
+ * techEvery: the framework's live dials), and its sink becomes the backend's DuckDB ingest.
+ */
+export function withBackend(body: SettingsBody, backend: BackendSection): SettingsBody {
+	const url = backend.url.replace(/\/+$/, "");
+	const section: BackendSection = { url, key: backend.key, ...(backend.analytics && Object.keys(backend.analytics).length ? { analytics: { ...backend.analytics } } : {}) };
+	const previous = { ...(body.analytics ?? {}) };
+	for (const sink of ["backend", "events", "recordings", "token", "identity"]) delete previous[sink];
+	return {
+		...body,
+		backend: section,
+		fleet: { url, token: backend.key },
+		analytics: { ...previous, backend: "duckdb", events: `${url}${INGEST_PATH}`, token: backend.key, ...(section.analytics ?? {}) },
+	};
+}
+
+/** The backend section's problems (shape and the kernel's rules), or []. */
+export function backendProblems(value: unknown): string[] {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return ["backend must be { url, key, analytics? }"];
+	const raw = value as Record<string, unknown>;
+	const problems: string[] = [];
+	if (typeof raw.url !== "string" || !/^https:\/\/[A-Za-z0-9.-]+[A-Za-z0-9:\-./_]*$/.test(raw.url) || raw.url.length > 300) problems.push("backend.url must be the backend's https base address");
+	if (typeof raw.key !== "string" || raw.key.length < BACKEND_KEY_MIN || raw.key.length > BACKEND_KEY_MAX || /[\s\u0000-\u001f]/.test(raw.key)) {
+		problems.push(`backend.key must be ${BACKEND_KEY_MIN}-${BACKEND_KEY_MAX} visible characters`);
+	}
+	if (raw.analytics !== undefined) {
+		const a = raw.analytics as Record<string, unknown>;
+		if (typeof a !== "object" || a === null || Array.isArray(a)) problems.push("backend.analytics must be { flushSeconds?, recordShare? }");
+		else {
+			const inRange = (v: unknown, [low, high]: readonly [number, number]) => typeof v === "number" && Number.isFinite(v) && v >= low && v <= high;
+			if (a.flushSeconds !== undefined && !inRange(a.flushSeconds, FLUSH_SECONDS_BOUNDS)) problems.push(`backend.analytics.flushSeconds must be ${FLUSH_SECONDS_BOUNDS[0]}-${FLUSH_SECONDS_BOUNDS[1]}`);
+			if (a.recordShare !== undefined && !inRange(a.recordShare, RECORD_SHARE_BOUNDS)) problems.push(`backend.analytics.recordShare must be ${RECORD_SHARE_BOUNDS[0]}-${RECORD_SHARE_BOUNDS[1]}`);
+		}
+	}
+	return problems;
 }
 
 export interface SettingsRecord {
@@ -97,6 +160,7 @@ export function bodyProblems(body: SettingsBody): string[] {
 	if (body.channels !== undefined) {
 		for (const [branch, channel] of Object.entries(body.channels)) if (channel !== "prod" && channel !== "dev") problems.push(`channels.${branch} must be prod or dev`);
 	}
+	if (body.backend !== undefined) problems.push(...backendProblems(body.backend));
 	if (body.game !== undefined) {
 		const size = Buffer.byteLength(JSON.stringify(body.game), "utf8");
 		if (size > SETTINGS_GAME_MAX) problems.push(`game is ${size} bytes of JSON, over ${SETTINGS_GAME_MAX}`);
@@ -170,12 +234,24 @@ export function describeFields(body: SettingsBody): string[] {
 		const revoked = Object.keys(body.access.revoked ?? {}).length;
 		lines.push(`access         ${members} member${members === 1 ? "" : "s"} (${owners} owner${owners === 1 ? "" : "s"}), ${revoked} revoked${body.access.devBadgeId ? `, dev badge ${body.access.devBadgeId}` : ""}`);
 	}
-	if (body.fleet) {
-		let host = "?";
+	const hostOf = (url: unknown) => {
 		try {
-			host = new URL(body.fleet.url).host;
-		} catch {}
-		lines.push(`fleet          ${host} (token hidden)`);
+			return new URL(String(url)).host;
+		} catch {
+			return "?";
+		}
+	};
+	if (body.backend) {
+		const dials = body.backend.analytics;
+		const extra = [
+			dials?.flushSeconds !== undefined ? `flush ${dials.flushSeconds} s` : undefined,
+			dials?.recordShare !== undefined ? `record ${Math.round(dials.recordShare * 100)}%` : undefined,
+		].filter(Boolean);
+		lines.push(`backend        ${hostOf(body.backend.url)} (key hidden)${extra.length ? `, analytics ${extra.join(", ")}` : ""}`);
+	}
+	if (body.fleet) {
+		const same = body.backend && body.fleet.url === body.backend.url && body.fleet.token === body.backend.key;
+		lines.push(`fleet          ${hostOf(body.fleet.url)} (token hidden)${same ? " = backend, for kernels before 0.4" : body.backend ? " DIFFERS from backend: run typetorch backend setup" : ""}`);
 	}
 	if (body.analytics) {
 		const backend = typeof body.analytics.backend === "string" ? body.analytics.backend : "?";

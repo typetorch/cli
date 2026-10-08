@@ -9,7 +9,7 @@
  *   "defaultBranch": "prod",
  *   "branches": { "main": "prod" },           // git branch -> TypeTorch branch
  *   "channels": { "prod": "prod" },           // TypeTorch branch -> channel (unlisted: prod for defaultBranch, else dev)
- *   "members": { "123456789": "owner" },      // userId -> owner | dev (kernel 0.3.4: no admin role)
+ *   "members": { "123456789": "owner" },      // userId -> owner | dev
  *   "revoked": { "123": true },               // optional
  *   "devBadgeId": null,
  *   "kernel": "node_modules/@typetorch/kernel", // optional, folder with place.project.json
@@ -19,24 +19,25 @@
  *   "revokedKeys": ["<base64>"],                // = the key asset's RevokedKeys (optional)
  *   "fallbackPublicKey": "<base64>",            // the fallback key; kernel deploy stamps it as FallbackPublicKey
  *   "keyAssetId": 123,                           // the key asset; kernel deploy stamps it as KeyAssetId
+ *   // The TypeTorch backend (`typetorch backend setup` writes it; CLI 0.8 called it "fleet", still read with a warning):
+ *   "backend": { "url": "https://backend.example.com" },
  *   // Safety thresholds (health.ts; kernel 0.3.7), all optional:
  *   "health": { "errors": 3, "window": 30, "rollback": true, "dev": { "rollback": false } }, // stamped on each build
  *   "autoRollback": { "failedPct": 20 }          // deploy --wait rolls the branch back at this % of failed servers
  * }
+ * Secrets never go here: they live in the game repo's `.env` (env.ts).
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { validateAutoRollback, validateHealth, type AutoRollbackConfig, type HealthConfig } from "./health.ts";
-import { isRecord, setJsonFields } from "./json.ts";
+import { isRecord, removeJsonField, setJsonFields } from "./json.ts";
 import { branchNameError, isChannel, type Channel } from "./naming.ts";
 import { isTestVectorKey, publicKeyError, publicKeyListProblems } from "./signing.ts";
 
 export const CONFIG_FILE = "typetorch.json";
-/** Kernel 0.3.4 / framework 0.3.2: two roles. The old "admin" is read as "dev" (least privilege), with a warning. */
+/** Kernel 0.3.4 / framework 0.3.2: two roles (CLI 0.9 refuses the old "admin"; 0.7.x-0.8.x read it as dev). */
 export const ROLES = ["owner", "dev"] as const;
 export type Role = (typeof ROLES)[number];
-/** The warning `typetorch doctor` (and every command) shows for a member with the old role "admin". */
-export const ADMIN_ROLE_WARNING = "role admin no longer exists: use owner or dev";
 
 export interface ProjectConfig {
 	project: string;
@@ -60,8 +61,11 @@ export interface ProjectConfig {
 	fallbackPublicKey?: string;
 	/** The key asset (`keys init`); stamped on the kernel as KeyAssetId. */
 	keyAssetId?: number;
-	/** The fleet API (heartbeats, deploy reports, alerts; `typetorch fleet setup`). Tokens come from the environment. */
-	fleet?: { url: string };
+	/**
+	 * The TypeTorch backend (fleet: heartbeats, deploy reports, alerts; analytics; the owner list), what the CLI talks
+	 * to. `typetorch backend setup` writes it. The keys come from the game repo's .env (backend.ts).
+	 */
+	backend?: { url: string };
 	/** The health window's thresholds, stamped on every build (health.ts; kernel 0.3.7 reads them). */
 	health?: HealthConfig;
 	/** deploy --wait's auto-rollback threshold (health.ts). */
@@ -96,13 +100,13 @@ const KNOWN_KEYS = new Set([
 	"revoked",
 	"devBadgeId",
 	"kernel",
-	"signingPublicKey", // CLI 0.2-0.3 (one key; removed in 0.4): ignored
 	"approval",
 	"signingPublicKeys",
 	"revokedKeys",
 	"fallbackPublicKey",
 	"keyAssetId",
-	"fleet",
+	"backend",
+	"fleet", // CLI 0.8's name for "backend": read with a warning (CLI 0.9 only)
 	"health",
 	"autoRollback",
 ]);
@@ -177,11 +181,9 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 		else
 			for (const [userId, role] of Object.entries(raw.members)) {
 				if (!/^\d+$/.test(userId)) errors.push(`"members": "${userId}" is not a user id`);
-				if (role === "admin") {
-					warnings.push(`"members.${userId}": ${ADMIN_ROLE_WARNING} (treated as dev)`);
-					members[userId] = "dev";
-				} else if (!ROLES.includes(role as Role)) errors.push(`"members.${userId}" must be one of ${ROLES.join(", ")}`);
-				else members[userId] = role as Role;
+				if (!ROLES.includes(role as Role)) {
+					errors.push(`"members.${userId}" must be one of ${ROLES.join(", ")}${role === "admin" ? ` (the admin role is gone since kernel 0.3.4: use "dev", or "owner")` : ""}`);
+				} else members[userId] = role as Role;
 			}
 	}
 
@@ -228,12 +230,22 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			errors.push(`"fallbackPublicKey" is also in "signingPublicKeys"; the fallback must be a separate key pair`);
 		}
 	}
-	let fleet: { url: string } | undefined;
-	if (raw.fleet !== undefined) {
+	let backend: { url: string } | undefined;
+	if (raw.backend !== undefined) {
+		const url = isRecord(raw.backend) ? raw.backend.url : undefined;
+		const problem = backendUrlError(url);
+		if (problem) errors.push(`"backend.url" ${problem}`);
+		else backend = { url: url as string };
+		if (raw.fleet !== undefined) warnings.push(`"fleet" is ignored: "backend" replaces it (CLI 0.9); delete "fleet"`);
+	} else if (raw.fleet !== undefined) {
+		// CLI 0.8's name, read for one release. `typetorch backend setup` renames it.
 		const url = isRecord(raw.fleet) ? raw.fleet.url : undefined;
-		const problem = fleetUrlError(url);
+		const problem = backendUrlError(url);
 		if (problem) errors.push(`"fleet.url" ${problem}`);
-		else fleet = { url: url as string };
+		else {
+			backend = { url: url as string };
+			warnings.push(`"fleet" is now "backend" (CLI 0.9): rename "fleet": { "url": ... } to "backend": { "url": ... } (typetorch backend setup does it)`);
+		}
 	}
 	let keyAssetId: number | undefined;
 	if (raw.keyAssetId !== undefined) {
@@ -274,7 +286,7 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			...(Array.isArray(raw.revokedKeys) ? { revokedKeys: raw.revokedKeys as string[] } : {}),
 			...(typeof raw.fallbackPublicKey === "string" ? { fallbackPublicKey: raw.fallbackPublicKey } : {}),
 			...(keyAssetId !== undefined ? { keyAssetId } : {}),
-			...(fleet ? { fleet } : {}),
+			...(backend ? { backend } : {}),
 			...(health ? { health } : {}),
 			...(autoRollback ? { autoRollback } : {}),
 		},
@@ -318,31 +330,33 @@ export function loadProject(configPath?: string, cwd: string = process.cwd()): P
 	return { root: dirname(path), configPath: path, config, warnings };
 }
 
-export type KeyConfigField = "signingPublicKeys" | "revokedKeys" | "fallbackPublicKey" | "keyAssetId" | "fleet";
+export type KeyConfigField = "signingPublicKeys" | "revokedKeys" | "fallbackPublicKey" | "keyAssetId" | "backend";
 
-/** The fleet API's base URL: https (game servers only reach https), no credentials in it. */
-export function fleetUrlError(value: unknown): string | undefined {
-	if (typeof value !== "string" || value.length > 300) return "must be the fleet API's https URL";
+/** The backend's base URL: https (game servers only reach https; http on localhost for this PC), no credentials in it. */
+export function backendUrlError(value: unknown): string | undefined {
+	if (typeof value !== "string" || value.length > 300) return "must be the backend's https URL";
 	let url: URL;
 	try {
 		url = new URL(value);
 	} catch {
-		return "must be the fleet API's https URL";
+		return "must be the backend's https URL";
 	}
 	if (url.protocol !== "https:" && !(url.protocol === "http:" && ["localhost", "127.0.0.1"].includes(url.hostname))) return "must be https (Roblox game servers only reach https endpoints)";
-	if (url.username || url.password) return "must not hold credentials (the tokens come from TYPETORCH_FLEET_TOKEN / TYPETORCH_FLEET_INGEST_TOKEN)";
+	if (url.username || url.password) return "must not hold credentials (the keys come from the game repo's .env: TYPETORCH_API_KEY, TYPETORCH_ADMIN_TOKEN)";
 	return undefined;
 }
 
 /**
  * Writes key fields into the project's typetorch.json (only those fields change; formatting stays) and refreshes
- * `proj.config`. Refuses to write a file that would not validate.
+ * `proj.config`. Refuses to write a file that would not validate. Writing `backend` also drops CLI 0.8's `fleet`.
  */
 export function updateProjectConfig(proj: Project, updates: Partial<Record<KeyConfigField, unknown>>) {
-	const text = readFileSync(proj.configPath, "utf8");
+	let text = readFileSync(proj.configPath, "utf8");
+	if (updates.backend !== undefined) text = removeJsonField(text, "fleet");
 	const next = setJsonFields(text, updates);
-	const { config, errors } = validateConfig(JSON.parse(next));
+	const { config, errors, warnings } = validateConfig(JSON.parse(next));
 	if (!config) throw new ConfigError(`refusing to write an invalid ${proj.configPath}:\n  - ${errors.join("\n  - ")}`);
 	writeFileSync(proj.configPath, next);
 	proj.config = config;
+	proj.warnings = warnings;
 }

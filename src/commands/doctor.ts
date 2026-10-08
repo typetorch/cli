@@ -1,18 +1,20 @@
 /**
- * `typetorch doctor`: tools, config, env file, API keys per job (never printed), the approval policy, the state dir,
- * the prod signing keys (keycheck.ts: both key files vs typetorch.json, the key asset and the place; mismatches warn),
- * and Open Cloud scopes, each probed with its job's key through harmless calls:
+ * `typetorch doctor`: tools, the Config section (every value the CLI reads and where it came from: typetorch.json, the
+ * game repo's .env, the environment, the settings record; secrets only as set / unset), API keys per job (never
+ * printed), the approval policy, the state dir, the prod signing keys (keycheck.ts: both key files vs typetorch.json, the
+ * key asset and the place; mismatches warn), the backend, and Open Cloud scopes, each probed with its job's key through
+ * harmless calls:
  *   assets       GET an operation that doesn't exist        404 = scope ok, 401/403 = missing
  *   messaging    publish to topic "TypeTorch/doctor"          200 = ok (no server listens to that topic)
  *   settings     GET DataStore TypeTorch entry "settings"    the signed settings record (kernel 0.3.8, plans/20): seq, age,
  *                                                             fields, and whether it verifies with your keys; missing or
  *                                                             not signed by your keys = warn
- *   fleet / analytics url, healthz, token   the endpoints IN that record, with the record's own token (endpoints.ts, the
- *                                                             same checks `fleet setup` and `settings set analytics` run
- *                                                             before signing): FAIL with a fix when the URL is wrong, the
- *                                                             server or tunnel doesn't answer /healthz within 5 s, or the
- *                                                             token is refused / is the admin token; typetorch.json fleet.url
- *                                                             is checked too and compared with the record's
+ *   backend      url, healthz, key, admin                    typetorch.json backend.url with TYPETORCH_API_KEY (role game)
+ *                                                             and TYPETORCH_ADMIN_TOKEN (role admin) (endpoints.ts, the
+ *                                                             checks `backend setup` runs before signing); the record's
+ *                                                             backend section too when it differs (its own key), or the old
+ *                                                             fleet / analytics sections of a record from CLI 0.8
+ *   owners       GET /v1/access (admin)                      the backend's owner list vs the signed record's owners
  *   datastore    GET DataStore TypeTorch entry "heads"         200/404 = ok, 401/403 = missing universe-datastores.objects:read
  *                                                             (the shared seq; :create/:update are checked by a deploy)
  *   datastore write SET DataStore TypeTorch entry "doctor"     200 = ok (a tiny {doctor, t} value), 401/403 = missing
@@ -29,19 +31,21 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type ParsedArgs, flagString } from "../args.ts";
 import { CONFIG_FILE, findProjectRoot, loadProject, type Project } from "../config.ts";
-import { JOB_KEY_VARS, JOB_SCOPES, settings, type KeyJob } from "../env.ts";
+import { ADMIN_TOKEN_VAR, API_KEY_VARS, BACKEND_KEY_VAR, CHILD_ENV_VAR, FALLBACK_KEY_FILE_VAR, JOB_KEY_VARS, JOB_SCOPES, KEY_FILE_VAR, LEGACY_BACKEND_VARS, settings, type KeyJob, type Settings } from "../env.ts";
 import { gitInfo } from "../git.ts";
-import { emitJson, green, info, isJson, red, yellow } from "../log.ts";
+import { bold, dim, emitJson, green, info, isJson, red, yellow } from "../log.ts";
 import { OpenCloud } from "../opencloud.ts";
-import { checkAnalyticsEndpoint, checkFleetEndpoint, type EndpointOptions, type EndpointReport } from "../endpoints.ts";
-import { FLEET_INGEST_TOKEN_VAR, FLEET_TOKEN_VAR } from "../fleet.ts";
-import { describeRollbackSetting, fleetFor, rollbackSetting } from "./fleet.ts";
+import { checkAnalyticsEndpoint, checkBackendEndpoint, checkFleetEndpoint, type EndpointOptions, type EndpointReport } from "../endpoints.ts";
+import { backendCredentials, backendUrl, getAccessList, ownersOf, type BackendCredentials } from "../backend.ts";
+import { httpFleetClient } from "../fleet.ts";
+import { safeText } from "../httphints.ts";
+import { describeRollbackSetting, rollbackSetting } from "./fleet.ts";
 import { describeHealth, effectiveHealth, HEALTH_DEFAULTS, HEALTH_KERNEL } from "../health.ts";
 import { withJob } from "../progress.ts";
 import { capture } from "../proc.ts";
 import { hasZstd, isBun, runtimeName } from "../runtime.ts";
 import { rojoBinary } from "../build.ts";
-import { describeFields, readSettings, verifySettingsRecord, type SettingsBody } from "../settings.ts";
+import { describeFields, readSettings, verifySettingsRecord, type SettingsBody, type SettingsRead } from "../settings.ts";
 import { DS_READ_SCOPE, DS_WRITE_SCOPES, HEADS_KEY, SEQ_DATASTORE } from "../seqstore.ts";
 import { DURABLE_SCOPES, NOT_DURABLE } from "../durablehead.ts";
 import { createHash } from "node:crypto";
@@ -61,36 +65,32 @@ function mark(status: Status): string {
 
 /**
  * The signed settings record (kernel 0.3.8, plans/20): read with the deploy key, verified with your keys (when they load).
- * Never shows a value (tokens).
+ * Never shows a value (keys). The record (when read) feeds the backend checks and the Config section.
  */
-async function settingsCheck(oc: OpenCloud, proj: Project, args: ParsedArgs, deps: DoctorDeps = {}): Promise<Check[]> {
+async function settingsCheck(oc: OpenCloud, proj: Project, args: ParsedArgs): Promise<{ checks: Check[]; read?: SettingsRead }> {
 	const name = "settings";
 	const read = await withJob(name, () => readSettings(oc, proj.config.universeId));
-	if (read.scopeMissing) return [{ name, status: "warn", detail: `can't read the settings record: the deploy key needs ${DS_READ_SCOPE} (${short(read.error ?? "")})` }];
-	if (read.error) return [{ name, status: "warn", detail: `reading the settings record failed: ${short(read.error)}` }];
+	if (read.scopeMissing) return { checks: [{ name, status: "warn", detail: `can't read the settings record: the deploy key needs ${DS_READ_SCOPE} (${short(read.error ?? "")})` }] };
+	if (read.error) return { checks: [{ name, status: "warn", detail: `reading the settings record failed: ${short(read.error)}` }] };
 	if (read.missing) {
-		return [{ name, status: "warn", detail: "no settings record: servers (kernel 0.3.8) use the defaults. Run typetorch settings push (and fleet setup, access push)" }];
+		return { checks: [{ name, status: "warn", detail: "no settings record: servers (kernel 0.3.8) use the defaults. Run typetorch settings push (and backend setup, access push)" }], read };
 	}
-	if (!read.record) return [{ name, status: "warn", detail: `the settings entry isn't a usable record (${read.problem}); servers ignore it. typetorch settings push --force replaces it` }];
+	if (!read.record) return { checks: [{ name, status: "warn", detail: `the settings entry isn't a usable record (${read.problem}); servers ignore it. typetorch settings push --force replaces it` }], read };
 	const fields = describeFields(read.body ?? {}).map((line) => line.split(/\s+/)[0]).join(", ") || "none";
 	let verified = "";
-	// The record's endpoints (fleet, analytics) are tested whether or not it verifies: servers that trust other keys
-	// refuse an unsigned one, but its address and token are still what a broken push would have left behind.
-	const endpoints = () => withJob("settings endpoints (fleet, analytics)", () => settingsEndpointChecks({ body: read.body ?? {}, configFleetUrl: proj.config.fleet?.url, ...deps }));
+	// The record's endpoints are tested (backendChecks) whether or not it verifies: servers that trust other keys refuse
+	// an unsigned one, but its address and key are still what a broken push would have left behind.
 	try {
 		const signer = loadSigner(proj, signingKeyPaths(proj, args));
 		const by = verifySettingsRecord(read.record, { main: signer.main.publicKey, fallback: signer.fallback.publicKey });
 		if (!by) {
-			return [
-				{ name, status: "warn", detail: `#${read.record.seq} (${read.record.at}) is NOT signed by your keys: servers that trust other keys refuse it. Rewrite it (typetorch settings push --force)` },
-				...(await endpoints()),
-			];
+			return { checks: [{ name, status: "warn", detail: `#${read.record.seq} (${read.record.at}) is NOT signed by your keys: servers that trust other keys refuse it. Rewrite it (typetorch settings push --force)` }], read };
 		}
 		verified = `, verified by your ${by === "sig" ? "main" : "fallback"} key`;
 	} catch {
 		verified = ", not checked (your signing keys don't load here)";
 	}
-	return [{ name, status: "ok", detail: `#${read.record.seq} written ${read.record.at}${verified}; fields: ${fields}` }, ...(await endpoints())];
+	return { checks: [{ name, status: "ok", detail: `#${read.record.seq} written ${read.record.at}${verified}; fields: ${fields}` }], read };
 }
 
 export interface DoctorDeps extends EndpointOptions {}
@@ -105,49 +105,198 @@ export function reportChecks(report: EndpointReport, label: string = report.targ
 }
 
 const sameUrl = (a: string, b: string) => a.replace(/\/+$/, "").toLowerCase() === b.replace(/\/+$/, "").toLowerCase();
+const hostOf = (url: string) => {
+	try {
+		return new URL(url).host;
+	} catch {
+		return url;
+	}
+};
+
+export interface BackendCheckInput extends EndpointOptions {
+	/** typetorch.json backend.url (what the CLI talks to). */
+	configUrl?: string;
+	creds: BackendCredentials;
+	/** The live settings record's body and seq, when it was read. */
+	body?: SettingsBody;
+	seq?: number;
+}
 
 /**
- * The endpoints in the live settings record, tested with the record's own tokens (never printed), plus
- * typetorch.json `fleet.url` compared with the record's. The same checks `fleet setup` and `settings set analytics`
- * run before they sign anything, so a record written some other way (an old CLI, a hand edit, a server whose tunnel
- * restarted since) still gets caught.
+ * The backend, end to end (plans/21 B and E): typetorch.json backend.url with your keys (url, healthz, the game key's
+ * role, the admin token's role, the fleet API's server count); the live record's backend section (its own key, when
+ * it differs from yours) or the old fleet / analytics sections of a CLI 0.8 record; and the backend's owner list
+ * (GET /v1/access) against the signed record's owners. The same checks `backend setup` runs before it signs anything,
+ * so a record written some other way (an old CLI, a backend whose tunnel restarted since) still gets caught.
  */
-export async function settingsEndpointChecks(input: { body: SettingsBody; configFleetUrl?: string } & EndpointOptions): Promise<Check[]> {
-	const { body } = input;
+export async function backendChecks(input: BackendCheckInput): Promise<Check[]> {
 	const options: EndpointOptions = { fetch: input.fetch, timeoutMs: input.timeoutMs };
+	const { creds, body, configUrl } = input;
 	const checks: Check[] = [];
-	const [fleet, analytics] = await Promise.all([
-		body.fleet ? checkFleetEndpoint({ url: body.fleet.url, token: body.fleet.token, ...options }) : undefined,
-		body.analytics ? checkAnalyticsEndpoint(body.analytics, options) : undefined,
-	]);
-	if (fleet) checks.push(...reportChecks(fleet));
-	else if (input.configFleetUrl) {
-		checks.push({ name: "fleet", status: "warn", detail: `typetorch.json lists fleet.url ${input.configFleetUrl}, but the live settings record has no fleet section: game servers report nowhere. Run typetorch fleet setup` });
-	} else checks.push({ name: "fleet", status: "info", detail: "the settings record has no fleet section: game servers post no heartbeats (typetorch fleet setup)" });
-	if (analytics) checks.push(...reportChecks(analytics));
-	else checks.push({ name: "analytics", status: "info", detail: "the settings record has no analytics section: game servers send no analytics (typetorch settings set analytics -)" });
-	if (body.fleet && input.configFleetUrl && typeof body.fleet.url === "string" && !sameUrl(body.fleet.url, input.configFleetUrl)) {
-		let recordHost = body.fleet.url;
-		let fileHost = input.configFleetUrl;
-		try {
-			recordHost = new URL(body.fleet.url).host;
-			fileHost = new URL(input.configFleetUrl).host;
-		} catch {}
-		checks.push({
-			name: "fleet url mismatch",
-			status: "warn",
-			detail: `typetorch.json fleet.url (${fileHost}) differs from the live settings record's (${recordHost}): game servers use the record's, the CLI the file's. Run typetorch fleet setup --url <the right one> (bun run local does both for a new tunnel)`,
-		});
+	let adminOk = false;
+	if (configUrl) {
+		const report = await checkBackendEndpoint({ url: configUrl, key: creds.key?.value, admin: creds.admin?.value, requireKey: false, kernelRules: false, ...options });
+		for (const check of reportChecks(report, "backend")) {
+			if (check.name === "backend key" && !creds.key) check.detail = `no ${BACKEND_KEY_VAR}${creds.refused ? ` (${creds.refused})` : ""}: the CLI posts no alerts (auto_rollback, server_stuck) and backend setup can't run`;
+			if (check.name === "backend admin" && !creds.admin) {
+				check.status = "warn";
+				check.detail = `no ${ADMIN_TOKEN_VAR}: servers, report, alerts, --wait (auto-rollback) and the owner list are off`;
+			}
+			checks.push(check);
+		}
+		adminOk = report.steps.some((step) => step.step === "admin" && step.ok && !step.skipped);
+		if (adminOk && creds.admin) {
+			try {
+				const servers = await withJob("fleet API", () => httpFleetClient({ url: configUrl, adminToken: creds.admin!.value, fetch: input.fetch }).servers({}));
+				checks.push({ name: "fleet API", status: "ok", detail: `${hostOf(configUrl)}: ${servers.length} live server(s)` });
+			} catch (error) {
+				checks.push({ name: "fleet API", status: "warn", detail: (error as Error).message });
+			}
+		}
+	} else {
+		checks.push({ name: "backend", status: "info", detail: "typetorch.json has no backend.url: servers, report, alerts and --wait (auto-rollback) are off (typetorch backend setup --url <url>)" });
+	}
+
+	if (body) {
+		const record = body.backend;
+		if (record) {
+			const sameAddress = configUrl !== undefined && sameUrl(record.url, configUrl);
+			const sameKey = creds.key !== undefined && record.key === creds.key.value;
+			if (sameAddress && sameKey) {
+				checks.push({ name: "record backend", status: "ok", detail: `the settings record's backend is typetorch.json backend.url with your ${BACKEND_KEY_VAR} (checked above)` });
+			} else {
+				// Its own address and key, with the kernel's rules (game servers use these); no admin token goes there.
+				const report = await checkBackendEndpoint({ url: record.url, key: record.key, requireAdmin: false, kernelRules: true, ...options });
+				checks.push(...reportChecks(report, "record backend").filter((check) => check.name !== "record backend admin"));
+				if (configUrl && !sameAddress) {
+					checks.push({ name: "record backend url", status: "warn", detail: `typetorch.json backend.url (${hostOf(configUrl)}) differs from the settings record's (${hostOf(record.url)}): game servers use the record's, the CLI the file's. Run typetorch backend setup --url <the right one>` });
+				}
+				if (creds.key && !sameKey) checks.push({ name: "record backend key", status: "warn", detail: `the settings record's backend key differs from your ${BACKEND_KEY_VAR}: run typetorch backend setup` });
+			}
+			if (!body.fleet || body.fleet.url !== record.url || body.fleet.token !== record.key) {
+				checks.push({ name: "record fleet", status: "warn", detail: "the record's fleet section (what kernels before 0.4 read) doesn't match its backend section: run typetorch backend setup" });
+			}
+		} else if (body.fleet || body.analytics) {
+			// A record from CLI 0.8: fleet and analytics written separately.
+			const [fleet, analytics] = await Promise.all([
+				body.fleet ? checkFleetEndpoint({ url: body.fleet.url, token: body.fleet.token, ...options }) : undefined,
+				body.analytics ? checkAnalyticsEndpoint(body.analytics, options) : undefined,
+			]);
+			if (fleet) checks.push(...reportChecks(fleet, "record fleet"));
+			if (analytics) checks.push(...reportChecks(analytics, "record analytics"));
+			checks.push({ name: "record backend", status: "warn", detail: "the settings record has no backend section (written by CLI 0.8: fleet and analytics apart): run typetorch backend setup (kernel 0.4 reads backend)" });
+		} else {
+			checks.push({
+				name: "record backend",
+				status: configUrl ? "warn" : "info",
+				detail: `the settings record has no backend section: game servers post no heartbeats, events or errors${configUrl ? ` although typetorch.json lists ${hostOf(configUrl)}` : ""}. Run typetorch backend setup`,
+			});
+		}
+	}
+
+	// The owner list (only owners may Sign in with Roblox): the backend's copy vs the signed record.
+	const ownersUrl = configUrl ?? body?.backend?.url;
+	if (ownersUrl && creds.admin && (adminOk || !configUrl)) {
+		if (!body) checks.push({ name: "owners", status: "info", detail: "not compared: the settings record wasn't read (the deploy key)" });
+		else {
+			const signed = ownersOf(body.access);
+			try {
+				const copy = await withJob("owner list", () => getAccessList({ url: ownersUrl, adminToken: creds.admin!.value, fetch: input.fetch, timeoutMs: input.timeoutMs }));
+				const same = copy.owners.join(",") === signed.join(",");
+				if (copy.seq === null) {
+					checks.push({ name: "owners", status: "warn", detail: `the backend has no owner list yet (the signed record has ${signed.length}): run typetorch access push (until then nobody can Sign in with Roblox)` });
+				} else if (!same) {
+					checks.push({ name: "owners", status: "warn", detail: `the backend's owner list (${copy.owners.length}, from settings #${copy.seq}) differs from the signed record's (${signed.length}, #${input.seq ?? "?"}): run typetorch access push` });
+				} else {
+					const behind = input.seq !== undefined && copy.seq < input.seq ? ` (sent with settings #${copy.seq}; the record is #${input.seq}: same owners)` : "";
+					checks.push({ name: "owners", status: "ok", detail: `the backend's ${copy.owners.length} owner(s) match the signed record${behind}` });
+				}
+			} catch (error) {
+				checks.push({ name: "owners", status: "warn", detail: `GET /v1/access: ${(error as Error).message}` });
+			}
+		}
 	}
 	return checks;
 }
 
-/** typetorch.json `fleet.url` (what the CLI reads): the URL and /healthz, no token. */
-export async function configFleetChecks(url: string, options: EndpointOptions = {}): Promise<Check[]> {
-	const report = await checkFleetEndpoint({ url, token: undefined, kernelRules: false, ...options });
-	const failed = report.steps.find((step) => !step.ok);
-	if (failed) return [{ name: "typetorch.json fleet", status: "fail", detail: `${failed.step}: ${failed.detail}. Fix: ${failed.hint ?? "see the detail"}` }];
-	return [{ name: "typetorch.json fleet", status: "ok", detail: `${report.host}: url ok, ${report.steps.find((step) => step.step === "healthz")?.detail ?? "healthz ok"}` }];
+// The Config section --------------------------------------------------------------------------------------------------
+
+export interface ConfigRow {
+	name: string;
+	/** A path, a URL, a non-secret value, or "set" / "unset" for secrets. */
+	value: string;
+	/** Where it came from: "typetorch.json", "environment", an env file path, "settings record #n", "-". */
+	source: string;
+	note?: string;
+	status?: Status;
+}
+
+/** Non-secret variables shown with their value when set. */
+const PLAIN_VARS = ["TYPETORCH_STATE_DIR", "TYPETORCH_PROPOSED_BY", "TYPETORCH_ROJO", "TYPETORCH_LUNE", "TYPETORCH_DEV_SERVER", CHILD_ENV_VAR, KEY_FILE_VAR, FALLBACK_KEY_FILE_VAR];
+
+/** Every value the CLI reads, where it came from; secrets only as set / unset. */
+export function configRows(input: { proj?: Project; config: Settings; creds: BackendCredentials; read?: SettingsRead; configFlag?: string }): ConfigRow[] {
+	const { proj, config, creds, read } = input;
+	const rows: ConfigRow[] = [];
+	const where = (source: string) => (source === "environment" ? "environment" : source);
+	rows.push(proj ? { name: "typetorch.json", value: proj.configPath, source: input.configFlag ? "--config" : "found from the working directory" } : { name: "typetorch.json", value: "(not found)", source: "-", status: "fail" });
+	if (config.envFile) {
+		rows.push({ name: "env file", value: config.envFile, source: `${config.envFileFrom}, read instead of the game repo's .env`, status: config.envFileMissing ? "fail" : "ok", ...(config.envFileMissing ? { note: "does not exist" } : {}) });
+	} else {
+		const exists = config.files.includes(config.dotEnv);
+		rows.push({ name: "env file", value: config.dotEnv, source: "the game repo's .env", status: exists ? "ok" : "info", ...(exists ? {} : { note: "not there: secrets come from the environment only" }) });
+		if (config.declaredEnvFile) {
+			rows.push({ name: "env file (named)", value: config.declaredEnvFile, source: `${config.dotEnv} (TYPETORCH_ENV_FILE line)`, status: "warn", note: "CLI 0.9 still reads it, for one release: move its keys into the game repo's .env" });
+		}
+	}
+	if (proj) {
+		let legacy = false;
+		try {
+			const raw = JSON.parse(readFileSync(proj.configPath, "utf8")) as Record<string, unknown>;
+			legacy = raw.backend === undefined && raw.fleet !== undefined;
+		} catch {}
+		const url = backendUrl(proj);
+		rows.push({ name: "backend.url", value: url ?? "(not set)", source: url ? (legacy ? 'typetorch.json "fleet" (the old name)' : "typetorch.json") : "-", status: legacy ? "warn" : url ? "ok" : "info" });
+	}
+	const secret = (name: string, note?: string, status?: Status) => {
+		const found = config.get(name);
+		rows.push({ name, value: found ? "set" : "unset", source: found ? where(found.source) : "-", ...(note ? { note } : {}), ...(status ? { status } : {}) });
+	};
+	for (const name of API_KEY_VARS) if (name === "OPENCLOUD_API_KEY" || config.get(name)) secret(name, name === "OPENCLOUD_API_KEY" ? "the shared Open Cloud key" : "alias of OPENCLOUD_API_KEY");
+	for (const job of ["assets", "deploy", "place"] as const) if (config.get(JOB_KEY_VARS[job])) secret(JOB_KEY_VARS[job], `the ${job} job's own Open Cloud key`);
+	secret(BACKEND_KEY_VAR, creds.refused ?? "the backend's game key (write-only)", creds.refused ? "warn" : undefined);
+	secret(ADMIN_TOKEN_VAR, "the backend's admin token");
+	for (const [old, current] of Object.entries(LEGACY_BACKEND_VARS)) if (config.get(old)) secret(old, `old name of ${current} (read until the next release)`, "warn");
+	for (const name of PLAIN_VARS) {
+		const found = config.get(name);
+		if (found) rows.push({ name, value: found.value, source: where(found.source) });
+	}
+	if (read?.record && read.body) {
+		const seq = `settings record #${read.record.seq}`;
+		const backend = read.body.backend;
+		rows.push({ name: "record backend.url", value: backend?.url ?? read.body.fleet?.url ?? "(not set)", source: backend ? seq : read.body.fleet ? `${seq} (fleet section)` : "-" });
+		const key = backend?.key ?? read.body.fleet?.token;
+		rows.push({
+			name: "record backend.key",
+			value: key ? "set" : "unset",
+			source: key ? seq : "-",
+			...(key && creds.key ? { note: key === creds.key.value ? `= your ${BACKEND_KEY_VAR}` : `differs from your ${BACKEND_KEY_VAR}` } : {}),
+		});
+		const dials = backend?.analytics;
+		if (dials && Object.keys(dials).length) rows.push({ name: "record analytics", value: JSON.stringify(dials), source: seq });
+		rows.push({ name: "record owners", value: String(ownersOf(read.body.access).length), source: read.body.access ? seq : "-" });
+	} else if (read?.missing) rows.push({ name: "settings record", value: "(none)", source: "-" });
+	return rows;
+}
+
+function printConfig(rows: ConfigRow[]) {
+	info(bold("Config") + dim("  (secrets only as set / unset)"));
+	const width = Math.max(...rows.map((row) => row.name.length), 10);
+	for (const row of rows) {
+		const value = row.status === "warn" ? yellow(row.value) : row.status === "fail" ? red(row.value) : row.value;
+		info(`  ${row.name.padEnd(width)}  ${value}${row.source !== "-" ? dim(`  (${row.source})`) : ""}${row.note ? dim(`  ${row.note}`) : ""}`);
+	}
+	info("");
 }
 
 async function probe(
@@ -164,7 +313,7 @@ async function probe(
 	}
 }
 
-const short = (text: string) => text.replace(/\s+/g, " ").slice(0, 160);
+const short = (text: string) => safeText(text).slice(0, 160);
 
 /** The Asset Delivery probe (kernel deploy downloads the place to patch it): 200 = legacy-asset:manage present. */
 export function placeDownloadProbe(status: number, text: string): [Status, string] {
@@ -250,24 +399,23 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 		checks.push({ name: "rbxtsc", status: proj ? "fail" : "warn", detail: "node_modules/roblox-ts not installed (run `bun install`)" });
 	}
 
-	// Env file, keys (one per job, else the shared key), approval, state dir
+	// The env file (the Config section lists every value), keys (one per job, else the shared key), approval, state dir
 	const config = settings();
-	if (config.envFile) {
-		checks.push({
-			name: "env file",
-			status: config.envFileMissing ? "fail" : "ok",
-			detail: `${config.envFile}${config.envFileMissing ? " does not exist" : ""}`,
-		});
-	} else {
-		checks.push({ name: "env file", status: "warn", detail: `none (TYPETORCH_ENV_FILE); keys come from .env files here or above: ${config.files.join(", ") || "none"}. A file outside the repo is safer` });
-	}
+	if (config.envFileMissing) checks.push({ name: "env file", status: "fail", detail: `${config.envFile} (${config.envFileFrom}) does not exist` });
+	for (const warning of config.warnings) checks.push({ name: "env file", status: "warn", detail: warning });
+	const creds = backendCredentials(config);
+	for (const note of creds.notes) checks.push({ name: "backend keys", status: "warn", detail: note });
 	const keys: Record<KeyJob, ReturnType<typeof config.apiKey>> = { assets: config.apiKey("assets"), deploy: config.apiKey("deploy"), place: config.apiKey("place") };
 	for (const job of ["assets", "deploy", "place"] as const) {
 		const key = keys[job];
 		checks.push(
 			key
 				? { name: `key ${job}`, status: "ok", detail: `${key.name} from ${key.source}${key.dedicated ? "" : ` (shared; ${JOB_KEY_VARS[job]} would separate it)`}` }
-				: { name: `key ${job}`, status: job === "place" ? "warn" : "fail", detail: `none: set ${JOB_KEY_VARS[job]} (${JOB_SCOPES[job]}) or the shared TYPETORCH_API_KEY` },
+				: {
+						name: `key ${job}`,
+						status: job === "place" ? "warn" : "fail",
+						detail: `none: set ${JOB_KEY_VARS[job]} (${JOB_SCOPES[job]}) or the shared ${API_KEY_VARS[0]} in ${config.dotEnv}${config.get(BACKEND_KEY_VAR) && !config.apiKey() ? ` (${BACKEND_KEY_VAR} is the backend's game key since CLI 0.9, not a Roblox key: rename it if it holds your Open Cloud key)` : ""}`,
+					},
 		);
 	}
 	if (proj) {
@@ -337,27 +485,14 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 		checks.push(...keyChecks(facts));
 	}
 
-	// typetorch.json fleet.url: what the CLI reads (servers, report, alerts, --wait). The record's own fleet and analytics
-	// endpoints are checked together with the settings record, below.
-	if (proj?.config.fleet?.url) {
-		const url = proj.config.fleet.url;
-		checks.push(...(await withJob("fleet url (typetorch.json)", () => configFleetChecks(url, deps))));
-	}
-
-	// The fleet API (servers, report, alerts, --wait and auto-rollback); tokens are never printed.
+	// The settings record (deploy key) feeds the backend checks (its backend section, the signed owners) and the Config
+	// section; the backend is checked with typetorch.json backend.url and your keys whether or not the record could be read.
+	let read: SettingsRead | undefined;
 	if (proj) {
-		const setup = fleetFor(proj);
-		if (!setup.client) {
-			checks.push({ name: "fleet API", status: "info", detail: `${setup.missing}; servers/report/alerts and --wait (with auto-rollback) are off until then` });
-		} else {
-			try {
-				const servers = await withJob("fleet API", () => setup.client!.servers({}));
-				const ingest = setup.ingest ? "" : `; no ${FLEET_INGEST_TOKEN_VAR}: the CLI can't post alerts (auto_rollback, server_stuck) or run fleet setup`;
-				checks.push({ name: "fleet API", status: "ok", detail: `${new URL(setup.url).host}: ${servers.length} live server(s)${ingest}` });
-			} catch (error) {
-				checks.push({ name: "fleet API", status: "warn", detail: (error as Error).message });
-			}
-		}
+		const settingsPart = keys.deploy ? await settingsCheck(new OpenCloud(keys.deploy.key), proj, args) : { checks: [{ name: "settings", status: "warn" as Status, detail: "not read: no deploy key" }] };
+		read = "read" in settingsPart ? settingsPart.read : undefined;
+		checks.push(...settingsPart.checks);
+		checks.push(...(await withJob("backend", () => backendChecks({ configUrl: backendUrl(proj!), creds, body: read?.body, seq: read?.record?.seq, ...deps }))));
 	}
 
 	// Scopes, each with its job's key
@@ -404,7 +539,6 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 							? ["fail", `missing universe.place.luau-execution-session:read/:write on the assets key: the cloud test (always on for prod deploys) can't run (${status} ${short(text)})`]
 							: ["warn", `unexpected ${status} ${short(text)}`],
 			),
-			!deployKey ? skipped("settings", "deploy") : settingsCheck(client(deployKey), proj, args, deps),
 			!deployKey ? skipped("scope datastore", "deploy") : probe(
 				"scope datastore",
 				() => client(deployKey).request("GET", `/cloud/v2/universes/${universeId}/data-stores/${SEQ_DATASTORE}/entries/${HEADS_KEY}`),
@@ -412,7 +546,7 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 					status === 200 || status === 404
 						? ["ok", `${DS_READ_SCOPE} (the shared seq: the kernel's DataStore heads; ${DS_WRITE_SCOPES} for the seq counter are checked by the first deploy)`]
 						: scopeMissing(status)
-							? ["warn", `missing ${DS_READ_SCOPE} on the deploy key: other machines and CI can't share the seq, and CI deploys (--require-shared-seq) stop (${status} ${short(text)})`]
+							? ["warn", `missing ${DS_READ_SCOPE} on the deploy key: other machines can't share the seq, and the settings record can't be read (${status} ${short(text)})`]
 							: ["warn", `unexpected ${status} ${short(text)}`],
 			),
 			!deployKey ? skipped("scope datastore write", "deploy") : probe(
@@ -459,10 +593,12 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 		checks.push(...probes.flat());
 	}
 
+	const rows = configRows({ proj, config, creds, read, configFlag });
 	const failed = checks.filter((c) => c.status === "fail").length;
 	if (isJson()) {
-		emitJson({ ok: failed === 0, checks });
+		emitJson({ ok: failed === 0, config: rows, checks });
 	} else {
+		printConfig(rows);
 		for (const check of checks) info(`${mark(check.status)}  ${check.name.padEnd(20)} ${check.detail}`);
 		info(failed ? red(`${failed} problem(s)`) : green("all required checks passed"));
 	}
