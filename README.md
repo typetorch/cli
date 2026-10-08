@@ -111,7 +111,7 @@ get an allowlisted environment without any key. Keys are never printed.
 |---|---|---|
 | `OPENCLOUD_ASSETS_KEY` | payload uploads and moderation (`deploy`, `upload`); the cloud test (`test --cloud`, the prod gate); hot assets (`assets sync`, `assets status`); doctor's place check | `asset:read` (also on the place), `asset:write`; `universe.place.luau-execution-session:read` + `:write` for the cloud test, hot assets and doctor |
 | `OPENCLOUD_DEPLOY_KEY` | deploy messages and the shared seq (`deploy`, `rollback`, `promote`, `keys resign`); the signed settings record (`settings`, `access push`, `backend setup`, `keys rotate` / `resign`) | `universe-messaging-service:publish`; `universe-datastores.objects:read` (+ `:create` and `:update` to claim seqs, store the durable head and write the settings; see "The shared seq", "The durable head" and "Settings"). No `universe:write` / `universe:read`: nothing is kept in ConfigService since CLI 0.8 / kernel 0.3.8 |
-| `OPENCLOUD_PLACE_KEY` | `kernel deploy`, `kernel restore` (manual only) | `universe.place:write` (publish), `asset:read` (place versions). Downloading the place needs `legacy-asset:manage`, which **can't be granted to API keys today**: pass `--place-file` (a copy downloaded in Studio) |
+| `OPENCLOUD_PLACE_KEY` | `kernel deploy`, `kernel restore` (manual only) | `universe.place.luau-execution-session:read` + `:write` (the default luau engine: Luau Execution tasks patch and save the place) and `asset:read` (place versions); `universe.place:write` only to publish files (`--place-file`, `kernel restore <file>`, `--replace-place`). **Roblox has no API-key route for downloading place files**: Asset Delivery needs `legacy-asset:manage`, which can't be granted to API keys, and `universe.place:read` shipped but only covers the place version history (`/place-version-history-api/v1/{placeId}/history`, `/contributors`; a key limited to one experience even gets 403 "Scope must be configured to allow all resources" there) |
 | `OPENCLOUD_API_KEY` (alias `ROBLOX_API_KEY`) | any job without its own key | all of the above |
 | `TYPETORCH_API_KEY` | the TypeTorch backend's **game key** (write-only): `backend setup` checks it and writes it into the settings record (game servers post heartbeats, events and errors with it); the CLI posts alerts with it. **Since CLI 0.9 never a Roblox key**: an old value that still looks like one (the same as an Open Cloud variable, or the CLI 0.8 layout next to `TYPETORCH_FLEET_INGEST_TOKEN`) is refused with the rename to do | - |
 | `TYPETORCH_ADMIN_TOKEN` | the backend's **admin token**: `servers`, `report`, `alerts`, `--wait`, the owner list (`PUT /v1/access`); never goes into the record | - |
@@ -203,8 +203,11 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch branch ls` | branches, channels and live heads |
 | `typetorch settings status` / `get [field\|game.<key>]` / `set game.<key> <json\|->` / `set analytics -` / `unset <field>` / `push` | the signed settings record (see "Settings"); `push` writes `defaultBranch`, `channels` and dev access from typetorch.json. `--dry-run`, `--force`, `--no-ping` |
 | `typetorch access push [--dry-run]` / `access status` | typetorch.json `members`, `revoked`, `devBadgeId` into the settings record's `access` / compare it with typetorch.json |
-| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--place-file <file>] [--engine splice\|lune] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build) into the live place (backup, verify, y/N); `--replace-place --yes` for the template/test place only; see below |
+| `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--engine luau\|splice\|lune] [--place-file <file>] [--timeout <s>] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build) into the live place (check, y/N, save, verify); no download: Luau Execution tasks do it (the luau engine), or `--place-file` patches a Studio copy (splice); `--replace-place --yes` for the template/test place only; see below |
+| `typetorch kernel restore --version <n> [--dry-run] [--yes]` | republish place version `n` (a task on it calls SavePlaceAsync): the undo of a kernel deploy |
 | `typetorch kernel restore <file> [--dry-run] [--yes]` | publish a place file: a backup from `.typetorch/place-backups/`, or a dry run's patched file |
+| `typetorch backup refresh [--build <x>] [--dry-run] [--yes] [--force]` | make a proven-healthy prod build the place's backup build now (luau engine, only that slot); see "Backup build" |
+| `typetorch deploy --reupload <artifactId|#seq|commit|assetId> [--branch <b>]` | moderation took down an approved build: upload its kept bytes as a NEW asset, then deploy it (cloud test, approval, new seq, signed on prod); see "Backup build" |
 | `typetorch approve [id] [--import <dir>] [--test] [--skip-test <reason>] [--rollout <1-99>] [--wait [s]]` | approve a proposal: details, y/N, publish (interactive terminal only); prod-channel ones are signed. A prod deploy or promote proposal without a passed (or skipped) cloud test runs it before the y/N. `--import`: a proposal state dir from automation you run yourself (see "No GitHub Actions") |
 | `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
 | `typetorch servers [--branch] [--watch]` | live servers from the fleet API (see "Fleet") |
@@ -586,37 +589,87 @@ run yourself.
    the kernel's "Never an empty server"). It is a kernel slot, so every deploy replaces it. Without a kept payload for
    the prod head it warns and the place keeps the backup it has; `--no-backup` skips it. `doctor` shows the place's
    backup and its age (it warns past 30 days);
-4. **patches** the live place (the default, `--patch`):
-   - picks the base: the place's newest version, which must be published (newer unpublished saves are refused and
-     listed; `--base published` patches the last publish and leaves them in version history, `--base latest` ships
-     them, `--base <n>` takes that version);
-   - takes `--place-file <file> --base <version>` (a copy downloaded in Studio: File > Download a Copy), or downloads
-     it (Open Cloud Asset Delivery, whose scope `legacy-asset:manage` **can't be granted to API keys today**; Roblox
-     says `universe.place:read` is coming), and backs it up to `.typetorch/place-backups/<placeId>-v<n>.rbxl`;
-   - replaces only the **kernel slots** (the `TypeTorch*` children of services in the kernel's `place.project.json`:
-     `ServerScriptService.TypeTorchKernel`, `ReplicatedStorage.TypeTorchKernelShared`,
-     `ReplicatedFirst.TypeTorchKernelClient`, and from kernel 0.3.6 `ServerStorage.TypeTorchBackup`; every copy of
-     each) and applies the service settings that project declares (`HttpService.HttpEnabled`;
-     `ServerScriptService.LoadStringEnabled` only with `--loadstring`, which sets it to true for remote-claude's
-     `run_luau` on a test place: without the flag a patch keeps the place's own value and `--replace-place` publishes it
-     off). The default **splice** engine works
-     on the binary chunks: every chunk of a class the kernel doesn't use is copied byte for byte; the script and folder
-     classes are re-encoded with the game's own values moved as raw bytes; referents stay dense; references into the
-     old kernel are re-pointed to the new instance at the same path, or cleared (listed). `--engine lune` re-encodes
-     the whole place with Lune (rbx-dom) instead, which migrates some properties (Image -> ImageContent and others)
-     and drops a few: only for when the splice engine refuses;
-   - verifies twice: the CLI's binary reader (every instance outside the slots by path and class, no property chunk
-     lost, the slots equal to the kernel build) and Lune (every subtree outside the slots equal, every reference
-     pointing where it did, the slots and settings equal to the kernel build);
-   - writes `.typetorch/place-patches/<placeId>-v<n>-kernel-<version>.rbxl` and a JSON report, prints a summary (kernel
-     old -> new, scripts changed/added/removed per slot, settings, references, chunks copied), asks y/N (or `--yes`),
-     checks that nobody published meanwhile, and publishes. A place without a kernel needs `--install`. An active
-     Team Create session blocks the publish (409).
+4. **patches** the live place (the default, `--patch`): it changes ONLY the **kernel slots** (the `TypeTorch*`
+   children of services in the kernel's `place.project.json`: `ServerScriptService.TypeTorchKernel`,
+   `ReplicatedStorage.TypeTorchKernelShared`, `ReplicatedFirst.TypeTorchKernelClient`, and from kernel 0.3.6
+   `ServerStorage.TypeTorchBackup`; every copy of each) and the service settings that project declares
+   (`HttpService.HttpEnabled`; `ServerScriptService.LoadStringEnabled` only with `--loadstring`, which sets it to true
+   for remote-claude's `run_luau` on a test place: without the flag a patch keeps the place's own value and
+   `--replace-place` publishes it off). The base is the place's newest version, which must be published (newer
+   unpublished saves are refused and listed; `--base published` patches the last publish and leaves them in version
+   history, `--base latest` ships them, `--base <n>` takes that version). A place without a kernel needs `--install`.
+   An active Team Create session blocks the save. Roblox has **no API-key route for downloading place files**, so
+   there are two ways to get at the place:
+   - **`--engine luau` (the default without `--place-file`): no download.** The slots are built alone into
+     `.typetorch/kernel-slots.rbxm` (one Folder `TypeTorchKernelSlots`, a Folder per service, the slots; read back by
+     the CLI's own reader) and sent once as a Luau Execution **binary input** (at most 100 MiB; valid 15 minutes).
+     1. A **check task** on `/versions/<base>` deserializes it (SerializationService), reads the place's kernel,
+        takes the **outside manifest** twice (every top-level child of every service that isn't a slot: tree shape,
+        names, classes, attributes, tags, ObjectValue targets and script source hashes, plus the SHA-256 of its
+        SerializeInstancesAsync bytes; bytes that differ between the two reads count by the descriptor only), swaps
+        the slots, re-points ObjectValues that pointed into the old kernel (to the same path in the new one, or clears
+        them, listed), applies the settings (one a task can't write stops it: set it once in Studio), takes the
+        manifest again (anything changed stops it) and checks the slots and the identity attributes. It never calls
+        SavePlaceAsync (the script doesn't contain it). The CLI compares the task's view of the new slots with its own
+        reading of the `.rbxm` (instance and script counts, the script list hash), prints the summary and writes
+        `.typetorch/place-patches/<placeId>-kernel-<version>-luau.json`.
+     2. y/N (or `--yes`), then a check that nobody published since.
+     3. A **save task** on the same version repeats all of it (its outside manifest must equal the check's) and calls
+        `AssetService:SavePlaceAsync()`, which publishes (SaveWithoutPublish defaults to false).
+     4. The new version comes from the version list; a **verify task** on it checks the kernel identity, one copy of
+        each slot (same counts and script list) and the outside descriptor.
 
-   `--dry-run` does everything except the publish. `typetorch kernel restore <file> [--dry-run] [--yes]` publishes a
-   place file back: a backup (undo), or a dry run's patched file (publish exactly what was inspected).
-   `--replace-place --yes` publishes the whole kernel place instead and **wipes Studio/Team Create content** (the
-   template/test place only). The place version before and after go to `kernel-deploys.jsonl`.
+     Needs the place setting **"Allow place to be updated using Save Place API"** (Creator Hub > Creations > the
+     experience > Places > the place > **Permissions**, `create.roblox.com/dashboard/creations/experiences/<universeId>/places/<placeId>/permissions`;
+     per place, off for places made in Studio) and the place key's Luau Execution scopes. The API key's owner needs
+     edit rights on the place (group places: a role that can edit and publish the experience). Errors name the fix:
+     the setting, Team Create, a task timeout (`--timeout <s>`, 30-300, default 300), the 100 MiB input limit
+     (`--no-backup` leaves the backup build out), a rate limit (5 task creations a minute per key owner, 10 open tasks
+     per place: 429s wait and retry). The base version stays in version history: **undo with `typetorch kernel restore
+     --version <base>`** (a task on that version calls SavePlaceAsync, which publishes it again as the newest version).
+     *Unverified until the first live run:* the presigned upload is a PUT (`content-type: application/octet-stream`,
+     then none), SavePlaceAsync's exact error texts, whether a task may read script sources and write `HttpEnabled`.
+   - **`--place-file <file> --base <version>` (the splice engine): a copy downloaded in Studio** (File > Download a
+     Copy), backed up to `.typetorch/place-backups/<placeId>-v<n>.rbxl`. The **splice** engine works on the binary
+     chunks: every chunk of a class the kernel doesn't use is copied byte for byte; the script and folder classes are
+     re-encoded with the game's own values moved as raw bytes; referents stay dense; references into the old kernel
+     are re-pointed to the new instance at the same path, or cleared (listed). `--engine lune` re-encodes the whole
+     place with Lune (rbx-dom) instead, which migrates some properties (Image -> ImageContent and others) and drops a
+     few: only for when the splice engine refuses. It verifies twice: the CLI's binary reader (every instance outside
+     the slots by path and class, no property chunk lost, the slots equal to the kernel build) and Lune (every subtree
+     outside the slots equal, every reference pointing where it did, the slots and settings equal to the kernel
+     build); writes `.typetorch/place-patches/<placeId>-v<n>-kernel-<version>.rbxl` and a JSON report, prints a summary
+     (kernel old -> new, scripts changed/added/removed per slot, settings, references, chunks copied), asks y/N (or
+     `--yes`), checks that nobody published meanwhile, and publishes with the Place Publishing API
+     (`universe.place:write`). `--engine splice` without `--place-file` tries the Asset Delivery download, which API
+     keys can't do today (403, with this explanation).
+
+   `--dry-run` does everything except the save or publish. `typetorch kernel restore <file> [--dry-run] [--yes]`
+   publishes a place file back: a backup (undo of a splice deploy), or a dry run's patched file (publish exactly what
+   was inspected). `--replace-place --yes` publishes the whole kernel place instead and **wipes Studio/Team Create
+   content** (the template/test place only). The place version before and after go to `kernel-deploys.jsonl`.
+
+### Backup build
+
+Kernel 0.3.6 servers run `ServerStorage.TypeTorchBackup` only when the head, the last known good and the builds other
+servers run all fail. It should be at most one deploy behind:
+- **Automatic:** after `typetorch deploy`, `approve` or `promote` publishes build N+1 to the default (prod-channel) branch
+  at your terminal, the place's backup becomes build N once N is **proven healthy**: the fleet API has reports for its
+  seq with no failure or rollback, no server running it is failed or degraded, and it went out at least
+  `backup.healthyHours` ago (typetorch.json `"backup": { "refresh": "auto", "healthyHours": 3 }`; `"refresh": "off"`
+  turns it off). It uses the luau engine with ONLY the backup slot (check task, save task with SavePlaceAsync, verify
+  task; the rest of the place must not change). It never blocks or fails the deploy: unpublished saves, Team Create,
+  the "Save Place API" setting, an unproven build, no kept payload, no place key, or a non-interactive run each print
+  one line (`backup      not refreshed: ...`). A rollback never moves the backup.
+- **Now:** `typetorch backup refresh [--build <x>]` (default: the prod head; y/N or `--yes`; `--dry-run`; an unproven
+  build needs `--force`).
+- `doctor` shows the place's backup build and its age. Each save is a new place version: a project with hot assets
+  then loads them from their asset versions on new servers until the next `typetorch assets sync`.
+- **A build taken down by moderation:** `typetorch deploy --reupload <build>` uploads the exact bytes kept at upload
+  (`<state dir>/payloads`) as a NEW asset (uploads.jsonl `reuploadOf` = the old asset id), waits for moderation and
+  deploys it like any deploy (the cloud test, the approval policy: prod = your y/N or `typetorch approve`; a new seq,
+  signed on prod). The artifact id stays; servers on the old asset swap to the new copy. Then `typetorch backup
+  refresh` if the backup was that build.
 
 ## Develop
 

@@ -20,12 +20,18 @@
  *   datastore write SET DataStore TypeTorch entry "doctor"     200 = ok (a tiny {doctor, t} value), 401/403 = missing
  *                                                             :create/:update: deploys can't store the branch head
  *                                                             durably (durablehead.ts), so they reach only running servers
- *   place publish POST an EMPTY body                         400 = scope ok (body rejected), 403 = missing
+ *   place publish POST an EMPTY body                         400 = scope ok (body rejected), 403 = info (only the splice
+ *                                                             engine, `kernel restore <file>` and --replace-place publish
+ *                                                             files)
  *   fleet API     GET /v1/fleet/servers with the admin token   ok, or a warning (servers, report, alerts, --wait)
  *   luau exec     GET a task that doesn't exist               404 = :read ok, 401/403 = missing (test --cloud; :write
- *                                                             is checked by the first task)
- *   place download GET the place's Asset Delivery location    200 = ok, 403 = info: legacy-asset:manage can't be granted to
- *                                                             API keys today; kernel deploy takes --place-file instead
+ *                                                             is checked by the first task); probed with the assets key
+ *                                                             and again with the place key ("scope luau (place)": kernel
+ *                                                             deploy's luau engine, kernel restore --version)
+ *   place download GET the place's Asset Delivery location    200 = ok, 403 = info, as expected: Roblox has no API-key
+ *                                                             route for place files (legacy-asset:manage can't be granted;
+ *                                                             universe.place:read only covers the version history), so
+ *                                                             kernel deploy patches inside a Luau Execution task instead
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -56,6 +62,7 @@ import { accessStatus, accessWarning, describeAccess } from "../access.ts";
 import { loadSigner } from "../keyfiles.ts";
 import { declaresLoadstring } from "../kernelpatch.ts";
 import { resolveKernelDir } from "./kernel.ts";
+import { SAVE_SETTING_HELP } from "../kernel-luau.ts";
 
 export const doctorFlags = { ...KEY_FILE_FLAGS } as const;
 
@@ -299,6 +306,20 @@ function printConfig(rows: ConfigRow[]) {
 	info("");
 }
 
+/**
+ * The place key's Luau Execution probe (kernel deploy's luau engine and `kernel restore --version` run their tasks with
+ * it). The place setting SavePlaceAsync needs can't be read through Open Cloud: it is named so the owner can check it.
+ */
+export function placeLuauProbe(status: number, text: string, universeId: number, placeId: number): [Status, string] {
+	if (status === 404) {
+		return ["ok", `universe.place.luau-execution-session:read (kernel deploy's luau engine; :write is checked by its first task). Saving also needs the place setting ${SAVE_SETTING_HELP(universeId, placeId)}, which no API can read`];
+	}
+	if (status === 401 || status === 403) {
+		return ["warn", `missing universe.place.luau-execution-session:read/:write on the place key: \`typetorch kernel deploy\` (luau engine) and \`kernel restore --version\` can't run their tasks; only --place-file works (${status} ${short(text)})`];
+	}
+	return ["warn", `unexpected ${status} ${short(text)}`];
+}
+
 async function probe(
 	name: string,
 	fn: () => Promise<{ status: number; text: string }>,
@@ -315,13 +336,16 @@ async function probe(
 
 const short = (text: string) => safeText(text).slice(0, 160);
 
-/** The Asset Delivery probe (kernel deploy downloads the place to patch it): 200 = legacy-asset:manage present. */
+/**
+ * The Asset Delivery probe: 200 = legacy-asset:manage present (`kernel deploy --engine splice` could download the
+ * place). Expected today: 403. Roblox has no API-key route for place files, and the default luau engine needs none.
+ */
 export function placeDownloadProbe(status: number, text: string): [Status, string] {
-	if (status === 200) return ["ok", "legacy-asset:manage (the place file can be downloaded for `kernel deploy`)"];
+	if (status === 200) return ["ok", "legacy-asset:manage (the place file can be downloaded: `kernel deploy --engine splice` works without --place-file)"];
 	if (status === 401 || status === 403) {
 		return [
 			"info",
-			`no place download (${status}): it needs legacy-asset:manage, which can't be granted to API keys today. \`typetorch kernel deploy\` takes a copy instead: download one in Studio (File > Download a Copy) and pass --place-file <file> --base <version>`,
+			`no place download (${status}), as expected: Roblox has no API-key route for place files (legacy-asset:manage can't be granted to API keys; universe.place:read only covers the version history). \`typetorch kernel deploy\` patches the place inside a Luau Execution task instead (the luau engine); the splice engine takes a Studio copy: --place-file <file> --base <version>`,
 		];
 	}
 	// Never echo a 2xx body: it holds a presigned URL.
@@ -578,10 +602,19 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 					status === 400
 						? ["ok", "universe.place:write (empty body rejected with 400, as expected)"]
 						: scopeMissing(status)
-							? ["warn", `missing universe.place:write: \`typetorch kernel deploy\` won't work (${status} ${short(text)})`]
+							? ["info", `no universe.place:write (${status}): only \`kernel deploy --place-file\` (splice engine), \`kernel restore <file>\` and --replace-place publish files; the default luau engine saves through a Luau Execution task (${short(text)})`]
 							: status >= 500
 								? ["ok", `universe.place:write probably present (an empty body answered ${status}, not 403)`]
 								: ["warn", `unexpected ${status} ${short(text)}`],
+			),
+			!placeKey ? skipped("scope luau (place)", "place") : probe(
+				"scope luau (place)",
+				() =>
+					client(placeKey).request(
+						"GET",
+						`/cloud/v2/universes/${universeId}/places/${placeId}/versions/1/luau-execution-sessions/00000000-0000-0000-0000-000000000000/tasks/00000000-0000-0000-0000-000000000000`,
+					),
+				(status, text) => placeLuauProbe(status, text, universeId, placeId),
 			),
 			!placeKey ? skipped("scope place download", "place") : probe(
 				"scope place download",

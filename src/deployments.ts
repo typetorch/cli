@@ -113,6 +113,8 @@ export interface UploadRecord {
 	by?: string;
 	/** The payload's ProtocolHash (protocol.ts). */
 	protocolHash?: string;
+	/** `deploy --reupload`: the asset id these same bytes had before (taken down by moderation, or unavailable). */
+	reuploadOf?: number;
 }
 
 export function readUploads(dir: string, universeId?: number): UploadRecord[] {

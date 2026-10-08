@@ -82,7 +82,11 @@ export function chooseBase(versions: PlaceVersion[], base?: string): BaseChoice 
 	const newest = versions[0];
 	const newerThan = (n: number) => versions.filter((v) => v.version > n).map((v) => v.version);
 	if (base === undefined) {
-		if (newest.published || !newest.hasPublishedField) return { ok: true, version: newest.version, published: newest.published, skipped: [] };
+		// The Assets API sends `published: true` and LEAVES OUT false (verified live 2026-10-05), so a version without
+		// the field is unpublished as soon as any version in the list carries it. Only a list where none carries it (an
+		// API that doesn't report publishing) takes the newest as it is.
+		const reported = versions.some((v) => v.hasPublishedField);
+		if (newest.published || !reported) return { ok: true, version: newest.version, published: newest.published, skipped: [] };
 		const published = versions.find((v) => v.published);
 		const saves = published ? newerThan(published.version) : versions.map((v) => v.version);
 		return {

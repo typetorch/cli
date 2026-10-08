@@ -24,6 +24,7 @@ import { describeRollbackSetting, rollbackSetting, waitSeconds, WAIT_FLAGS } fro
 import { describeHealth } from "../health.ts";
 import { describeTest, GATE_FLAGS, gateRelease } from "./test.ts";
 import { widenCommand } from "./widen.ts";
+import { reuploadCommand } from "./reupload.ts";
 import { describeBuild } from "./build.ts";
 import {
 	channelFlag,
@@ -39,6 +40,7 @@ import {
 	withLocal,
 } from "./common.ts";
 import { makeEntry, messageFor } from "./release.ts";
+import { autoRefreshBackup } from "./backup.ts";
 
 export const deployFlags = {
 	branch: "string",
@@ -53,6 +55,8 @@ export const deployFlags = {
 	"proposed-by": "string",
 	rollout: "string",
 	widen: "string",
+	/** Re-upload an earlier build's kept payload as a NEW asset and deploy it (moderation took the old asset down). */
+	reupload: "string",
 	...GATE_FLAGS,
 	...WAIT_FLAGS,
 	...KEY_FILE_FLAGS,
@@ -97,6 +101,7 @@ export function checkChannelGuard(input: {
 
 export async function deployCommand(args: ParsedArgs) {
 	if (flagString(args, "widen") !== undefined) return widenCommand(args);
+	if (flagString(args, "reupload") !== undefined) return reuploadCommand(args);
 	const proj = project(args);
 	// Dev access lists reach servers only through `typetorch access push` (ConfigService TypeTorchAccess): say so when
 	// typetorch.json has members/revoked/devBadgeId that were never pushed, or changed since (a revoked dev stays a dev).
@@ -285,6 +290,8 @@ export async function deployCommand(args: ParsedArgs) {
 	);
 	if (!test) delete watch.timings.test;
 
+	// The build this deploy replaces: once proven healthy it becomes the place's backup (commands/backup.ts).
+	const previousHead = history.heads.get(branch);
 	const outcome = await finishRelease({
 		proj,
 		mode: decided.mode,
@@ -298,7 +305,7 @@ export async function deployCommand(args: ParsedArgs) {
 			changes,
 			force,
 			by,
-			from: history.heads.get(branch),
+			from: previousHead,
 			...(test ? { test } : {}),
 			...(rollout !== undefined ? { rollout } : {}),
 		},
@@ -328,7 +335,9 @@ export async function deployCommand(args: ParsedArgs) {
 		info(dim(`  ${formatTimings(timings)}`));
 	}
 	const fleet = await waitAfterRelease(proj, result, { seconds: wait, oc: deployer, branchChannel: targetChannel, threshold: rollback.threshold, thresholdSource: rollback.source, keyPaths });
+	// Fresh backups: the replaced build becomes the place's backup when proven healthy (never fails the deploy).
+	const backup = fleet?.autoRollback?.rolledBack ? undefined : await autoRefreshBackup({ proj, action: "deploy", branch, branchChannel: targetChannel, previous: previousHead });
 	if (isJson()) {
-		return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, assetName: name.name, timings, ...(fleet ? { fleet } : {}) });
+		return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, assetName: name.name, timings, ...(fleet ? { fleet } : {}), ...(backup ? { backup } : {}) });
 	}
 }

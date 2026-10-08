@@ -317,7 +317,8 @@ const made = Bun.spawnSync(["lune", "run", "make-game.luau"], { cwd: kernel, std
 check("Lune makes the stand-in game place", made.exitCode === 0, made.stderr.toString());
 const gamePlace = join(kernel, "game.rbxl");
 r = tt(["kernel", "deploy", "--kernel", kernel, "--dry-run", "--json"]);
-check("kernel deploy (patch) without a place key: refused after the build, naming the scopes", r.code === 1 && /no Open Cloud API key for place/.test(r.stderr) && /legacy-asset:manage/.test(r.stderr), r.stderr);
+check("kernel deploy (patch, luau engine) without a place key: refused after the build, naming the scopes", r.code === 1 && /no Open Cloud API key for place/.test(r.stderr) && /luau-execution-session/.test(r.stderr), r.stderr);
+check("the luau engine built the kernel slots .rbxm first", existsSync(join(dir, ".typetorch", "kernel-slots.rbxm")), r.stderr);
 check("the check ran (lune)", /files, 0 failed/.test(r.stderr), r.stderr);
 r = tt(["kernel", "deploy", "--kernel", kernel, "--place-file", gamePlace, "--dry-run", "--json"]);
 check(

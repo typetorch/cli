@@ -33,6 +33,7 @@ import { ROLLOUT_USAGE, WIDEN_USAGE } from "./rollout.ts";
 import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history.ts";
 import { approveCommand, approveFlags, proposalsCommand, proposalsFlags, rejectCommand, rejectFlags } from "./commands/approve.ts";
 import { kernelCommand, kernelFlags } from "./commands/kernel.ts";
+import { backupCommand, backupFlags } from "./commands/backup.ts";
 import { MIGRATE_USAGE, migrateCommand, migrateFlags } from "./commands/migrate.ts";
 import { keysCommand, keysFlags } from "./commands/keys.ts";
 import { pinCommand, pinFlags } from "./commands/pin.ts";
@@ -88,7 +89,7 @@ const COMMANDS: Record<string, Command> = {
 		flags: deployFlags,
 		run: deployCommand,
 		summary: "build, upload, approve and send to live servers",
-		usage: `typetorch deploy [--branch <b>] [--channel prod|dev] [--no-build] [--dry-run] [--message <text>] [--force]
+		usage: `typetorch deploy [--branch <b>] [--channel prod|dev] [--no-build] [--dry-run] [--message <text>] [--force] [--reupload <build>]
                  [--no-registry] [--moderation-timeout <s>] [--propose] [--proposed-by <who>]
                  [--key-file <path>] [--fallback-key-file <path>]
 
@@ -105,6 +106,12 @@ const COMMANDS: Record<string, Command> = {
   --no-registry  does nothing since CLI 0.8 (there is no ConfigService registry; accepted for old scripts)
   Prod-channel branches: the message is signed with both keys (sig + sigF) when it is published; the key files are
   checked before the upload. Dev-channel messages are unsigned. See \`typetorch keys\`.
+  --reupload <artifactId|#seq|commit|assetId>  moderation took down an approved build: upload the exact bytes it had
+                 (kept in <state dir>/payloads at upload) as a NEW asset, wait for moderation, then deploy it as usual
+                 (cloud test, approval, new seq, signed on prod). No rebuild; the artifact id stays. --branch picks the
+                 branch (default: the build's own). uploads.jsonl records reuploadOf = the old asset id
+  After a prod deploy of the default branch at your terminal, the place's backup build becomes the build it replaced
+  once that one is proven healthy (typetorch backup refresh; typetorch.json "backup"). Never fails the deploy.
 ${GATE_USAGE}
 ${WAIT_USAGE}
 ${ROLLOUT_USAGE}
@@ -172,14 +179,32 @@ ${WAIT_USAGE}`,
 		summary: "push members and revoked into the signed settings",
 		usage: ACCESS_USAGE,
 	},
+	backup: {
+		flags: backupFlags,
+		run: backupCommand,
+		summary: "refresh the place's backup build (the build servers run when nothing else can)",
+		usage: `typetorch backup refresh [--build <artifactId|#seq|commit|assetId>] [--dry-run] [--yes] [--force] [--timeout <s>]
+
+  Puts a prod build's kept payload into the place as ServerStorage.TypeTorchBackup (kernel 0.3.6+ runs it only when the
+  head, the last known good and the builds other servers run all fail). Default build: the prod head. Through the luau
+  engine with ONLY that slot: a check task, y/N (or --yes), a save task (SavePlaceAsync), a verify task; the rest of the
+  place must not change, and the same rules as kernel deploy apply (published base, Team Create, "Allow place to be
+  updated using Save Place API"). The build must be proven healthy: fleet reports for its seq with no failure or
+  rollback, no failed or degraded server running it, and live for backup.healthyHours (typetorch.json, default 3).
+  --force skips that proof.
+  Automatic: a prod deploy, approve or promote of the default branch at your terminal refreshes the backup to the build
+  it replaced once that one is proven (one line in the output, never an error). typetorch.json
+  "backup": { "refresh": "off" } turns that off. Records go to kernel-deploys.jsonl (backup-refreshed).`,
+	},
 	kernel: {
 		flags: kernelFlags,
 		run: kernelCommand,
-		summary: "install or update the kernel in the place; restore a backup",
-		usage: `typetorch kernel deploy [--patch] [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--place-file <file>]
-                        [--engine splice|lune] [--kernel <dir>] [--allow-dirty] [--allow-untagged] [--fallback-key-file <path>]
-                        [--no-backup] [--loadstring]
+		summary: "install or update the kernel in the place; restore an earlier version",
+		usage: `typetorch kernel deploy [--patch] [--dry-run] [--yes] [--install] [--base published|latest|<n>] [--engine luau|splice|lune]
+                        [--place-file <file>] [--timeout <s>] [--kernel <dir>] [--allow-dirty] [--allow-untagged]
+                        [--fallback-key-file <path>] [--no-backup] [--loadstring]
 typetorch kernel deploy --replace-place [--dry-run] [--yes] [--no-backup] [--loadstring]      (template/test place only: wipes Studio content)
+typetorch kernel restore --version <n> [--dry-run] [--yes] [--timeout <s>]
 typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
 
   1. lune run scripts/check.luau in the kernel dir  2. version (package.json = Constants.luau) + content hash, printed;
@@ -189,24 +214,35 @@ typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
   in <state dir>/payloads/<artifactId>.rbxm by every upload; API keys can't download assets) becomes the backup build,
   ServerStorage.TypeTorchBackup (a kernel slot, refreshed by every kernel deploy, both modes); servers run it only when
   nothing else can run. No kept payload: the place keeps its backup, with a warning. --no-backup skips it.
-  4. Patch (default): download the place's newest version (it must be published; --base published|latest|<n>),
-  back it up to .typetorch/place-backups/<placeId>-v<n>.rbxl, replace ONLY the kernel slots (the TypeTorch* children
-  of services in place.project.json) and its service settings (HttpEnabled; LoadStringEnabled only with --loadstring), verify (binary + Lune:
-  everything outside the slots unchanged), write .typetorch/place-patches/<placeId>-v<n>-kernel-<version>.rbxl, show a
-  summary, y/N (or --yes), check nobody published meanwhile, publish. A place without a kernel needs --install.
-  --dry-run       everything except the publish
+  4. Patch (default). Base: the place's newest version, which must be published (--base published|latest|<n>). Only
+  the kernel slots (the TypeTorch* children of services in place.project.json) and its service settings (HttpEnabled;
+  LoadStringEnabled only with --loadstring) change; everything outside the slots is checked unchanged. y/N (or --yes),
+  a check that nobody published meanwhile, then the place is saved. A place without a kernel needs --install.
+  --engine luau   (default without --place-file) no download: the slots go up as .typetorch/kernel-slots.rbxm (a Luau
+                  Execution binary input, max 100 MiB) to a task on the base version that patches the place in memory and
+                  reports (the check); after the y/N a second task repeats it and calls AssetService:SavePlaceAsync()
+                  (publishes); a third task verifies the new version. Needs the place setting "Allow place to be updated
+                  using Save Place API" (Creator Hub > the experience > Places > the place > Permissions) and no active
+                  Team Create session. Report: .typetorch/place-patches/<placeId>-kernel-<version>-luau.json.
+                  --timeout <s> per task (30-300, default 300)
+  --place-file    (splice engine, the default with a file) patch a local .rbxl downloaded in Studio (File > Download a
+                  Copy): back it up, splice the slots in byte by byte, verify (binary + Lune), write
+                  .typetorch/place-patches/<placeId>-v<n>-kernel-<version>.rbxl, publish (Place Publishing API);
+                  publishing also needs --base <the version it was taken from>
+  --engine lune   with --place-file: re-encode the whole place with Lune (rbx-dom) when the splice engine refuses;
+                  rbx-dom migrates some properties (Image -> ImageContent, ...) and drops a few, listed in the summary
+  --dry-run       everything except the save or publish (the luau check task never calls SavePlaceAsync)
   --loadstring    turn loadstring on (ServerScriptService.LoadStringEnabled = true), for remote-claude's run_luau (the test
-                  place); without it a patch leaves the place's value and --replace-place publishes it off
-  --place-file    patch a local .rbxl instead of downloading (Studio: File > Download a Copy); publishing also needs
-                  --base <the version it was taken from>
-  --engine lune   re-encode the whole place with Lune (rbx-dom) when the default splice engine refuses; rbx-dom migrates
-                  some properties (Image -> ImageContent, ...) and drops a few, listed in the summary
-  restore         publish a place file (a backup, or a dry run's patched file) as the new live version
-  Scopes (the place key): asset:read, universe.place:write (publish). Downloading the place needs legacy-asset:manage,
-  which can't be granted to API keys today: download a copy in Studio (File > Download a Copy) and pass
-  --place-file <file> --base <version>. Records go to
-  kernel-deploys.jsonl in the state dir. Kernel dir: --kernel, else typetorch.json "kernel", else
-  node_modules/@typetorch/kernel, else ../kernel.`,
+                  place); without it a patch leaves the place's value and --replace-place publishes it off. The property
+                  isn't scriptable, so a luau deploy that has to change it stops before saving: turn it on in Studio
+                  once (or use --place-file)
+  restore --version <n>  republish place version n (a task on it calls SavePlaceAsync): the undo of a luau deploy
+  restore <file>  publish a place file (a backup, or a dry run's patched file) as the new live version
+  Scopes (the place key): universe.place.luau-execution-session:read + :write and asset:read (luau engine, restore
+  --version); universe.place:write to publish files (--place-file, restore <file>, --replace-place). Roblox has no
+  API-key route for downloading place files (Asset Delivery needs legacy-asset:manage, which keys can't get;
+  universe.place:read only covers the version history). Records go to kernel-deploys.jsonl in the state dir. Kernel
+  dir: --kernel, else typetorch.json "kernel", else node_modules/@typetorch/kernel, else ../kernel.`,
 	},
 	approve: {
 		flags: approveFlags,

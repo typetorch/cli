@@ -23,7 +23,9 @@
  *   "backend": { "url": "https://backend.example.com" },
  *   // Safety thresholds (health.ts; kernel 0.3.7), all optional:
  *   "health": { "errors": 3, "window": 30, "rollback": true, "dev": { "rollback": false } }, // stamped on each build
- *   "autoRollback": { "failedPct": 20 }          // deploy --wait rolls the branch back at this % of failed servers
+ *   "autoRollback": { "failedPct": 20 },         // deploy --wait rolls the branch back at this % of failed servers
+ *   // The backup build in the place (kernel 0.3.6, refreshed by the luau engine; commands/backup.ts):
+ *   "backup": { "refresh": "auto", "healthyHours": 3 } // "off": only kernel deploy / typetorch backup refresh
  * }
  * Secrets never go here: they live in the game repo's `.env` (env.ts).
  */
@@ -70,6 +72,29 @@ export interface ProjectConfig {
 	health?: HealthConfig;
 	/** deploy --wait's auto-rollback threshold (health.ts). */
 	autoRollback?: AutoRollbackConfig;
+	/** The backup build's refresh (commands/backup.ts): after a prod deploy, the previous build once proven healthy. */
+	backup?: BackupConfig;
+}
+
+/** typetorch.json "backup". */
+export interface BackupConfig {
+	/** "auto" (default): a prod deploy or promote at your terminal refreshes the place's backup to the previous build. */
+	refresh: "auto" | "off";
+	/** How long the previous build must have run with no failure before it becomes the backup (hours, default 3). */
+	healthyHours: number;
+}
+
+export const BACKUP_DEFAULTS: BackupConfig = { refresh: "auto", healthyHours: 3 };
+
+/** Validates typetorch.json "backup": { refresh: "auto" | "off", healthyHours: 0-168 }. */
+export function validateBackup(raw: unknown): { backup?: BackupConfig; errors: string[] } {
+	if (!isRecord(raw)) return { errors: ['"backup" must be an object like { "refresh": "auto", "healthyHours": 3 }'] };
+	const errors: string[] = [];
+	for (const key of Object.keys(raw)) if (key !== "refresh" && key !== "healthyHours") errors.push(`"backup.${key}" is not a setting (refresh, healthyHours)`);
+	if (raw.refresh !== undefined && raw.refresh !== "auto" && raw.refresh !== "off") errors.push('"backup.refresh" must be "auto" or "off"');
+	if (raw.healthyHours !== undefined && !(typeof raw.healthyHours === "number" && raw.healthyHours >= 0 && raw.healthyHours <= 168)) errors.push('"backup.healthyHours" must be a number of hours from 0 to 168 (default 3)');
+	if (errors.length) return { errors };
+	return { backup: { refresh: (raw.refresh as BackupConfig["refresh"] | undefined) ?? BACKUP_DEFAULTS.refresh, healthyHours: (raw.healthyHours as number | undefined) ?? BACKUP_DEFAULTS.healthyHours }, errors };
 }
 
 export const APPROVAL_POLICIES = ["all", "prod", "none"] as const;
@@ -109,6 +134,7 @@ const KNOWN_KEYS = new Set([
 	"fleet", // CLI 0.8's name for "backend": read with a warning (CLI 0.9 only)
 	"health",
 	"autoRollback",
+	"backup",
 ]);
 
 function positiveInt(value: unknown): number | undefined {
@@ -259,6 +285,12 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 		health = checked.health;
 	}
 	let autoRollback: AutoRollbackConfig | undefined;
+	let backup: BackupConfig | undefined;
+	if (raw.backup !== undefined) {
+		const checked = validateBackup(raw.backup);
+		errors.push(...checked.errors);
+		backup = checked.backup;
+	}
 	if (raw.autoRollback !== undefined) {
 		const checked = validateAutoRollback(raw.autoRollback);
 		errors.push(...checked.errors);
@@ -289,6 +321,7 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			...(backend ? { backend } : {}),
 			...(health ? { health } : {}),
 			...(autoRollback ? { autoRollback } : {}),
+			...(backup ? { backup } : {}),
 		},
 	};
 }

@@ -182,7 +182,7 @@ export function keyChecks(facts: KeyFacts): Check[] {
 export function backupChecks(backup: KeyFacts["backup"], now = Date.now()): Check[] {
 	if (!backup) return [];
 	if (!backup.present) {
-		return [{ name: "place backup", status: "warn", detail: `${backup.source}: no ServerStorage.TypeTorchBackup (kernel 0.3.6+): a server that can load nothing moves its players to another server. Deploy prod from this machine, then \`typetorch kernel deploy\`` }];
+		return [{ name: "place backup", status: "warn", detail: `${backup.source}: no ServerStorage.TypeTorchBackup (kernel 0.3.6+): a server that can load nothing moves its players to another server. Deploy prod from this machine, then \`typetorch backup refresh\` (or \`typetorch kernel deploy\`)` }];
 	}
 	const age = backupAge(backup.at, now);
 	const what = `${backup.artifactId ?? "?"}${backup.seq !== undefined ? ` #${backup.seq}` : ""}${backup.branch ? ` (${backup.branch})` : ""}, baked ${age ? `${age.text} ago` : "at an unknown time"}${backup.modules !== undefined ? `, ${backup.modules} modules` : ""}`;
@@ -190,7 +190,7 @@ export function backupChecks(backup: KeyFacts["backup"], now = Date.now()): Chec
 		return [{ name: "place backup", status: "warn", detail: `${backup.source}: ${what} is ${backup.channel}-channel: servers refuse it (it must be a prod build); run \`typetorch kernel deploy\`` }];
 	}
 	if (!age || age.days > BACKUP_STALE_DAYS) {
-		return [{ name: "place backup", status: "warn", detail: `${backup.source}: ${what}: older than ${BACKUP_STALE_DAYS} days, it would serve old code against newer player data (your data version guard must refuse or migrate); refresh it with \`typetorch kernel deploy\`` }];
+		return [{ name: "place backup", status: "warn", detail: `${backup.source}: ${what}: older than ${BACKUP_STALE_DAYS} days, it would serve old code against newer player data (your data version guard must refuse or migrate); refresh it with \`typetorch backup refresh\` (a prod deploy at your terminal also refreshes it once the build it replaced is proven healthy)` }];
 	}
 	return [{ name: "place backup", status: "ok", detail: `${backup.source}: ${what}` }];
 }

@@ -20,15 +20,21 @@
  *      every kernel deploy) and `--replace-place` ships it too. Without a kept payload the slot isn't declared: the
  *      place keeps the backup it has, with a warning (`doctor` shows its artifact and age). `--no-backup` skips it.
  *   4. Publish, in one of two modes:
- *      - PATCH (default, `--patch`; plans/13 "Kernel deploy = patch, not replace", spike S12): download the place's
- *        current version (`--place-file`, a copy downloaded in Studio; or Open Cloud Asset Delivery, whose scope
- *        legacy-asset:manage can't be granted to API keys today), save it to
- *        `.typetorch/place-backups/<placeId>-v<n>.rbxl`, replace ONLY the kernel slots (the TypeTorch* children of
- *        services in the kernel's place.project.json) and the service settings it declares, keep everything else byte
- *        for byte (placepatch.ts), verify twice (the CLI's binary reader and Lune), write
- *        `.typetorch/place-patches/<placeId>-v<n>-kernel-<version>.rbxl`, show a summary, ask y/N (or --yes), check
- *        that nobody published meanwhile, publish. A place without a kernel needs --install. `--dry-run` stops before
- *        the publish. `typetorch kernel restore <file>` publishes a backup (or any place file) back.
+ *      - PATCH (default, `--patch`; plans/13 "Kernel deploy = patch, not replace", spike S12), with one of three engines:
+ *        - `luau` (the default without --place-file; kernel-luau.ts): no download. The kernel slots go up as a `.rbxm`
+ *          (binary input) to a Luau Execution task on the base version, which replaces ONLY the slots and the service
+ *          settings, checks that nothing outside them changed, and (after the y/N) a second task does the same and
+ *          calls AssetService:SavePlaceAsync(). Needs the place setting "Allow place to be updated using Save Place
+ *          API" and no active Team Create session. `typetorch kernel restore --version <n>` republishes version n.
+ *        - `splice` (the default with --place-file) / `lune`: patch a place FILE: `--place-file` (a copy downloaded in
+ *          Studio; Roblox has no API-key route for downloading place files), save it to
+ *          `.typetorch/place-backups/<placeId>-v<n>.rbxl`, replace ONLY the kernel slots (the TypeTorch* children of
+ *          services in the kernel's place.project.json) and the service settings it declares, keep everything else byte
+ *          for byte (placepatch.ts), verify twice (the CLI's binary reader and Lune), write
+ *          `.typetorch/place-patches/<placeId>-v<n>-kernel-<version>.rbxl`, show a summary, ask y/N (or --yes), check
+ *          that nobody published meanwhile, publish (Place Publishing API). `typetorch kernel restore <file>` publishes
+ *          a backup (or any place file) back.
+ *        A place without a kernel needs --install. `--dry-run` stops before anything is saved or published.
  *      - REPLACE (`--replace-place --yes`, for the template/test place only): publishes the whole kernel place, which
  *        wipes Studio/Team Create content.
  *      The place version before and after go to `<state dir>/kernel-deploys.jsonl`.
@@ -52,6 +58,8 @@ import { branchChannel } from "../naming.ts";
 import { RbxmError } from "../rbxm.ts";
 import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, noteRegistryFlags, readHistory, signingKeyPaths, type History } from "./common.ts";
 import { addBackupToProject, BACKUP_FILE, BACKUP_SLOT, BackupError, backupHead, backupRbxm, findKeptPayload, PAYLOADS_DIR, type BackupInfo } from "../payloads.ts";
+import { luauDeploy, luauRestore, type LuauDeps } from "../kernel-luau.ts";
+import { readSlotsRbxm, settingValues, slotsProject, TASK_TIMEOUT_MAX } from "../kernelpatch-task.ts";
 
 export const kernelFlags = {
 	kernel: "string",
@@ -74,6 +82,10 @@ export const kernelFlags = {
 	 * it (the test place). Without it a patch leaves the place's own value and --replace-place publishes it off.
 	 */
 	loadstring: "boolean",
+	/** `kernel restore --version <n>`: republish place version n (luau engine, no file). */
+	version: "string",
+	/** The luau engine's task timeout in seconds (default and maximum 300). */
+	timeout: "string",
 } as const;
 
 /** One bootstrap head: what the kernel trusts unsigned for that branch (plans/03 "Bootstrap heads"). */
@@ -299,9 +311,50 @@ function displayPath(root: string, path: string): string {
 	return (rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : path).replace(/\\/g, "/");
 }
 
-/** Scope hints for the place key's jobs in patch mode. */
-const DOWNLOAD_SCOPE_HINT =
-	"downloading the place needs the legacy-asset:manage scope, which can't be granted to API keys today (Roblox says universe.place:read is coming). Download a copy in Studio (File > Download a Copy) and pass --place-file <file> --base <version>";
+/** Why `--engine splice|lune` without `--place-file` can't download the place, and what to do instead. */
+export const DOWNLOAD_SCOPE_HINT =
+	"Roblox has no API-key route for downloading place files: Asset Delivery needs legacy-asset:manage, which can't be granted to API keys, and universe.place:read only covers the place version history (/place-version-history-api/v1/{placeId}/history and /contributors; a key limited to one experience even gets 403 \"Scope must be configured to allow all resources\" there). Use the default luau engine (drop --engine: it patches the place inside a Luau Execution task, no download), or download a copy in Studio (File > Download a Copy) and pass --place-file <file> --base <version>";
+
+/** The kernel slots `.rbxm` the luau engine sends to its task, and the Rojo project it is built from. */
+export const SLOTS_FILE = `${OUT_DIR}/kernel-slots.rbxm`;
+/** The kernel folder whose attributes identify the kernel. */
+export const IDENTITY_SLOT: SlotRef = { service: KERNEL_SLOT[0], name: KERNEL_SLOT[1] };
+
+/**
+ * Builds a slots project (kernelpatch-task.ts `slotsProject`, or the backup slot alone) with Rojo into `outFile`
+ * (relative to the game root) and reads it back with the CLI's own reader. Throws KernelCheckError when it can't be read.
+ */
+export async function buildSlotsRbxm(proj: Project, projectJson: unknown, slots: SlotRef[], identitySlot: SlotRef, outFile: string): Promise<{ bytes: Uint8Array; read: ReturnType<typeof readSlotsRbxm> }> {
+	const gen = outFile.replace(/\.rbxm$/, ".gen.project.json");
+	mkdirSync(join(proj.root, OUT_DIR), { recursive: true });
+	writeFileSync(join(proj.root, gen), JSON.stringify(projectJson, null, "\t"));
+	try {
+		await run([rojoBinary(), "build", gen, "-o", outFile], proj.root);
+	} finally {
+		rmSync(join(proj.root, gen), { force: true });
+	}
+	const bytes = new Uint8Array(readFileSync(join(proj.root, outFile)));
+	try {
+		return { bytes, read: readSlotsRbxm(bytes, slots, identitySlot) };
+	} catch (error) {
+		throw new KernelCheckError(`the slots build ${outFile} can't be read: ${(error as Error).message}`);
+	}
+}
+
+/** `--timeout <s>` for the luau engine's tasks: 30 to 300 s, default 300 (Roblox's maximum). */
+export function taskTimeout(args: ParsedArgs): number {
+	const raw = flagString(args, "timeout");
+	if (raw === undefined) return TASK_TIMEOUT_MAX;
+	if (!/^\d+$/.test(raw) || Number(raw) < 30 || Number(raw) > TASK_TIMEOUT_MAX) throw new UsageError(`--timeout must be a number of seconds from 30 to ${TASK_TIMEOUT_MAX} (Luau Execution's limit)`);
+	return Number(raw);
+}
+
+/** The luau engine's dependencies for a real run: the place key's Open Cloud client, the terminal, the log. */
+export function luauDeps(proj: Project): LuauDeps {
+	const io = interaction();
+	const stateDir = projectStateDir(proj);
+	return { oc: openCloud("place")!, interactive: io.interactive, confirm: (question) => io.confirm(question), record: (entry) => logKernel(stateDir, entry) };
+}
 
 export async function kernelCommand(args: ParsedArgs) {
 	const sub = args.positionals[0];
@@ -434,16 +487,79 @@ async function kernelDeploy(args: ParsedArgs) {
 	const replacePlace = flagBool(args, "replace-place");
 	if (replacePlace && flagBool(args, "patch")) throw new UsageError("--patch and --replace-place are two different modes; pick one");
 	if (replacePlace) {
-		for (const flag of ["install", "base", "engine", "place-file"]) {
+		for (const flag of ["install", "base", "engine", "place-file", "timeout"]) {
 			if (args.flags[flag] !== undefined) throw new UsageError(`--${flag} belongs to patch mode, not --replace-place`);
 		}
 	}
-	const engine = flagString(args, "engine") ?? "splice";
-	if (engine !== "splice" && engine !== "lune") throw new UsageError(`--engine must be "splice" or "lune", got "${engine}"`);
+	if (args.flags.version !== undefined) throw new UsageError("--version belongs to `kernel restore` (republish a place version)");
 	const placeFile = flagString(args, "place-file");
+	// The luau engine needs no place file; a place file is patched by the splice engine unless --engine lune says so.
+	const engine = flagString(args, "engine") ?? (placeFile ? "splice" : "luau");
+	if (engine !== "luau" && engine !== "splice" && engine !== "lune") throw new UsageError(`--engine must be "luau", "splice" or "lune", got "${engine}"`);
+	if (engine === "luau" && placeFile) throw new UsageError("--place-file patches a local file (the splice or lune engine); the luau engine patches the place inside a Luau Execution task and needs no file");
+	if (engine !== "luau" && args.flags.timeout !== undefined) throw new UsageError("--timeout is for the luau engine's tasks");
+	const timeout = engine === "luau" ? taskTimeout(args) : TASK_TIMEOUT_MAX;
 	const prepared = await prepareKernel(args);
 	if (replacePlace) return replacePlaceFlow(args, prepared);
+	if (engine === "luau") return luauFlow(args, prepared, timeout);
 	return patchFlow(args, prepared, engine, placeFile);
+}
+
+/**
+ * Step 4, patch mode with the luau engine (kernel-luau.ts): build the kernel slots `.rbxm`, read it back with the
+ * CLI's own reader, then the check task, y/N, the save task and the verify task.
+ */
+async function luauFlow(args: ParsedArgs, prepared: PreparedKernel, timeoutSeconds: number) {
+	const { proj, kernelDir, identity, signing, heads, watch, where } = prepared;
+	const { placeId, universeId } = proj.config;
+	const outDir = join(proj.root, OUT_DIR);
+	const layout = kernelLayout(prepared.stamped, { loadstring: flagBool(args, "loadstring") });
+	if (layout.slots.length === 0) throw new KernelCheckError(`${join(kernelDir, "place.project.json")} declares no TypeTorch* slot under a service; nothing to patch`);
+	const { settings, unusable } = settingValues(prepared.stamped, layout.serviceProps);
+	if (unusable.length) throw new KernelCheckError(`the kernel project sets ${unusable.join(", ")} to a value the luau engine can't apply (it applies booleans, numbers and strings)`);
+	info(`  slots    ${layout.slots.map((s) => `${s.service}.${s.name}`).join(", ")}${settings.length ? `  settings ${settings.map((s) => `${s.service}.${s.prop} = ${s.value}`).join(", ")}` : ""}`);
+
+	// The kernel slots alone, as an .rbxm (one Folder, a Folder per service, the slots).
+	const { bytes: slotsBytes, read: cli } = await watch.stage("slots", () => buildSlotsRbxm(proj, slotsProject(prepared.stamped, layout.slots), layout.slots, IDENTITY_SLOT, SLOTS_FILE));
+	if (cli.identity.KernelHash !== identity.hash) throw new KernelCheckError(`${SLOTS_FILE} carries KernelHash ${String(cli.identity.KernelHash)}, the kernel is ${identity.hash}`);
+	info(`  input    ${formatSeconds(watch.timings.slots)}  ${SLOTS_FILE}  ${formatBytes(slotsBytes.length)}  ${cli.slots.map((s) => `${s.slot} ${s.instances} (${s.scripts} scripts)`).join(", ")}`);
+
+	mkdirSync(join(outDir, PATCH_DIR), { recursive: true });
+	const reportPath = join(outDir, PATCH_DIR, `${placeId}-kernel-${identity.version}-luau.json`);
+	await luauDeploy(
+		{
+			universeId,
+			placeId,
+			where,
+			kernel: { version: identity.version, hash: identity.hash, commit: identity.commit, dirty: identity.dirty, api: identity.api },
+			slots: layout.slots,
+			settings,
+			identitySlot: IDENTITY_SLOT,
+			slotsBytes,
+			slotsFile: SLOTS_FILE,
+			cliSlots: cli.slots,
+			baseFlag: flagString(args, "base"),
+			install: flagBool(args, "install"),
+			dryRun: flagBool(args, "dry-run"),
+			yes: flagBool(args, "yes"),
+			timeoutSeconds,
+			blockers: signing.problems,
+			reportPath,
+			reportDisplay: displayPath(proj.root, reportPath),
+			logFields: {
+				kernelTag: identity.tag,
+				kernelSource: identity.source,
+				kernelDirty: identity.dirty,
+				keyAssetId: proj.config.keyAssetId ?? null,
+				fallbackPublicKey: proj.config.fallbackPublicKey ?? null,
+				bootstrapHeads: heads,
+				backupBuild: prepared.backup,
+				loadstring: flagBool(args, "loadstring"),
+				by: gitInfo(proj.root).userName,
+			},
+		},
+		luauDeps(proj),
+	);
 }
 
 /** Step 4, patch mode (the default). */
@@ -777,8 +893,27 @@ export function placeFileName(name: string): { placeId: number; version: number 
  * .typetorch/place-backups/ (undo a kernel deploy), or a dry run's patched file from .typetorch/place-patches/.
  */
 async function kernelRestore(args: ParsedArgs) {
+	const versionFlag = flagString(args, "version");
+	if (versionFlag !== undefined) {
+		if (args.positionals.length > 1) throw new UsageError("kernel restore takes a place file OR --version <n>, not both");
+		if (!/^\d+$/.test(versionFlag) || Number(versionFlag) < 1) throw new UsageError(`--version must be a place version number, got "${versionFlag}"`);
+		const proj = project(args);
+		return luauRestore(
+			{
+				universeId: proj.config.universeId,
+				placeId: proj.config.placeId,
+				where: `universe ${proj.config.universeId}, place ${proj.config.placeId}`,
+				version: Number(versionFlag),
+				identitySlot: IDENTITY_SLOT,
+				dryRun: flagBool(args, "dry-run"),
+				yes: flagBool(args, "yes"),
+				timeoutSeconds: taskTimeout(args),
+			},
+			luauDeps(proj),
+		);
+	}
 	const file = args.positionals[1];
-	if (!file || args.positionals.length > 2) throw new UsageError("usage: typetorch kernel restore <file.rbxl> [--dry-run] [--yes]");
+	if (!file || args.positionals.length > 2) throw new UsageError("usage: typetorch kernel restore <file.rbxl> | --version <n> [--dry-run] [--yes]");
 	const proj = project(args);
 	const path = resolve(process.cwd(), file);
 	if (!existsSync(path)) throw new UsageError(`${file} does not exist`);

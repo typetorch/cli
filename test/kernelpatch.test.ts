@@ -108,6 +108,15 @@ describe("kernelLayout and chooseBase", () => {
 		expect(chooseBase([v(15, true)], "newest").ok).toBe(false);
 		expect(chooseBase([]).ok).toBe(false);
 	});
+	test("base version as the Assets API sends it: published: true, and false LEFT OUT", () => {
+		const api = (version: number, published: boolean) => ({ version, published, hasPublishedField: published });
+		const refused = chooseBase([api(17, false), api(16, false), api(15, true)]);
+		expect(refused.ok).toBe(false);
+		expect(!refused.ok && refused.reason).toContain("v17 is not published");
+		expect(chooseBase([api(15, true), api(14, false)])).toEqual({ ok: true, version: 15, published: true, skipped: [] });
+		// A list where no version carries the field (an API that doesn't report publishing) takes the newest.
+		expect(chooseBase([{ version: 9, published: false, hasPublishedField: false }])).toEqual({ ok: true, version: 9, published: false, skipped: [] });
+	});
 	test("backup names and the doctor probe", () => {
 		expect(placeFileName("102504202680447-v15.rbxl")).toEqual({ placeId: 102504202680447, version: 15 });
 		expect(placeFileName("102504202680447-v15-kernel-0.3.1.rbxl")).toEqual({ placeId: 102504202680447, version: 15 });
