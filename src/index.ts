@@ -206,6 +206,11 @@ ${WAIT_USAGE}`,
 typetorch kernel deploy --replace-place [--dry-run] [--yes] [--no-backup] [--loadstring]      (template/test place only: wipes Studio content)
 typetorch kernel restore --version <n> [--dry-run] [--yes] [--timeout <s>]
 typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
+typetorch kernel install-loader [--dry-run] [--yes] [--base ...] [--min-kernel <v>] [--kernel <dir>] [--timeout <s>]
+typetorch kernel deploy --asset [--channel dev|prod] [--drain <min>] [--reupload] [--new-asset] [--dry-run] [--yes] [--kernel <dir>]
+typetorch kernel promote [--force] [--drain <min>] [--dry-run] [--yes]
+typetorch kernel rollback [--channel prod|dev] [--to <version|versionId>] [--drain <min>] [--dry-run] [--yes]
+typetorch kernel drain [--channel prod|dev] [--window <min>] [--dry-run] [--yes]
 
   1. lune run scripts/check.luau in the kernel dir  2. version (package.json = Constants.luau) + content hash, printed;
   a git checkout must be clean and tagged v<version>  3. rojo build <kernel>/place.project.json -> .typetorch/place.rbxl
@@ -238,6 +243,23 @@ typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
                   once (or use --place-file)
   restore --version <n>  republish place version n (a task on it calls SavePlaceAsync): the undo of a luau deploy
   restore <file>  publish a place file (a backup, or a dry run's patched file) as the new live version
+  THE KERNEL AS AN ASSET (kernel 0.4.1+, plans/22): the place holds a loader that loads the kernel from a group-owned
+  Model asset at boot, else its baked fallback kernel. Kernel updates are uploads, not place saves.
+  install-loader  (luau engine, once and to refresh) the loader with the trust roots and MinKernelVersion (--min-kernel,
+                  default 0.4.1), its client script and the baked kernel go in; every copy of the kernel installed
+                  directly goes out. After it, kernel deploy without --asset is refused on that place
+  deploy --asset  build the kernel package (scripts disabled, no trust roots), upload it as a new version of the
+                  kernel asset (typetorch.json kernelAssetId; the first time a new group asset), wait for moderation,
+                  check the version in a Luau Execution task, then sign kernel.dev in the settings record (--channel
+                  prod: prod and dev). New servers load it; --drain <min> moves the others (off by default).
+                  --reupload: send the kept package of the channel's kernel again (moderation took it down);
+                  --new-asset: a new asset id (the old one is gone)
+  promote         kernel.dev -> kernel.prod; refused unless the dev kernel ran >= 1 h on servers with no failed or
+                  rolled back deploy report (--force)
+  rollback        a channel's pointer back to its previous kernel (this machine's kernel-deploys.jsonl) or --to
+  drain           the signed drain for a channel's kernel: public servers on another kernel move their players to
+                  fresh servers within --window minutes (default 30)
+  backup refresh also bakes the prod kernel's kept package as the loader's fallback kernel (same save)
   Scopes (the place key): universe.place.luau-execution-session:read + :write and asset:read (luau engine, restore
   --version); universe.place:write to publish files (--place-file, restore <file>, --replace-place). Roblox has no
   API-key route for downloading place files (Asset Delivery needs legacy-asset:manage, which keys can't get;

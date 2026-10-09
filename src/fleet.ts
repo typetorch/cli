@@ -192,6 +192,9 @@ export interface ServerRow {
 	accessCode: boolean;
 	experiment: boolean;
 	kernelVersion?: string;
+	/** Kernel 0.4.1 loader: "asset" or "baked" (the fallback; kernelError says why). Absent: installed directly. */
+	kernelSource?: string;
+	kernelError?: string;
 	/** The applied seq (kernel 0.3.2+). */
 	seq?: number;
 	generation?: number;
@@ -221,6 +224,8 @@ export function parseServer(row: Record<string, unknown>): ServerRow | undefined
 		accessCode: code !== undefined && code !== false && code !== "",
 		experiment: experiment === 1 || experiment === true || experiment === "1",
 		kernelVersion: str(pick(row, "kernel", "kernelVersion", "v")),
+		kernelSource: str(pick(row, "kernelSource", "ks")),
+		kernelError: str(pick(row, "kernelError", "ke")),
 		seq: num(pick(row, "appliedSeq", "applied_seq", "q")),
 		generation: num(pick(row, "generation", "g")),
 		health: health && (HEALTH as readonly string[]).includes(health) ? (health as Health) : undefined,
@@ -379,7 +384,7 @@ export function formatServersTable(servers: ServerRow[], nowSeconds = Date.now()
 			s.seq !== undefined ? `#${s.seq}` : "-",
 			s.health ?? (s.schema === undefined ? "-" : "?"),
 			s.players !== undefined ? `${s.players}/${s.maxPlayers ?? "?"}` : "-",
-			s.kernelVersion ? `${s.kernelVersion}${s.schema === undefined ? " (old)" : ""}` : "-",
+			s.kernelVersion ? `${s.kernelVersion}${s.schema === undefined ? " (old)" : ""}${s.kernelSource === "baked" ? " BAKED" : ""}` : "-",
 			formatAge(s.startedAt !== undefined ? nowSeconds - s.startedAt : undefined),
 			formatAge(s.updatedAt !== undefined ? nowSeconds - s.updatedAt : undefined),
 		]);
