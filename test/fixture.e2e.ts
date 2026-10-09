@@ -226,7 +226,8 @@ r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json", "--propo
 check("--propose: the dry run says it would only propose", r.code === 0 && r.json?.approval?.ending === "propose", r.stderr || r.json);
 writeFileSync(join(dir, "typetorch.json"), JSON.stringify({ ...JSON.parse(readFileSync(join(dir, "typetorch.json"), "utf8")), approval: "none", signingPublicKey: "old" }, null, "\t"));
 r = tt(["deploy", "--dry-run", "--no-registry", "--no-build", "--json"]);
-check("approval none: publishes at once; an old signingPublicKey is ignored silently", r.code === 0 && r.json?.approval?.ending === "publish" && !/signingPublicKey|unknown key/.test(r.stderr), r.stderr || r.json);
+// CLI 0.9 dropped the CLI 0.2-0.3 `signingPublicKey` field: it is an unknown key now (a warning), never an error.
+check("approval none: publishes at once; an old signingPublicKey only warns (unknown key)", r.code === 0 && r.json?.approval?.ending === "publish" && /signingPublicKey/.test(r.stderr) && /unknown key/i.test(r.stderr), r.stderr || r.json);
 sh(["git", "checkout", "--", "typetorch.json"]);
 
 // 8b. Prod signing (plans/03): throwaway keys in a temp dir only; nothing is uploaded or published.
