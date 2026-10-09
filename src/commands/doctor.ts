@@ -60,6 +60,7 @@ import { rojoBinary } from "../build.ts";
 import { describeFields, readSettings, verifySettingsRecord, type SettingsBody, type SettingsRead } from "../settings.ts";
 import { DS_READ_SCOPE, DS_WRITE_SCOPES, HEADS_KEY, readSharedSeq, SEQ_DATASTORE } from "../seqstore.ts";
 import { defaultBranchHead, liveServerChecks, versionBeforeKernel } from "../livecheck.ts";
+import { branchCapWarning, HEADS_MAX_BRANCHES } from "../branches.ts";
 import { DURABLE_SCOPES, NOT_DURABLE } from "../durablehead.ts";
 import { createHash } from "node:crypto";
 import { stateDir } from "../state.ts";
@@ -525,6 +526,12 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 		const shared = keys.deploy ? await withJob("default branch head", () => readSharedSeq(new OpenCloud(keys.deploy!.key), proj!.config.universeId)) : undefined;
 		const head = defaultBranchHead({ config: proj.config, shared, local: withLocal(proj).heads, bootstrap: facts.game?.bootstrapHeads });
 		checks.push(...liveServerChecks({ config: proj.config, game: facts.game, backup: facts.backup, head, restoreVersion: versionBeforeKernel(stateDir(proj.root)) }));
+		// The kernel records at most 32 branches in `heads` (typetorch branch rm removes dev ones).
+		if (shared?.branches) {
+			const count = Object.keys(shared.branches).length;
+			const cap = branchCapWarning(count);
+			checks.push(cap ? { name: "stored branches", status: "warn", detail: cap } : { name: "stored branches", status: "ok", detail: `${count} of ${HEADS_MAX_BRANCHES} in the kernel's heads` });
+		}
 	}
 
 	// The settings record (deploy key) feeds the backend checks (its backend section, the signed owners) and the Config

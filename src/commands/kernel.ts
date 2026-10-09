@@ -543,19 +543,24 @@ async function kernelDeploy(args: ParsedArgs) {
 	const timeout = engine === "luau" ? taskTimeout(args) : TASK_TIMEOUT_MAX;
 	const prepared = await prepareKernel(args);
 	// The default branch's head (the kernel's DataStore heads, else the BootstrapHeads stamped now) before publishing.
+	await checkDefaultBranch(args, prepared.proj, { backup: prepared.backup !== null, bootstrap: prepared.heads as Record<string, unknown> });
+	if (replacePlace) return replacePlaceFlow(args, prepared);
+	if (engine === "luau") return luauFlow(args, prepared, timeout);
+	return patchFlow(args, prepared, engine, placeFile);
+}
+
+/** guardDefaultBranch with the head read now: the DataStore heads (deploy key), this machine's log, `bootstrap`. */
+async function checkDefaultBranch(args: ParsedArgs, proj: Project, place: { backup: boolean; bootstrap?: Record<string, unknown> }): Promise<void> {
 	const deployer = openCloud("deploy", true);
-	const shared: SharedSeq | undefined = deployer ? await readSharedSeq(deployer, prepared.proj.config.universeId) : undefined;
+	const shared: SharedSeq | undefined = deployer ? await readSharedSeq(deployer, proj.config.universeId) : undefined;
 	await guardDefaultBranch({
-		config: prepared.proj.config,
-		head: defaultBranchHead({ config: prepared.proj.config, shared, local: (await readHistory(prepared.proj)).heads, bootstrap: prepared.heads as Record<string, unknown> }),
-		backupBaked: prepared.backup !== null,
+		config: proj.config,
+		head: defaultBranchHead({ config: proj.config, shared, local: (await readHistory(proj)).heads, bootstrap: place.bootstrap }),
+		backupBaked: place.backup,
 		force: flagBool(args, "force"),
 		dryRun: flagBool(args, "dry-run"),
 		io: interaction(),
 	});
-	if (replacePlace) return replacePlaceFlow(args, prepared);
-	if (engine === "luau") return luauFlow(args, prepared, timeout);
-	return patchFlow(args, prepared, engine, placeFile);
 }
 
 /**
@@ -968,6 +973,11 @@ async function replacePlaceFlow(args: ParsedArgs, prepared: PreparedKernel) {
 	info(dim(`  recorded in ${join(stateDir, KERNEL_LOG)}; revert from the place's version history in Creator Hub if needed`));
 }
 
+/** A restored version's kernel identity (the restore check task) says it has the kernel. */
+export function restoredKernel(identity: Record<string, unknown>): boolean {
+	return identity.KernelVersion !== undefined || identity.KernelHash !== undefined || identity.constantsVersion !== undefined;
+}
+
 /** The default slots, for describing a place file outside a deploy (restore). */
 export const DEFAULT_SLOTS: SlotRef[] = [
 	{ service: "ServerScriptService", name: "TypeTorchKernel" },
@@ -1002,6 +1012,8 @@ async function kernelRestore(args: ParsedArgs) {
 				dryRun: flagBool(args, "dry-run"),
 				yes: flagBool(args, "yes"),
 				timeoutSeconds: taskTimeout(args),
+				// A version with the kernel and no backup, while the default branch has nothing: the same guard as a deploy.
+				guard: (identity) => (restoredKernel(identity) ? checkDefaultBranch(args, proj, { backup: identity.BackupArtifactId !== undefined }) : Promise.resolve()),
 			},
 			luauDepsKeeping(proj, done),
 		);
@@ -1017,7 +1029,7 @@ async function kernelRestore(args: ParsedArgs) {
 	if (new TextDecoder().decode(bytes.subarray(0, 8)) !== PLACE_MAGIC) throw new KernelCheckError(`${file} is not a binary place file (.rbxl)`);
 	let summary;
 	try {
-		summary = summarizePlace(new PlaceFile(bytes), DEFAULT_SLOTS);
+		summary = summarizePlace(new PlaceFile(bytes), [...DEFAULT_SLOTS, BACKUP_SLOT]);
 	} catch (error) {
 		throw new KernelCheckError(`${file} can't be read as a place: ${(error as Error).message}`);
 	}
@@ -1044,6 +1056,7 @@ async function kernelRestore(args: ParsedArgs) {
 			warn(`could not read the place's current version (asset:read): ${(error as Error).message}`);
 		}
 	}
+	if (summary.kernel.version) await checkDefaultBranch(args, proj, { backup: (summary.slots.find((slot) => slot.slot === `${BACKUP_SLOT.service}.${BACKUP_SLOT.name}`)?.copies ?? 0) > 0 });
 	const since = named && latest !== undefined && latest > named.version ? ` (versions v${named.version + 1}..v${latest} were saved after the version this file comes from)` : "";
 	warn(`this publishes ${basename(path)} as the new live version of place ${placeId}: everything published after it (Studio work, other kernel deploys) leaves the live place (it stays in version history)${since}`);
 	if (dryRun || !oc) {

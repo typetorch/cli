@@ -41,7 +41,8 @@ import {
 } from "./common.ts";
 import { makeEntry, messageFor } from "./release.ts";
 import { autoRefreshBackup } from "./backup.ts";
-import { defaultBranchHead, defaultBranchWarning, readPlaceGame, SERVER_SLOT } from "../livecheck.ts";
+import { defaultBranchHead, defaultBranchWarning, deployDefaultHint, readPlaceGame, SERVER_SLOT } from "../livecheck.ts";
+import { branchCapWarning } from "../branches.ts";
 import { lastKernelDeploy } from "../keycheck.ts";
 import type { Project } from "../config.ts";
 import type { OpenCloud } from "../opencloud.ts";
@@ -102,6 +103,31 @@ export function checkChannelGuard(input: {
 	throw new ChannelGuardError(
 		`refusing to deploy ${problems.join(" and ")} to prod-channel branch "${input.branch}" (pass --force to override)`,
 	);
+}
+
+/**
+ * Before the upload, for a deploy that creates a NEW branch (not in the DataStore heads nor this machine's log): the
+ * branch came from a git branch typetorch.json doesn't map (cecot: `typetorch-migration` became a dev branch while the
+ * owner meant prod), and the kernel's 32-branch cap.
+ */
+export function newBranchNotes(input: {
+	config: Pick<Project["config"], "defaultBranch" | "branches">;
+	branch: string;
+	branchFlag?: string;
+	gitBranch?: string;
+	shared?: SharedSeq;
+	local: Map<string, unknown>;
+}): string[] {
+	const { config, branch } = input;
+	if (branch === config.defaultBranch || input.local.has(branch) || (input.shared?.branches && branch in input.shared.branches)) return [];
+	const notes: string[] = [];
+	if (!input.branchFlag && input.gitBranch && config.branches?.[input.gitBranch] === undefined) {
+		notes.push(`new branch "${branch}": git branch ${input.gitBranch} isn't in typetorch.json "branches", so it deploys to a dev branch of its name; public servers run ${config.defaultBranch}. For ${config.defaultBranch}: ${deployDefaultHint(config)}`);
+	}
+	const count = input.shared?.branches ? Object.keys(input.shared.branches).length + 1 : undefined;
+	const cap = count !== undefined ? branchCapWarning(count) : undefined;
+	if (cap) notes.push(cap);
+	return notes;
 }
 
 /**
@@ -204,6 +230,7 @@ export async function deployCommand(args: ParsedArgs) {
 	const targetChannel = branchChannel(proj.config, branch);
 	checkChannelGuard({ branch, branchChannel: targetChannel, artifactChannel: meta.channel, dirty: meta.dirty, force });
 	checkRollout(branch, targetChannel, rollout);
+	for (const line of newBranchNotes({ config: proj.config, branch, branchFlag, gitBranch: gitInfo(proj.root).gitBranch, shared, local: history.heads })) warn(line);
 	const wait = waitSeconds(args, targetChannel);
 	const rollback = rollbackSetting(args, proj.config);
 

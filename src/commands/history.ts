@@ -1,5 +1,5 @@
 /**
- * `typetorch deployments` and `typetorch branch ls`: this machine's deployment log (CLI 0.8: the ConfigService registry
+ * `typetorch deployments` (`typetorch branch` lives in branch.ts): this machine's deployment log (CLI 0.8: the ConfigService registry
  * is gone; it was never readable with an API key).
  */
 import { flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
@@ -47,33 +47,3 @@ export async function deploymentsCommand(args: ParsedArgs) {
 	}
 }
 
-export const branchFlags = {} as const;
-
-export async function branchCommand(args: ParsedArgs) {
-	const sub = args.positionals[0] ?? "ls";
-	if (sub !== "ls" && sub !== "list") throw new UsageError(`unknown branch subcommand "${sub}" (only "ls" for now)`);
-	const proj = project(args);
-	const history = await readHistory(proj);
-	const names = new Set<string>([proj.config.defaultBranch, ...Object.keys(proj.config.channels), ...history.heads.keys()]);
-	const branches = [...names].sort().map((name) => {
-		const head = history.heads.get(name);
-		const channel = branchChannel(proj.config, name);
-		return { branch: name, channel, default: name === proj.config.defaultBranch, head: head ?? null };
-	});
-	if (isJson()) return emitJson({ source: "local", branches });
-	info(
-		table(
-			["branch", "channel", "artifact", "commit", "seq", "deployed (UTC)", "asset"],
-			branches.map((b) => [
-				b.default ? `${b.branch} (default)` : b.branch,
-				b.channel,
-				b.head?.artifactId ?? "-",
-				b.head ? `${b.head.commit || "uncommitted"}${b.head.dirty ? "*" : ""}` : "-",
-				b.head ? `#${b.head.seq}` : "-",
-				b.head?.deployedAt ? b.head.deployedAt.replace("T", " ").slice(0, 19) : "-",
-				b.head ? String(b.head.assetId) : "-",
-			]),
-		),
-	);
-	info(dim(SOURCE_NOTE));
-}

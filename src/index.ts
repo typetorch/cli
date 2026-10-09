@@ -30,7 +30,8 @@ import {
 } from "./commands/fleet.ts";
 import { GATE_USAGE, TEST_USAGE, testCommand, testFlags } from "./commands/test.ts";
 import { ROLLOUT_USAGE, WIDEN_USAGE } from "./rollout.ts";
-import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history.ts";
+import { deploymentsCommand, deploymentsFlags } from "./commands/history.ts";
+import { branchCommand, branchFlags } from "./commands/branch.ts";
 import { approveCommand, approveFlags, proposalsCommand, proposalsFlags, rejectCommand, rejectFlags } from "./commands/approve.ts";
 import { kernelCommand, kernelFlags } from "./commands/kernel.ts";
 import { backupCommand, backupFlags } from "./commands/backup.ts";
@@ -166,8 +167,19 @@ ${WAIT_USAGE}`,
 	branch: {
 		flags: branchFlags,
 		run: branchCommand,
-		summary: "branches, channels and live heads",
-		usage: `typetorch branch ls [--json]`,
+		summary: "branches, channels and live heads; remove a dev branch",
+		usage: `typetorch branch ls [--json]
+typetorch branch rm <branch> [--dry-run] [--yes] [--force] [--json]
+
+  ls  every branch: the kernel's DataStore heads (the deploy key) and this machine's log, with the channel, the head,
+      whether a prod head is signed, live servers per branch (the backend's fleet API) and the git branches
+      typetorch.json maps to it. Servers record at most 32 branches; it warns from 28.
+  rm  removes a DEV branch's head from the DataStore heads (version-guarded) and records it in
+      <state dir>/branches.jsonl, so this machine's log hides it too. Refuses the default branch and every
+      prod-channel branch (--force doesn't change that), a branch live servers run, and a head that changed since it
+      was read. Without the fleet API it can't check for live servers: --force removes it anyway. Servers' MemoryStore
+      copy (API keys can't write it) keeps the branch until it expires (45 days after its last write); deploying the
+      branch again recreates it. y/N, or --yes`,
 	},
 	settings: {
 		flags: settingsFlags,
@@ -206,8 +218,8 @@ ${WAIT_USAGE}`,
                         [--place-file <file>] [--timeout <s>] [--kernel <dir>] [--allow-dirty] [--allow-untagged]
                         [--fallback-key-file <path>] [--no-backup] [--loadstring] [--force]
 typetorch kernel deploy --replace-place [--dry-run] [--yes] [--no-backup] [--loadstring] [--force]      (template/test place only: wipes Studio content)
-typetorch kernel restore --version <n> [--dry-run] [--yes] [--timeout <s>]
-typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
+typetorch kernel restore --version <n> [--dry-run] [--yes] [--force] [--timeout <s>]
+typetorch kernel restore <file.rbxl> [--dry-run] [--yes] [--force]
 
   1. lune run scripts/check.luau in the kernel dir  2. version (package.json = Constants.luau) + content hash, printed;
   a git checkout must be clean and tagged v<version>  3. rojo build <kernel>/place.project.json -> .typetorch/place.rbxl
@@ -236,7 +248,8 @@ typetorch kernel restore <file.rbxl> [--dry-run] [--yes]
   --dry-run       everything except the save or publish (the luau check task never calls SavePlaceAsync)
   --force         publish even though the default branch has no verified head and no backup build is baked. Without
                   it the deploy asks y/N (refuses without a terminal): kernel 0.3.6+ with nothing to run moves every
-                  player out after 15 s and kicks after 3 bounces. Deploy the default branch first
+                  player out after 15 s and kicks after 3 bounces. Deploy the default branch first. kernel restore asks the
+                  same when the version or file it publishes has the kernel and no backup build
   --loadstring    turn loadstring on (ServerScriptService.LoadStringEnabled = true), for remote-claude's run_luau (the test
                   place); without it a patch leaves the place's value and --replace-place publishes it off. The property
                   isn't scriptable, so a luau deploy that has to change it stops before saving: turn it on in Studio
