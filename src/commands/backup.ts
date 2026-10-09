@@ -32,6 +32,7 @@ import { BACKUP_FILE, BACKUP_SLOT, BackupError, backupHead, backupRbxm, findKept
 import { openCloud, project, projectStateDir, readHistory } from "./common.ts";
 import { fleetFor } from "./fleet.ts";
 import { buildSlotsRbxm, IDENTITY_SLOT, KERNEL_LOG, luauDeps, taskTimeout } from "./kernel.ts";
+import { announce, markPosterFor, type MarkPoster } from "../marks.ts";
 
 export const backupFlags = { build: "string", "dry-run": "boolean", yes: "boolean", force: "boolean", timeout: "string" } as const;
 
@@ -190,6 +191,13 @@ export async function backupSlots(proj: Project, build: BuildRef, now = new Date
 
 const line = (text: string) => info(`  backup      ${text}`);
 
+/** The explorer's chart mark for a refreshed backup (marks.ts). Best effort. */
+export async function announceBackup(poster: MarkPoster | null | undefined, build: BuildRef, outcome: Extract<BackupOutcome, { status: "refreshed" }>, how: "manual" | "automatic"): Promise<boolean> {
+	return announce(poster, "the backup refresh", (p) =>
+		p.mark({ kind: "backup", branch: build.branch, seq: build.seq, artifactId: build.artifactId, channel: "prod", placeVersion: outcome.placeVersionAfter ?? null, message: `backup build #${build.seq} ${build.artifactId} (${how})` }),
+	);
+}
+
 /**
  * After a prod release at the owner's terminal: refresh the place's backup to the build it replaced, when that build is
  * proven healthy. Prints one or two lines; never throws (the deploy is already done and stays done).
@@ -203,7 +211,7 @@ export async function autoRefreshBackup(input: {
 	previous?: Pick<LiveHead, "artifactId" | "assetId" | "seq"> & { deployedAt?: string };
 	interactive?: boolean;
 	/** Tests: a fake engine, fleet and slot builder. */
-	deps?: { luau?: LuauDeps; fleet?: FleetClient | null; slots?: (build: BuildRef) => Promise<{ bytes: Uint8Array; cliSlots: SlotInventory[] }>; now?: number };
+	deps?: { luau?: LuauDeps; fleet?: FleetClient | null; slots?: (build: BuildRef) => Promise<{ bytes: Uint8Array; cliSlots: SlotInventory[] }>; now?: number; marks?: MarkPoster | null };
 }): Promise<BackupOutcome | undefined> {
 	const { proj, previous } = input;
 	try {
@@ -234,6 +242,7 @@ export async function autoRefreshBackup(input: {
 		if (outcome.status === "refreshed") {
 			line(`${build.artifactId} is the backup build now (place v${outcome.placeVersionBefore} -> v${outcome.placeVersionAfter ?? "?"})${outcome.verified === false ? `; verify: ${outcome.problems?.join("; ")}` : ""}`);
 			assetsNote(proj);
+			await announceBackup(input.deps && "marks" in input.deps ? input.deps.marks : markPosterFor(proj), build, outcome, "automatic");
 		} else if (outcome.status === "skipped") line(dim(`not refreshed: ${outcome.reason}`));
 		return outcome;
 	} catch (error) {
@@ -286,6 +295,7 @@ export async function backupCommand(args: ParsedArgs) {
 		{ universeId: proj.config.universeId, placeId: proj.config.placeId, build, slotsBytes: slots.bytes, cliSlots: slots.cliSlots, dryRun: flagBool(args, "dry-run"), yes: flagBool(args, "yes"), timeoutSeconds: taskTimeout(args) },
 		luauDeps(proj),
 	);
+	if (outcome.status === "refreshed") await announceBackup(markPosterFor(proj), build, outcome, "manual");
 	if (isJson()) return emitJson({ build, health, outcome });
 	if (outcome.status === "refreshed") {
 		info(bold(`${build.artifactId} is the backup build of place ${proj.config.placeId} now (v${outcome.placeVersionBefore} -> v${outcome.placeVersionAfter ?? "?"})`));

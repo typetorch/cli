@@ -1,7 +1,7 @@
 /**
  * Pointing a branch at an (already approved) payload asset: shared by `deploy`, `rollback` and `promote`.
  *   lock the state dir -> seq -> message (signed for prod-channel branches) -> deploy message -> durable head
- *   (DataStore `heads` + `deployments`, durablehead.ts) -> local log -> unlock
+ *   (DataStore `heads` + `deployments`, durablehead.ts) -> local log -> unlock -> chart mark on the backend (marks.ts)
  *
  * Signing (plans/03 "Signed prod messages and heads"): a release to a prod-channel branch must come with a signer (both
  * keys, keyfiles.ts `loadSigner`); the message and the durable head get `sig` and `sigF`. Dev-channel releases are
@@ -21,6 +21,7 @@ import { DEPLOY_TOPIC, deployMessage, encodeDeployMessage, type DeployMessage, t
 import type { DualSigner } from "../signing.ts";
 import type { RegistryDeployment } from "../registry.ts";
 import { withStateLock } from "../state.ts";
+import { announce, markPosterFor, type MarkPoster } from "../marks.ts";
 import type { History } from "./common.ts";
 
 export interface ReleaseArtifact {
@@ -56,6 +57,8 @@ export interface ReleaseInput {
 	sharedSeq?: SharedSeq;
 	/** Extra fields for the local log line. */
 	extra?: Partial<LocalDeployment>;
+	/** Where the chart mark goes (tests); default: the project's backend with the game key, if configured. null: none. */
+	marks?: MarkPoster | null;
 }
 
 export interface ReleaseResult {
@@ -146,7 +149,7 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 		throw new SigningRequiredError(`${input.branch} is a prod-channel branch: its deploy message must be signed, and no signing keys were loaded`);
 	}
 	const signer = input.branchChannel === "prod" ? input.signer : undefined;
-	return withStateLock(history.stateDir, `${input.action} ${input.branch} ${input.artifact.artifactId}`, async () => {
+	const result = await withStateLock(history.stateDir, `${input.action} ${input.branch} ${input.artifact.artifactId}`, async () => {
 		// Re-read the log under the lock: another deploy from this machine may have appended since history was read.
 		const local = readLocalLog(history.stateDir, proj.config.universeId);
 		// The shared seq (seqstore.ts): claimed from the DataStore counter when the deploy key may, else the highest of the
@@ -181,6 +184,12 @@ export async function release(input: ReleaseInput): Promise<ReleaseResult> {
 		appendLocalLog(history.stateDir, logged);
 		return { entry: logged, message, registry, durable };
 	});
+	// The explorer's chart mark (and the backend's deploy start for stuck servers). Best effort, after the lock.
+	const e = result.entry;
+	await announce(input.marks === undefined ? markPosterFor(proj) : input.marks, `${e.action} #${e.seq}`, (p) =>
+		p.release({ seq: e.seq, branch: e.branch, artifactId: e.artifactId, channel: input.branchChannel, action: e.action, ...(e.fromArtifactId ? { fromArtifactId: e.fromArtifactId } : {}), ...(input.note ? { note: input.note } : {}) }),
+	);
+	return result;
 }
 
 /** The message for a log line: signatures shortened (they are public, but long). */

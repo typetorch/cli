@@ -60,6 +60,7 @@ import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, noteRegistryFlags,
 import { addBackupToProject, BACKUP_FILE, BACKUP_SLOT, BackupError, backupHead, backupRbxm, findKeptPayload, PAYLOADS_DIR, type BackupInfo } from "../payloads.ts";
 import { luauDeploy, luauRestore, type LuauDeps } from "../kernel-luau.ts";
 import { readSlotsRbxm, settingValues, slotsProject, TASK_TIMEOUT_MAX } from "../kernelpatch-task.ts";
+import { announce, markPosterFor } from "../marks.ts";
 
 export const kernelFlags = {
 	kernel: "string",
@@ -298,6 +299,42 @@ export function stampKernelProject(projectJson: any, kernelDir: string, attribut
 	return { project: copy, stamped: true };
 }
 
+/**
+ * The explorer's chart mark for a kernel publish or restore (marks.ts), from its kernel-deploys.jsonl record. Best
+ * effort: never fails the publish.
+ */
+export function kernelMark(record: Record<string, unknown>): { kernel?: string; placeVersion?: number | null; message: string } {
+	const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+	const after = typeof record.placeVersionAfter === "number" ? record.placeVersionAfter : null;
+	if (record.mode === "restore") {
+		const kernel = str(record.fileKernel);
+		const from = typeof record.fromVersion === "number" ? `place v${record.fromVersion}` : (str(record.file) ?? "a place file");
+		return { ...(kernel ? { kernel } : {}), placeVersion: after, message: `restored ${from}${kernel ? ` (kernel ${kernel})` : ""}` };
+	}
+	const kernel = str(record.kernelVersion);
+	const how = [str(record.mode), str(record.engine)].filter(Boolean).join(", ");
+	const versions = typeof record.placeVersionBefore === "number" ? `, place v${record.placeVersionBefore} -> v${after ?? "?"}` : "";
+	return { ...(kernel ? { kernel } : {}), placeVersion: after, message: `kernel ${kernel ?? "?"}${how ? ` (${how})` : ""}${versions}` };
+}
+
+async function announceKernel(proj: Project, record: Record<string, unknown>): Promise<void> {
+	const mark = kernelMark(record);
+	await announce(markPosterFor(proj), "the kernel publish", (p) => p.mark({ kind: "kernel", ...mark }));
+}
+
+/** luauDeps that also keeps the published / restored records (their chart marks go out after the engine returns). */
+function luauDepsKeeping(proj: Project, done: Record<string, unknown>[]): LuauDeps {
+	const deps = luauDeps(proj);
+	const record = deps.record;
+	return {
+		...deps,
+		record: (entry) => {
+			record(entry);
+			if (entry.event === "kernel-published" || entry.event === "kernel-restored") done.push(entry);
+		},
+	};
+}
+
 function logKernel(dir: string, record: Record<string, unknown>) {
 	mkdirSync(dir, { recursive: true });
 	appendFileSync(join(dir, KERNEL_LOG), JSON.stringify({ at: new Date().toISOString(), ...record }) + "\n");
@@ -526,6 +563,7 @@ async function luauFlow(args: ParsedArgs, prepared: PreparedKernel, timeoutSecon
 
 	mkdirSync(join(outDir, PATCH_DIR), { recursive: true });
 	const reportPath = join(outDir, PATCH_DIR, `${placeId}-kernel-${identity.version}-luau.json`);
+	const done: Record<string, unknown>[] = [];
 	await luauDeploy(
 		{
 			universeId,
@@ -558,8 +596,9 @@ async function luauFlow(args: ParsedArgs, prepared: PreparedKernel, timeoutSecon
 				by: gitInfo(proj.root).userName,
 			},
 		},
-		luauDeps(proj),
+		luauDepsKeeping(proj, done),
 	);
+	for (const entry of done) await announceKernel(proj, entry);
 }
 
 /** Step 4, patch mode (the default). */
@@ -792,6 +831,7 @@ async function publishPatched(input: {
 	const after = typeof response?.versionNumber === "number" ? response.versionNumber : null;
 	const timings = watch.total();
 	logKernel(stateDir, { event: "kernel-published", ...record, placeVersionAfter: after, timings });
+	await announceKernel(proj, { ...record, placeVersionAfter: after });
 	if (isJson()) return emitJson({ ...record, placeVersionAfter: after, timings });
 	info(`  publish  ${formatSeconds(timings.publish)}  place version ${input.base} -> ${after ?? "?"}`);
 	info(bold(`published kernel ${identity.version} (hash ${identity.hash.slice(0, 16)}) into ${where}; servers run it after they restart`));
@@ -868,6 +908,7 @@ async function replacePlaceFlow(args: ParsedArgs, prepared: PreparedKernel) {
 	}
 	const after = typeof response?.versionNumber === "number" ? response.versionNumber : null;
 	logKernel(stateDir, { event: "kernel-published", ...record, placeVersionAfter: after, timings: watch.total() });
+	await announceKernel(proj, { ...record, placeVersionAfter: after });
 	const timings = watch.total();
 	if (isJson()) return emitJson({ ...summary, placeVersionBefore: before ?? null, placeVersionAfter: after, timings });
 	info(`  publish  ${formatSeconds(timings.publish)}  place version ${before ?? "?"} -> ${after ?? "?"}`);
@@ -898,7 +939,8 @@ async function kernelRestore(args: ParsedArgs) {
 		if (args.positionals.length > 1) throw new UsageError("kernel restore takes a place file OR --version <n>, not both");
 		if (!/^\d+$/.test(versionFlag) || Number(versionFlag) < 1) throw new UsageError(`--version must be a place version number, got "${versionFlag}"`);
 		const proj = project(args);
-		return luauRestore(
+		const done: Record<string, unknown>[] = [];
+		await luauRestore(
 			{
 				universeId: proj.config.universeId,
 				placeId: proj.config.placeId,
@@ -909,8 +951,10 @@ async function kernelRestore(args: ParsedArgs) {
 				yes: flagBool(args, "yes"),
 				timeoutSeconds: taskTimeout(args),
 			},
-			luauDeps(proj),
+			luauDepsKeeping(proj, done),
 		);
+		for (const entry of done) await announceKernel(proj, entry);
+		return;
 	}
 	const file = args.positionals[1];
 	if (!file || args.positionals.length > 2) throw new UsageError("usage: typetorch kernel restore <file.rbxl> | --version <n> [--dry-run] [--yes]");
@@ -976,6 +1020,7 @@ async function kernelRestore(args: ParsedArgs) {
 	}
 	const after = typeof response?.versionNumber === "number" ? response.versionNumber : null;
 	logKernel(stateDir, { event: "kernel-restored", ...record, placeVersionAfter: after });
+	await announceKernel(proj, { ...record, placeVersionAfter: after });
 	if (isJson()) return emitJson({ ...record, placeVersionAfter: after });
 	info(`  publish  ${formatSeconds(watch.timings.publish)}  place version ${latest ?? "?"} -> ${after ?? "?"}`);
 	info(bold(`published ${basename(path)} to ${where}; servers run it after they restart`));
