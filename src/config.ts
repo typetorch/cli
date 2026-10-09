@@ -19,6 +19,7 @@
  *   "revokedKeys": ["<base64>"],                // = the key asset's RevokedKeys (optional)
  *   "fallbackPublicKey": "<base64>",            // the fallback key; kernel deploy stamps it as FallbackPublicKey
  *   "keyAssetId": 123,                           // the key asset; kernel deploy stamps it as KeyAssetId
+ *   "kernelAssetId": 456,                        // kernel 0.4.1 loader (plans/22): the kernel asset `kernel deploy --asset` uploads to
  *   // The TypeTorch backend (`typetorch backend setup` writes it; CLI 0.8 called it "fleet", still read with a warning):
  *   "backend": { "url": "https://backend.example.com" },
  *   // Safety thresholds (health.ts; kernel 0.3.7), all optional:
@@ -63,6 +64,8 @@ export interface ProjectConfig {
 	fallbackPublicKey?: string;
 	/** The key asset (`keys init`); stamped on the kernel as KeyAssetId. */
 	keyAssetId?: number;
+	/** Kernel 0.4.1 (plans/22): the group-owned kernel asset; `kernel deploy --asset` adds versions to it. */
+	kernelAssetId?: number;
 	/**
 	 * The TypeTorch backend (fleet: heartbeats, deploy reports, alerts; analytics; the owner list), what the CLI talks
 	 * to. `typetorch backend setup` writes it. The keys come from the game repo's .env (backend.ts).
@@ -130,6 +133,7 @@ const KNOWN_KEYS = new Set([
 	"revokedKeys",
 	"fallbackPublicKey",
 	"keyAssetId",
+	"kernelAssetId",
 	"backend",
 	"fleet", // CLI 0.8's name for "backend": read with a warning (CLI 0.9 only)
 	"health",
@@ -273,6 +277,11 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			warnings.push(`"fleet" is now "backend" (CLI 0.9): rename "fleet": { "url": ... } to "backend": { "url": ... } (typetorch backend setup does it)`);
 		}
 	}
+	let kernelAssetId: number | undefined;
+	if (raw.kernelAssetId !== undefined) {
+		kernelAssetId = positiveInt(raw.kernelAssetId);
+		if (kernelAssetId === undefined) errors.push(`"kernelAssetId" must be a positive integer (the kernel asset's id)`);
+	}
 	let keyAssetId: number | undefined;
 	if (raw.keyAssetId !== undefined) {
 		keyAssetId = positiveInt(raw.keyAssetId);
@@ -318,6 +327,7 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			...(Array.isArray(raw.revokedKeys) ? { revokedKeys: raw.revokedKeys as string[] } : {}),
 			...(typeof raw.fallbackPublicKey === "string" ? { fallbackPublicKey: raw.fallbackPublicKey } : {}),
 			...(keyAssetId !== undefined ? { keyAssetId } : {}),
+			...(kernelAssetId !== undefined ? { kernelAssetId } : {}),
 			...(backend ? { backend } : {}),
 			...(health ? { health } : {}),
 			...(autoRollback ? { autoRollback } : {}),
@@ -363,7 +373,7 @@ export function loadProject(configPath?: string, cwd: string = process.cwd()): P
 	return { root: dirname(path), configPath: path, config, warnings };
 }
 
-export type KeyConfigField = "signingPublicKeys" | "revokedKeys" | "fallbackPublicKey" | "keyAssetId" | "backend";
+export type KeyConfigField = "signingPublicKeys" | "revokedKeys" | "fallbackPublicKey" | "keyAssetId" | "backend" | "kernelAssetId";
 
 /** The backend's base URL: https (game servers only reach https; http on localhost for this PC), no credentials in it. */
 export function backendUrlError(value: unknown): string | undefined {

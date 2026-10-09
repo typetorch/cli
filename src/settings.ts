@@ -19,6 +19,7 @@
  * message without a branch). Game code can write the DataStore but can't sign, so servers refuse anything else.
  * Server-only: the record holds tokens (fleet, analytics); nothing here prints them (`maskSecrets`).
  */
+import { pointerProblems } from "./kernelasset.ts";
 import { updateEntry, type KeyWrite } from "./durablehead.ts";
 import type { OpenCloud } from "./opencloud.ts";
 import { DEPLOY_TOPIC } from "./opencloud.ts";
@@ -73,6 +74,8 @@ export interface SettingsBody {
 	/** Before framework 0.4: the analytics sink settings. CLI 0.9 derives it from `backend` (other fields kept). */
 	analytics?: Record<string, unknown>;
 	game?: Record<string, unknown>;
+	/** Kernel 0.4.1 loader (plans/22): which kernel asset version servers run, per channel (kernelasset.ts). */
+	kernel?: { prod?: unknown; dev?: unknown };
 }
 
 /**
@@ -161,6 +164,13 @@ export function bodyProblems(body: SettingsBody): string[] {
 		for (const [branch, channel] of Object.entries(body.channels)) if (channel !== "prod" && channel !== "dev") problems.push(`channels.${branch} must be prod or dev`);
 	}
 	if (body.backend !== undefined) problems.push(...backendProblems(body.backend));
+	if (body.kernel !== undefined) {
+		if (typeof body.kernel !== "object" || body.kernel === null || Array.isArray(body.kernel)) problems.push("kernel must be { prod?, dev? }");
+		else for (const [channel, pointer] of Object.entries(body.kernel)) {
+			if (channel !== "prod" && channel !== "dev") problems.push(`kernel.${channel}: only prod and dev`);
+			else if (pointer !== undefined) problems.push(...pointerProblems(pointer).map((p) => `kernel.${channel}: ${p}`));
+		}
+	}
 	if (body.game !== undefined) {
 		const size = Buffer.byteLength(JSON.stringify(body.game), "utf8");
 		if (size > SETTINGS_GAME_MAX) problems.push(`game is ${size} bytes of JSON, over ${SETTINGS_GAME_MAX}`);
@@ -227,6 +237,10 @@ export function maskSecrets(value: unknown, key = ""): unknown {
 export function describeFields(body: SettingsBody): string[] {
 	const lines: string[] = [];
 	if (body.defaultBranch !== undefined) lines.push(`defaultBranch  ${body.defaultBranch}`);
+	if (body.kernel && typeof body.kernel === "object") {
+		const describe = (p: unknown) => (p && typeof p === "object" ? `${(p as { version?: string }).version ?? "?"} (version ${(p as { versionId?: number }).versionId ?? "?"})` : "-");
+		lines.push(`kernel         prod ${describe(body.kernel.prod)}, dev ${describe(body.kernel.dev)}`);
+	}
 	if (body.channels) lines.push(`channels       ${Object.entries(body.channels).map(([b, c]) => `${b}=${c}`).join(", ") || "(none)"}`);
 	if (body.access) {
 		const members = Object.keys(body.access.members ?? {}).length;

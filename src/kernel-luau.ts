@@ -251,6 +251,11 @@ export async function luauDeploy(input: DeployInput, deps: LuauDeps): Promise<vo
 	const check = parseKernelTaskResult(checkRun.results);
 	const crossCheck = compareSlots(check.newSlots, input.cliSlots, check.hashMode);
 	const problems = [...check.problems, ...crossCheck.map((p) => `the task's slots vs the kernel build: ${p}`)];
+	// Kernel 0.4.1 (plans/22): a place with the loader gets its kernel from the asset; patching the kernel in directly
+	// would make the loader stand down. Only install-loader (which removes the direct slots) may run here.
+	if (check.oldKernel.loader === "true" && !input.remove?.length && input.slots.some((s) => s.name === "TypeTorchKernel")) {
+		problems.push("the place runs the kernel loader (kernel 0.4.1+): update the kernel with typetorch kernel deploy --asset, or refresh the loader and its baked kernel with typetorch kernel install-loader");
+	}
 	const report = { universeId, placeId, engine: "luau", base, kernel: input.kernel, slots: input.slots, settings: input.settings, check, crossCheck, cliSlots: input.cliSlots, task: checkRun.path, ...input.logFields };
 	writeFileSync(input.reportPath, JSON.stringify(report, null, "\t"));
 	if (!isJson()) {

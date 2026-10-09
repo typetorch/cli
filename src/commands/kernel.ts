@@ -60,6 +60,7 @@ import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, noteRegistryFlags,
 import { addBackupToProject, BACKUP_FILE, BACKUP_SLOT, BackupError, backupHead, backupRbxm, findKeptPayload, PAYLOADS_DIR, type BackupInfo } from "../payloads.ts";
 import { luauDeploy, luauRestore, type LuauDeps } from "../kernel-luau.ts";
 import { readSlotsRbxm, settingValues, slotsProject, TASK_TIMEOUT_MAX } from "../kernelpatch-task.ts";
+import { assetDeployCommand, drainCommand as drainKernelCommand, installLoader, promoteCommand as promoteKernelCommand, rollbackCommand as rollbackKernelCommand } from "./kernel-asset.ts";
 
 export const kernelFlags = {
 	kernel: "string",
@@ -86,6 +87,16 @@ export const kernelFlags = {
 	version: "string",
 	/** The luau engine's task timeout in seconds (default and maximum 300). */
 	timeout: "string",
+	/** Kernel 0.4.1 loader (plans/22, kernel-asset.ts): upload the kernel as an asset version and sign the pointer. */
+	asset: "boolean",
+	channel: "string",
+	drain: "string",
+	reupload: "boolean",
+	"new-asset": "boolean",
+	force: "boolean",
+	to: "string",
+	window: "string",
+	"min-kernel": "string",
 } as const;
 
 /** One bootstrap head: what the kernel trusts unsigned for that branch (plans/03 "Bootstrap heads"). */
@@ -360,10 +371,15 @@ export async function kernelCommand(args: ParsedArgs) {
 	const sub = args.positionals[0];
 	if (sub === "deploy") return kernelDeploy(args);
 	if (sub === "restore") return kernelRestore(args);
-	throw new UsageError(`unknown kernel subcommand "${sub ?? ""}" (deploy, restore)`);
+	// Kernel 0.4.1 loader (plans/22): kernel-asset.ts.
+	if (sub === "install-loader") return installLoader(args);
+	if (sub === "promote") return promoteKernelCommand(args);
+	if (sub === "rollback") return rollbackKernelCommand(args);
+	if (sub === "drain") return drainKernelCommand(args);
+	throw new UsageError(`unknown kernel subcommand "${sub ?? ""}" (deploy, restore, install-loader, promote, rollback, drain)`);
 }
 
-interface PreparedKernel {
+export interface PreparedKernel {
 	proj: Project;
 	kernelDir: string;
 	identity: KernelIdentity;
@@ -378,7 +394,7 @@ interface PreparedKernel {
 }
 
 /** Steps 1-3: check, identify, build the stamped kernel place (.typetorch/place.rbxl). */
-async function prepareKernel(args: ParsedArgs): Promise<PreparedKernel> {
+export async function prepareKernel(args: ParsedArgs): Promise<PreparedKernel> {
 	const proj = project(args);
 	const kernelDir = resolveKernelDir(proj, flagString(args, "kernel"));
 	const watch = new Stopwatch();
@@ -484,6 +500,10 @@ export function prepareBackup(
 }
 
 async function kernelDeploy(args: ParsedArgs) {
+	if (flagBool(args, "asset")) return assetDeployCommand(args);
+	for (const flag of ["channel", "drain", "reupload", "new-asset"]) {
+		if (args.flags[flag] !== undefined) throw new UsageError(`--${flag} belongs to kernel deploy --asset (the kernel as an asset, kernel 0.4.1+)`);
+	}
 	const replacePlace = flagBool(args, "replace-place");
 	if (replacePlace && flagBool(args, "patch")) throw new UsageError("--patch and --replace-place are two different modes; pick one");
 	if (replacePlace) {
