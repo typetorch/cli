@@ -11,6 +11,7 @@ import type { ProjectConfig } from "./config.ts";
 import { readRbxm, writeSingleInstanceRbxm } from "./rbxm.ts";
 import { encodeRekeyMessage, REKEY_TOPIC, type OpenCloud } from "./opencloud.ts";
 import { publicKeyError } from "./signing.ts";
+import { PLACE_GAME_LUAU } from "./livecheck.ts";
 
 export const KEY_ASSET_ROOT = "TypeTorchKeys";
 export const KEY_ASSET_NAME = "TypeTorch keys";
@@ -169,8 +170,10 @@ if slot then
 		keyAssetId = if typeof(keyAssetId) == "number" then string.format("%d", keyAssetId) else keyAssetId,
 		fallbackPublicKey = slot:GetAttribute("FallbackPublicKey"),
 		version = slot:GetAttribute("KernelVersion"),
+		bootstrapHeads = slot:GetAttribute("BootstrapHeads"),
 	}
 end
+${PLACE_GAME_LUAU}
 local id = ${keyAssetId ?? "nil"}
 if id then
 	local ok, err = pcall(function()

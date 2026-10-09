@@ -61,6 +61,9 @@ import { addBackupToProject, BACKUP_FILE, BACKUP_SLOT, BackupError, backupHead, 
 import { luauDeploy, luauRestore, type LuauDeps } from "../kernel-luau.ts";
 import { readSlotsRbxm, settingValues, slotsProject, TASK_TIMEOUT_MAX } from "../kernelpatch-task.ts";
 import { announce, markPosterFor } from "../marks.ts";
+import { readSharedSeq, type SharedSeq } from "../seqstore.ts";
+import { defaultBranchHead, deployDefaultHint, nothingToRunReason, type HeadState } from "../livecheck.ts";
+import type { Interaction } from "../interact.ts";
 
 export const kernelFlags = {
 	kernel: "string",
@@ -87,6 +90,8 @@ export const kernelFlags = {
 	version: "string",
 	/** The luau engine's task timeout in seconds (default and maximum 300). */
 	timeout: "string",
+	/** Publish even though the default branch has no verified head and no backup is baked (live servers kick players). */
+	force: "boolean",
 } as const;
 
 /** One bootstrap head: what the kernel trusts unsigned for that branch (plans/03 "Bootstrap heads"). */
@@ -537,9 +542,56 @@ async function kernelDeploy(args: ParsedArgs) {
 	if (engine !== "luau" && args.flags.timeout !== undefined) throw new UsageError("--timeout is for the luau engine's tasks");
 	const timeout = engine === "luau" ? taskTimeout(args) : TASK_TIMEOUT_MAX;
 	const prepared = await prepareKernel(args);
+	// The default branch's head (the kernel's DataStore heads, else the BootstrapHeads stamped now) before publishing.
+	const deployer = openCloud("deploy", true);
+	const shared: SharedSeq | undefined = deployer ? await readSharedSeq(deployer, prepared.proj.config.universeId) : undefined;
+	await guardDefaultBranch({
+		config: prepared.proj.config,
+		head: defaultBranchHead({ config: prepared.proj.config, shared, local: (await readHistory(prepared.proj)).heads, bootstrap: prepared.heads as Record<string, unknown> }),
+		backupBaked: prepared.backup !== null,
+		force: flagBool(args, "force"),
+		dryRun: flagBool(args, "dry-run"),
+		io: interaction(),
+	});
 	if (replacePlace) return replacePlaceFlow(args, prepared);
 	if (engine === "luau") return luauFlow(args, prepared, timeout);
 	return patchFlow(args, prepared, engine, placeFile);
+}
+
+/**
+ * Kernel 0.3.6+ ("never an empty server"): a kernel whose default branch has no verified head, published without a
+ * backup build, moves every player of the live game out after 15 s and kicks them after 3 bounces (cecot, 2026-10).
+ * So: refuse unless a person says y (or --force). A dry run only warns; an unreadable DataStore only warns.
+ */
+export async function guardDefaultBranch(input: {
+	config: Pick<Project["config"], "defaultBranch" | "branches">;
+	head: HeadState;
+	backupBaked: boolean;
+	force: boolean;
+	dryRun: boolean;
+	io: Pick<Interaction, "interactive" | "confirm">;
+}): Promise<void> {
+	const { config, head } = input;
+	if (input.backupBaked || head.state === "verified") return;
+	const fix = `Deploy ${config.defaultBranch} first (${deployDefaultHint(config)}): servers without the kernel ignore it`;
+	if (head.state === "unknown") {
+		warn(`can't tell whether ${config.defaultBranch} has a verified head (${head.detail}) and no backup build is baked: if it was never deployed, ${nothingToRunReason(config.defaultBranch)}. ${fix}`);
+		return;
+	}
+	const reason = `${nothingToRunReason(config.defaultBranch)} (${head.detail}; the place keeps any older backup it has: \`typetorch doctor\` shows it)`;
+	if (input.dryRun) {
+		warn(`a real deploy would ask first: ${reason}. ${fix}`);
+		return;
+	}
+	if (input.force) {
+		warn(`${reason} (--force)`);
+		return;
+	}
+	if (!input.io.interactive) throw new KernelCheckError(`refusing to publish the kernel: ${reason}. ${fix}, or pass --force`);
+	warn(reason);
+	if (!(await input.io.confirm(`Publish the kernel anyway? Live players are moved out and kicked until ${config.defaultBranch} is deployed`))) {
+		throw new KernelCheckError(`not published. ${fix}`);
+	}
 }
 
 /**

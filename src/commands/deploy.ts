@@ -41,6 +41,11 @@ import {
 } from "./common.ts";
 import { makeEntry, messageFor } from "./release.ts";
 import { autoRefreshBackup } from "./backup.ts";
+import { defaultBranchHead, defaultBranchWarning, readPlaceGame, SERVER_SLOT } from "../livecheck.ts";
+import { lastKernelDeploy } from "../keycheck.ts";
+import type { Project } from "../config.ts";
+import type { OpenCloud } from "../opencloud.ts";
+import type { LiveHead } from "../deployments.ts";
 
 export const deployFlags = {
 	branch: "string",
@@ -97,6 +102,44 @@ export function checkChannelGuard(input: {
 	throw new ChannelGuardError(
 		`refusing to deploy ${problems.join(" and ")} to prod-channel branch "${input.branch}" (pass --force to override)`,
 	);
+}
+
+/**
+ * The warning for a deploy that went to a non-default branch while the default branch has no verified head (cecot,
+ * 2026-10: `deploy` from an unmapped git branch went to a dev branch; prod stayed empty and the kernel kept kicking
+ * players). The place is read (a small Luau Execution task, assets key) only in that case; without it, this
+ * machine's kernel log says whether the kernel was installed. Never throws.
+ */
+export async function defaultBranchNotice(input: {
+	proj: Pick<Project, "root" | "config">;
+	branch: string;
+	shared: SharedSeq | undefined;
+	local: Map<string, LiveHead>;
+	assets: Pick<OpenCloud, "runLuau"> | undefined;
+	stateDir?: string;
+}): Promise<string | undefined> {
+	const { proj, branch } = input;
+	if (branch === proj.config.defaultBranch) return undefined;
+	const head = defaultBranchHead({ config: proj.config, shared: input.shared, local: input.local });
+	if (head.state !== "none" && head.state !== "unsigned") return undefined;
+	let kernel: boolean | undefined;
+	let backup: { present: boolean; channel?: string } | undefined;
+	let kernelSource: string | undefined;
+	try {
+		if (!input.assets) throw new Error("no assets key");
+		const place = await readPlaceGame(input.assets, proj.config.universeId, proj.config.placeId);
+		kernel = place.game.slots.includes(SERVER_SLOT);
+		backup = place.backup;
+		// The place's BootstrapHeads may still cover the default branch.
+		if (kernel && defaultBranchHead({ config: proj.config, shared: input.shared, local: input.local, bootstrap: place.game.bootstrapHeads }).state === "verified") return undefined;
+	} catch {
+		const recorded = lastKernelDeploy(input.stateDir ?? projectStateDir(proj as Project));
+		if (recorded) {
+			kernel = true;
+			kernelSource = `installed by \`kernel deploy\` from this machine${recorded.at ? ` at ${recorded.at}` : ""}`;
+		}
+	}
+	return defaultBranchWarning({ config: proj.config, branch, head, kernel, backup, kernelSource });
 }
 
 export async function deployCommand(args: ParsedArgs) {
@@ -229,6 +272,8 @@ export async function deployCommand(args: ParsedArgs) {
 		info(`  seq          #${entry.seq} (at least; claimed when published). Shared: ${describeShared(shared)}`);
 		if (entry.fromArtifactId) info(`  replaces     ${entry.fromArtifactId} (asset ${entry.fromAssetId})`);
 		info(`  message      ${DEPLOY_TOPIC} ${JSON.stringify({ ...data, a: "<assetId>" })}`);
+		const unreached = await defaultBranchNotice({ proj, branch, shared, local: history.heads, assets });
+		if (unreached) warn(unreached);
 		info(dim(`  ${formatTimings(watch.total())}`));
 		return;
 	}
@@ -337,6 +382,9 @@ export async function deployCommand(args: ParsedArgs) {
 	const fleet = await waitAfterRelease(proj, result, { seconds: wait, oc: deployer, branchChannel: targetChannel, threshold: rollback.threshold, thresholdSource: rollback.source, keyPaths });
 	// Fresh backups: the replaced build becomes the place's backup when proven healthy (never fails the deploy).
 	const backup = fleet?.autoRollback?.rolledBack ? undefined : await autoRefreshBackup({ proj, action: "deploy", branch, branchChannel: targetChannel, previous: previousHead });
+	// A deploy to another branch while the default branch (what public servers run) has nothing (livecheck.ts).
+	const unreached = await defaultBranchNotice({ proj, branch, shared, local: history.heads, assets });
+	if (unreached) warn(unreached);
 	if (isJson()) {
 		return emitJson({ deployment: result.entry, message: result.message, registry: result.registry, assetName: name.name, timings, ...(fleet ? { fleet } : {}), ...(backup ? { backup } : {}) });
 	}

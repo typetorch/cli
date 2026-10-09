@@ -1,5 +1,6 @@
 /**
- * `typetorch doctor`: tools, the Config section (every value the CLI reads and where it came from: typetorch.json, the
+ * `typetorch doctor`: OK lines are hidden unless --show-ok (problems and info always show; --json lists everything).
+ * Tools, the Config section (every value the CLI reads and where it came from: typetorch.json, the
  * game repo's .env, the environment, the settings record; secrets only as set / unset), API keys per job (never
  * printed), the approval policy, the state dir, the prod signing keys (keycheck.ts: both key files vs typetorch.json, the
  * key asset and the place; mismatches warn), the backend, and Open Cloud scopes, each probed with its job's key through
@@ -28,6 +29,11 @@
  *                                                             is checked by the first task); probed with the assets key
  *                                                             and again with the place key ("scope luau (place)": kernel
  *                                                             deploy's luau engine, kernel restore --version)
+ *   live servers  the place read above (Luau Execution) + DataStore heads   FAIL when the place has the kernel, the default
+ *                                                             branch no verified head and the place no backup: kernel
+ *                                                             0.3.6+ moves every player out after 15 s, kicks after 3
+ *                                                             bounces (livecheck.ts); warn on an old roblox-ts build
+ *                                                             running next to the kernel ("old game build")
  *   place download GET the place's Asset Delivery location    200 = ok, 403 = info, as expected: Roblox has no API-key
  *                                                             route for place files (legacy-asset:manage can't be granted;
  *                                                             universe.place:read only covers the version history), so
@@ -35,7 +41,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { type ParsedArgs, flagString } from "../args.ts";
+import { type ParsedArgs, flagBool, flagString } from "../args.ts";
 import { CONFIG_FILE, findProjectRoot, loadProject, type Project } from "../config.ts";
 import { ADMIN_TOKEN_VAR, API_KEY_VARS, BACKEND_KEY_VAR, CHILD_ENV_VAR, FALLBACK_KEY_FILE_VAR, JOB_KEY_VARS, JOB_SCOPES, KEY_FILE_VAR, LEGACY_BACKEND_VARS, settings, type KeyJob, type Settings } from "../env.ts";
 import { gitInfo } from "../git.ts";
@@ -52,19 +58,20 @@ import { capture } from "../proc.ts";
 import { hasZstd, isBun, runtimeName } from "../runtime.ts";
 import { rojoBinary } from "../build.ts";
 import { describeFields, readSettings, verifySettingsRecord, type SettingsBody, type SettingsRead } from "../settings.ts";
-import { DS_READ_SCOPE, DS_WRITE_SCOPES, HEADS_KEY, SEQ_DATASTORE } from "../seqstore.ts";
+import { DS_READ_SCOPE, DS_WRITE_SCOPES, HEADS_KEY, readSharedSeq, SEQ_DATASTORE } from "../seqstore.ts";
+import { defaultBranchHead, liveServerChecks, versionBeforeKernel } from "../livecheck.ts";
 import { DURABLE_SCOPES, NOT_DURABLE } from "../durablehead.ts";
 import { createHash } from "node:crypto";
 import { stateDir } from "../state.ts";
 import { gatherKeyFacts, keyChecks, type Check, type Status } from "../keycheck.ts";
-import { KEY_FILE_FLAGS, signingKeyPaths } from "./common.ts";
+import { KEY_FILE_FLAGS, signingKeyPaths, withLocal } from "./common.ts";
 import { accessStatus, accessWarning, describeAccess } from "../access.ts";
 import { loadSigner } from "../keyfiles.ts";
 import { declaresLoadstring } from "../kernelpatch.ts";
 import { resolveKernelDir } from "./kernel.ts";
 import { SAVE_SETTING_HELP } from "../kernel-luau.ts";
 
-export const doctorFlags = { ...KEY_FILE_FLAGS } as const;
+export const doctorFlags = { ...KEY_FILE_FLAGS, "show-ok": "boolean" } as const;
 
 function mark(status: Status): string {
 	return status === "ok" ? green("ok  ") : status === "info" ? "info" : status === "warn" ? yellow("warn") : red("FAIL");
@@ -352,6 +359,12 @@ export function placeDownloadProbe(status: number, text: string): [Status, strin
 	return ["warn", `unexpected ${status}${status >= 300 ? ` ${short(text)}` : ""}`];
 }
 
+/** The lines doctor prints: OK lines only with --show-ok (problems and info always); `hidden` counts the rest. */
+export function visibleChecks(checks: Check[], showOk: boolean): { shown: Check[]; hidden: number } {
+	const shown = showOk ? checks : checks.filter((check) => check.status !== "ok");
+	return { shown, hidden: checks.length - shown.length };
+}
+
 export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 	const checks: Check[] = [];
 	const cwd = process.cwd();
@@ -507,6 +520,11 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 			assets: keys.assets ? new OpenCloud(keys.assets.key) : undefined,
 		}));
 		checks.push(...keyChecks(facts));
+		// Live servers (livecheck.ts): the kernel in the place with no verified default-branch head and no backup kicks
+		// every player. The head comes from the kernel's DataStore heads (the deploy key), else this machine's log.
+		const shared = keys.deploy ? await withJob("default branch head", () => readSharedSeq(new OpenCloud(keys.deploy!.key), proj!.config.universeId)) : undefined;
+		const head = defaultBranchHead({ config: proj.config, shared, local: withLocal(proj).heads, bootstrap: facts.game?.bootstrapHeads });
+		checks.push(...liveServerChecks({ config: proj.config, game: facts.game, backup: facts.backup, head, restoreVersion: versionBeforeKernel(stateDir(proj.root)) }));
 	}
 
 	// The settings record (deploy key) feeds the backend checks (its backend section, the signed owners) and the Config
@@ -632,8 +650,9 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 		emitJson({ ok: failed === 0, config: rows, checks });
 	} else {
 		printConfig(rows);
-		for (const check of checks) info(`${mark(check.status)}  ${check.name.padEnd(20)} ${check.detail}`);
-		info(failed ? red(`${failed} problem(s)`) : green("all required checks passed"));
+		const { shown, hidden } = visibleChecks(checks, flagBool(args, "show-ok"));
+		for (const check of shown) info(`${mark(check.status)}  ${check.name.padEnd(20)} ${check.detail}`);
+		info(`${failed ? red(`${failed} problem(s)`) : green("all required checks passed")}${hidden ? dim(`  (${hidden} ok hidden: --show-ok lists them)`) : ""}`);
 	}
 	if (failed) process.exitCode = 1;
 }

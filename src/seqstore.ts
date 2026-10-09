@@ -72,6 +72,8 @@ export interface SharedSeq {
 	highest?: number;
 	heads?: number;
 	deployments?: number;
+	/** The kernel's `heads` value by branch (livecheck.ts); undefined when that entry couldn't be read ({} when missing). */
+	branches?: Record<string, unknown>;
 	/** The CLI's counter (`seq`). */
 	counter?: number;
 	/** Why it isn't readable. */
@@ -94,7 +96,10 @@ export async function readSharedSeq(oc: Requester, universeId: number): Promise<
 	};
 	const [heads, deployments, counter] = await Promise.all(keys.map(read));
 	const result: SharedSeq = { readable: heads.ok || deployments.ok || counter.ok };
-	if (heads.ok) result.heads = highestInHeads(heads.value);
+	if (heads.ok) {
+		result.heads = highestInHeads(heads.value);
+		result.branches = heads.value && typeof heads.value === "object" && !Array.isArray(heads.value) ? (heads.value as Record<string, unknown>) : {};
+	}
 	if (deployments.ok) result.deployments = highestInDeployments(deployments.value);
 	if (counter.ok) result.counter = seqOf(counter.value);
 	const found = [result.heads, result.deployments, result.counter].filter((n): n is number => n !== undefined);
