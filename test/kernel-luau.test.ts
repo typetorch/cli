@@ -35,7 +35,7 @@ import {
 	type SlotInventory,
 } from "../src/kernelpatch-task";
 import { setOutputMode } from "../src/log";
-import { dir, fakeCloud, harness, hasLune, lune, makeDeps, nextRun, place, quiet, slotsFile } from "./fixtures/kernel-luau/lune-cloud";
+import { dir, fakeCloud, harness, hasLune, loaderSlotsFile, lune, makeDeps, nextRun, place, quiet, slotsFile } from "./fixtures/kernel-luau/lune-cloud";
 import { OpenCloud, setLuauRetryDelay } from "../src/opencloud";
 import { writeRbxm } from "../src/rbxm";
 import { DOWNLOAD_SCOPE_HINT, taskTimeout } from "../src/commands/kernel";
@@ -331,6 +331,33 @@ describe.skipIf(!hasLune)("the deploy task under Lune (mock DataModel)", () => {
 		expect(wrong.result.problems.join(" ")).toContain("runs on place version 56");
 		const none = harness(kernelTaskScript(config()), place("game-installed.rbxl"), undefined);
 		expect(none.result.problems.join(" ")).toContain("no binary input");
+	});
+
+	test("install-loader: the loader slots go in, every copy of the direct kernel goes out, the loader carries the identity", () => {
+		const LOADER = [
+			{ service: "ServerScriptService", name: "TypeTorchLoader" },
+			{ service: "ReplicatedFirst", name: "TypeTorchLoaderClient" },
+			{ service: "ServerStorage", name: "TypeTorchKernelBaked" },
+		];
+		const cfg = config({ mode: "save", slots: LOADER, remove: SLOTS, install: true });
+		const { result, calls, saved } = harness(kernelTaskScript(cfg), place("game-installed.rbxl"), loaderSlotsFile("kernel-v2"));
+		const r = parseKernelTaskResult([result]);
+		expect(r.problems).toEqual([]);
+		expect(calls.save).toBe(1);
+		expect(r.removed).toEqual([
+			{ slot: "ServerScriptService.TypeTorchKernel", copies: 1, instances: 7 },
+			{ slot: "ReplicatedStorage.TypeTorchKernelShared", copies: 1, instances: 3 },
+			{ slot: "ReplicatedFirst.TypeTorchKernelClient", copies: 2, instances: 2 },
+		]);
+		expect(r.identity).toMatchObject({ loader: "true", KernelVersion: "1.1.0" });
+		// References into the removed kernel are cleared (the baked copy is not where they pointed).
+		expect(r.refs.nCleared).toBe(2);
+		expect(r.outside.nChanged).toBe(0);
+		// The saved place: no direct kernel, the loader and its baked kernel.
+		const view = parseKernelTaskResult([harness(kernelTaskScript(config({ mode: "verify", slots: LOADER, placeVersion: 57 })), saved!, undefined).result]);
+		expect(view.newSlots.map((s) => [s.slot, s.copies])).toEqual([["ServerScriptService.TypeTorchLoader", 1], ["ReplicatedFirst.TypeTorchLoaderClient", 1], ["ServerStorage.TypeTorchKernelBaked", 1]]);
+		const direct = parseKernelTaskResult([harness(kernelTaskScript(config({ mode: "verify", placeVersion: 57 })), saved!, undefined).result]);
+		expect(direct.newSlots.every((s) => s.copies === 0)).toBe(true);
 	});
 
 	test("the restore task reports the version's kernel; only its save script saves", () => {

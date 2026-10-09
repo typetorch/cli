@@ -3,6 +3,9 @@
 --   lune run make-slots.luau <kernel.rbxl> <out.rbxm> [extra]
 --     the three kernel slots of a kernel place (a fixture of test/fixtures/kernel-patch/make-fixtures.luau); "extra"
 --     also puts a non-slot instance in (ServerScriptService.NotASlot), which the task must refuse
+--   lune run make-slots.luau <kernel.rbxl> <out.rbxm> loader
+--     the loader slots (install-loader): ServerScriptService.TypeTorchLoader, ReplicatedFirst.TypeTorchLoaderClient and
+--     ServerStorage.TypeTorchKernelBaked holding the kernel slots of <kernel.rbxl>
 --   lune run make-slots.luau - <out.rbxm> backup <artifactId>
 --     only ServerStorage.TypeTorchBackup: a small prod payload (Model, Server/boot ModuleScript) stamped like
 --     payloads.ts backupRbxm (BackupArtifactId and the other Backup* attributes)
@@ -22,7 +25,30 @@ local function serviceFolder(name)
 	return folder
 end
 
-if process.args[3] == "backup" then
+if process.args[3] == "loader" then
+	-- install-loader: the loader Script (identity on it), its client, and the kernel of <kernel.rbxl> baked in ServerStorage.
+	local kernel = roblox.deserializePlace(fs.readFile(process.args[1]))
+	local loader = roblox.Instance.new("Script")
+	loader.Name = "TypeTorchLoader"
+	loader.Source = "-- loader"
+	for _, key in { "KernelVersion", "KernelHash", "KeyAssetId" } do
+		loader:SetAttribute(key, kernel:GetService("ServerScriptService").TypeTorchKernel:GetAttribute(key))
+	end
+	loader.Parent = serviceFolder("ServerScriptService")
+	local client = roblox.Instance.new("LocalScript")
+	client.Name = "TypeTorchLoaderClient"
+	client.Source = "-- loader client"
+	client.Parent = serviceFolder("ReplicatedFirst")
+	local baked = roblox.Instance.new("Folder")
+	baked.Name = "TypeTorchKernelBaked"
+	for _, slot in { { "ServerScriptService", "TypeTorchKernel" }, { "ReplicatedStorage", "TypeTorchKernelShared" }, { "ReplicatedFirst", "TypeTorchKernelClient" } } do
+		local holder = baked:FindFirstChild(slot[1]) or roblox.Instance.new("Folder")
+		holder.Name = slot[1]
+		holder.Parent = baked
+		kernel:GetService(slot[1]):FindFirstChild(slot[2]):Clone().Parent = holder
+	end
+	baked.Parent = serviceFolder("ServerStorage")
+elseif process.args[3] == "backup" then
 	local id = process.args[4]
 	local model = roblox.Instance.new("Model")
 	model.Name = "TypeTorchBackup"

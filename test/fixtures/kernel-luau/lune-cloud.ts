@@ -31,6 +31,16 @@ export function slotsFile(kernel: string, extra = false): string {
 	return out;
 }
 
+/** The loader slots .rbxm (install-loader) with the kernel of a fixture place baked in. */
+export function loaderSlotsFile(kernel: string): string {
+	const out = join(dir, `${kernel}.loader.slots.rbxm`);
+	if (!existsSync(out)) {
+		const r = Bun.spawnSync([lune, "run", join(fixtures, "kernel-luau", "make-slots.luau"), join(dir, `${kernel}.rbxl`), out, "loader"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+		if (r.exitCode !== 0) throw new Error(r.stderr.toString());
+	}
+	return out;
+}
+
 /** A backup-only slots .rbxm: ServerStorage.TypeTorchBackup, a prod payload stamped BackupArtifactId = artifactId. */
 export function backupSlotsFile(artifactId: string): string {
 	const out = join(dir, `backup-${artifactId}.slots.rbxm`);

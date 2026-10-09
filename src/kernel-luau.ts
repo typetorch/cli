@@ -105,6 +105,8 @@ export interface DeployInput {
 	cliSlots: SlotInventory[];
 	baseFlag?: string;
 	install: boolean;
+	/** Slots removed (every copy) and not replaced: install-loader moves the kernel installed directly into the loader. */
+	remove?: SlotRef[];
 	dryRun: boolean;
 	yes: boolean;
 	timeoutSeconds: number;
@@ -147,6 +149,7 @@ export function deploySummaryLines(input: {
 	}
 	const settings = check.settings.map((s) => `${s.path} ${s.error ? `CAN'T BE SET (${s.error})` : s.changed ? `${s.before ?? "(unreadable)"} -> ${s.after ?? s.want}` : `${s.after ?? s.want} (unchanged)`}`);
 	if (settings.length) lines.push(`${pad("settings")} ${settings.join("; ")}`);
+	for (const r of check.removed) lines.push(`${pad("removed")} - ${r.slot.padEnd(40)} ${r.copies} cop${r.copies === 1 ? "y" : "ies"}, ${r.instances} instances (the loader installs the kernel from now on)`);
 	if (check.addedServices.length) lines.push(`${pad("services")} added: ${check.addedServices.join(", ")}`);
 	if (check.refs.nRemapped || check.refs.nCleared) {
 		lines.push(`${pad("refs")} ObjectValues into the old kernel: ${check.refs.nRemapped} re-pointed by path, ${check.refs.nCleared} cleared${check.refs.cleared.length ? ` (${check.refs.cleared.slice(0, 5).join("; ")})` : ""}`);
@@ -242,6 +245,7 @@ export async function luauDeploy(input: DeployInput, deps: LuauDeps): Promise<vo
 		install: input.install,
 		identitySlot: input.identitySlot,
 		expect: { KernelVersion: input.kernel.version, KernelHash: input.kernel.hash },
+		...(input.remove?.length ? { remove: input.remove } : {}),
 	};
 	const checkRun = await watch.stage("check", () => runTask(deps, { universeId, placeId, version: base.version, script: kernelTaskScript(config), timeoutSeconds: input.timeoutSeconds, binaryInput: sent.path, what: "check task" }));
 	const check = parseKernelTaskResult(checkRun.results);

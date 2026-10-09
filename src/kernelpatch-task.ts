@@ -216,6 +216,8 @@ export interface KernelTaskConfig {
 	expect: Record<string, string>;
 	/** mode "save": the check task's outside descriptor root; any other value aborts before the save. */
 	expectOutside?: string;
+	/** Slots whose every copy is removed and not replaced (install-loader: the kernel installed directly). */
+	remove?: SlotRef[];
 	expectOutsideList?: string[];
 }
 
@@ -409,6 +411,13 @@ local function kernelIdentity(identitySlot)
 	local identity = {}
 	local service = findService(identitySlot.service)
 	local folder = if service then service:FindFirstChild(identitySlot.name) else nil
+	-- Kernel 0.4.1 (plans/22): a place with the loader has no kernel folder of its own; the loader Script carries the
+	-- kernel's identity and trust roots instead.
+	if folder == nil then
+		local scripts = findService("ServerScriptService")
+		folder = if scripts then scripts:FindFirstChild("TypeTorchLoader") else nil
+		identity.loader = folder ~= nil
+	end
 	if folder ~= nil then
 		for _, key in { "KernelVersion", "KernelHash", "KernelCommit", "KeyAssetId", "FallbackPublicKey", "BackupArtifactId" } do
 			local value = folder:GetAttribute(key)
@@ -473,7 +482,12 @@ local function capped(list, value)
 end
 
 local slotSet = {}
+local inputSet = {} -- what the input may hold (CONFIG.slots); slotSet adds the slots to remove (CONFIG.remove)
 for _, slot in CONFIG.slots do
+	slotSet[slot.service .. "\0" .. slot.name] = true
+	inputSet[slot.service .. "\0" .. slot.name] = true
+end
+for _, slot in CONFIG.remove or {} do
 	slotSet[slot.service .. "\0" .. slot.name] = true
 end
 local function isSlotChild(service, child)
@@ -763,7 +777,7 @@ local function run()
 	end
 	for _, folder in inputRoot:GetChildren() do
 		for _, child in folder:GetChildren() do
-			if not slotSet[folder.Name .. "\0" .. child.Name] then
+			if not inputSet[folder.Name .. "\0" .. child.Name] then
 				problem("the kernel slots .rbxm holds " .. folder.Name .. "." .. child.Name .. ", which isn't a kernel slot")
 			end
 		end
@@ -895,6 +909,21 @@ local function run()
 	end
 	inputRoot:Destroy()
 	result.slots = slotReports
+	-- CONFIG.remove (install-loader: the kernel installed directly moves into the loader's baked copy): every copy goes.
+	local removed = {}
+	for _, slot in CONFIG.remove or {} do
+		local service = findService(slot.service)
+		local copies, count = 0, 0
+		for _, child in (if service then childrenOf(service) else nil) or {} do
+			if child.Name == slot.name then
+				copies += 1
+				count += 1 + #child:GetDescendants()
+				child:Destroy()
+			end
+		end
+		table.insert(removed, { slot = slot.service .. "." .. slot.name, copies = copies, instances = count })
+	end
+	result.removed = removed
 
 	local remapped, cleared = {}, {}
 	local nRemapped, nCleared = 0, 0
@@ -986,7 +1015,13 @@ local function run()
 		problem(nChanged .. " thing(s) outside the kernel slots changed during the patch (" .. table.concat(changed, "; ") .. "); nothing was saved")
 	end
 
-	-- 6. The slots now: one copy each, the identity the CLI expects.
+	-- 6. The slots now: one copy each (none of the removed ones), the identity the CLI expects.
+	for _, slot in CONFIG.remove or {} do
+		local service = findService(slot.service)
+		if service and service:FindFirstChild(slot.name) then
+			problem(slot.service .. "." .. slot.name .. " is still there after the patch removed it")
+		end
+	end
 	result.newSlots = slotInventories()
 	for _, entry in result.newSlots do
 		if entry.copies ~= 1 then
@@ -1087,6 +1122,8 @@ export interface KernelTaskResult {
 	inputBytes?: number;
 	/** Scripts whose Source the task couldn't read (their changes aren't listed). */
 	sourceUnreadable: number;
+	/** CONFIG.remove: what went (every copy). */
+	removed: { slot: string; copies: number; instances: number }[];
 	timings: Record<string, number>;
 }
 
@@ -1145,6 +1182,7 @@ export function parseKernelTaskResult(results: unknown[]): KernelTaskResult {
 		hashMode: str(raw.hashMode),
 		inputBytes: typeof raw.inputBytes === "number" ? raw.inputBytes : undefined,
 		sourceUnreadable: num(raw.sourceUnreadable),
+		removed: list(raw.removed).map((r) => ({ slot: String(r?.slot), copies: num(r?.copies), instances: num(r?.instances) })),
 		timings: isRecord(raw.timings) ? Object.fromEntries(Object.entries(raw.timings).map(([k, v]) => [k, num(v)])) : {},
 	};
 }
