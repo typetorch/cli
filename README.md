@@ -201,7 +201,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch rollback [--branch] [--to <commit\|artifactId\|assetId\|#seq>] [--force] [--dry-run] [--test] [--wait [s]]` | point the branch at an earlier, already approved asset (no build or upload) and tell its servers; no cloud test unless `--test` (it is an earlier build) |
 | `typetorch deployments [--branch] [--limit n]` | deployment history with git identity; `*` = each branch's live head; lists uploads that never went out |
 | `typetorch branch ls` | branches, channels and live heads |
-| `typetorch settings status` / `get [field\|game.<key>]` / `set game.<key> <json\|->` / `set analytics -` / `unset <field>` / `push` | the signed settings record (see "Settings"); `push` writes `defaultBranch`, `channels` and dev access from typetorch.json. `--dry-run`, `--force`, `--no-ping` |
+| `typetorch settings status` / `get [field\|game.<key>]` / `set game.<key> <json\|->` / `unset <field>` / `push` | the signed settings record (see "Settings"); `push` writes `defaultBranch`, `channels` and dev access from typetorch.json. `--dry-run`, `--force`, `--no-ping` |
 | `typetorch access push [--dry-run]` / `access status` | typetorch.json `members`, `revoked`, `devBadgeId` into the settings record's `access` / compare it with typetorch.json |
 | `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--engine luau\|splice\|lune] [--place-file <file>] [--timeout <s>] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build) into the live place (check, y/N, save, verify); no download: Luau Execution tasks do it (the luau engine), or `--place-file` patches a Studio copy (splice); `--replace-place --yes` for the template/test place only; see below |
 | `typetorch kernel restore --version <n> [--dry-run] [--yes]` | republish place version `n` (a task on it calls SavePlaceAsync): the undo of a kernel deploy |
@@ -516,7 +516,7 @@ Scopes: the assets key with `universe.place.luau-execution-session:read` + `:wri
 ### Fleet: servers, reports, alerts, --wait and automatic rollback
 
 Kernel 0.3.2+ posts a heartbeat per server, one report per deploy outcome per server (results `swapped`, `failed`,
-`rolled_back`, `skipped`, `booted`) and alerts to the **fleet API**, a small service (`@typetorch/analytics`'s server)
+`rolled_back`, `skipped`, `booted`) and alerts to the **fleet API**, a small service (the backend's fleet part, `@typetorch/backend`)
 you host. The CLI reads it:
 
 - **Setup:** `typetorch backend setup --url https://<host>` (see "Settings > Endpoint checks") writes the record's
