@@ -32,6 +32,11 @@ import { BACKUP_FILE, BACKUP_SLOT, BackupError, backupHead, backupRbxm, findKept
 import { openCloud, project, projectStateDir, readHistory } from "./common.ts";
 import { fleetFor } from "./fleet.ts";
 import { buildSlotsRbxm, IDENTITY_SLOT, KERNEL_LOG, luauDeps, taskTimeout } from "./kernel.ts";
+import { BAKED_SLOT, findKeptKernel } from "./kernel-asset.ts";
+import { pointerOf } from "../kernelasset.ts";
+import { readSettings } from "../settings.ts";
+import type { OpenCloud } from "../opencloud.ts";
+import type { SlotRef } from "../placepatch.ts";
 
 export const backupFlags = { build: "string", "dry-run": "boolean", yes: "boolean", force: "boolean", timeout: "string" } as const;
 
@@ -99,6 +104,8 @@ export interface RefreshInput {
 	build: BuildRef;
 	/** The backup slot's .rbxm and what the CLI's reader found in it. */
 	slotsBytes: Uint8Array;
+	/** The slots in it: the backup, and (loader places) the baked kernel. Default: the backup only. */
+	slots?: SlotRef[];
 	cliSlots: SlotInventory[];
 	dryRun: boolean;
 	/** No y/N (auto refresh inside a deploy the owner approved, or --yes). */
@@ -122,7 +129,7 @@ export async function refreshBackup(input: RefreshInput, deps: LuauDeps): Promis
 			mode: "check",
 			placeId,
 			placeVersion: base.version,
-			slots: [BACKUP_SLOT],
+			slots: input.slots ?? [BACKUP_SLOT],
 			settings: [],
 			install: true,
 			identitySlot: IDENTITY_SLOT,
@@ -176,16 +183,40 @@ export async function refreshBackup(input: RefreshInput, deps: LuauDeps): Promis
 }
 
 /** The backup slot's .rbxm for a build: its kept payload stamped as the backup, under the slots root. */
-export async function backupSlots(proj: Project, build: BuildRef, now = new Date()): Promise<{ bytes: Uint8Array; cliSlots: SlotInventory[] }> {
+export async function backupSlots(proj: Project, build: BuildRef, now = new Date(), baked?: string): Promise<{ bytes: Uint8Array; cliSlots: SlotInventory[]; slots: SlotRef[] }> {
 	const stateDir = projectStateDir(proj);
 	const source = findKeptPayload(stateDir, build.artifactId);
 	if (!source) throw new BackupError(`${build.artifactId} has no kept payload on this machine (payloads are kept at upload, CLI 0.7.4+): re-upload or rebuild it here first`);
 	const info: BackupInfo = { artifactId: build.artifactId, seq: build.seq, branch: build.branch, channel: "prod", at: now.toISOString() };
 	const model = join(proj.root, OUT_DIR, BACKUP_FILE);
 	writeFileSync(model, backupRbxm(new Uint8Array(readFileSync(source)), info));
-	const projectJson = { name: SLOTS_ROOT, tree: { $className: "Folder", [BACKUP_SLOT.service]: { $className: "Folder", [BACKUP_SLOT.name]: { $path: model.replace(/\\/g, "/") } } } };
-	const built = await buildSlotsRbxm(proj, projectJson, [BACKUP_SLOT], BACKUP_SLOT, BACKUP_SLOTS_FILE);
-	return { bytes: built.bytes, cliSlots: built.read.slots };
+	const storage: Record<string, unknown> = { $className: "Folder", [BACKUP_SLOT.name]: { $path: model.replace(/\\/g, "/") } };
+	const slots: SlotRef[] = [BACKUP_SLOT];
+	// Kernel 0.4.1 loader (plans/22): the baked fallback kernel = the prod kernel's kept package, in the same save.
+	if (baked) {
+		storage[BAKED_SLOT.name] = { $path: baked.replace(/\\/g, "/") };
+		slots.push(BAKED_SLOT);
+	}
+	const projectJson = { name: SLOTS_ROOT, tree: { $className: "Folder", [BACKUP_SLOT.service]: storage } };
+	const built = await buildSlotsRbxm(proj, projectJson, slots, BACKUP_SLOT, BACKUP_SLOTS_FILE);
+	return { bytes: built.bytes, cliSlots: built.read.slots, slots };
+}
+
+/**
+ * Kernel 0.4.1 loader (plans/22): the prod kernel's kept package, to bake into the place as the fallback kernel with the
+ * backup (orchestrator default: they refresh together). Only for projects with a kernel asset (typetorch.json
+ * kernelAssetId). `note` says why there is none (the backup still refreshes).
+ */
+export async function bakedKernelPackage(proj: Project, deploy?: Pick<OpenCloud, "request">): Promise<{ path?: string; version?: string; note?: string }> {
+	if (!proj.config.kernelAssetId) return {};
+	const client = deploy ?? openCloud("deploy", true);
+	if (!client) return { note: "no deploy key to read the prod kernel pointer" };
+	const read = await readSettings(client as never, proj.config.universeId);
+	const pointer = pointerOf(read.body, "prod");
+	if (!pointer) return { note: read.error ? `the settings record can't be read (${read.error})` : "the settings record has no kernel.prod pointer" };
+	const path = findKeptKernel(projectStateDir(proj), pointer.version, pointer.hash);
+	if (!path) return { note: `kernel ${pointer.version} (${pointer.hash.slice(0, 12)}) has no kept package on this machine` };
+	return { path, version: pointer.version };
 }
 
 const line = (text: string) => info(`  backup      ${text}`);
@@ -203,7 +234,7 @@ export async function autoRefreshBackup(input: {
 	previous?: Pick<LiveHead, "artifactId" | "assetId" | "seq"> & { deployedAt?: string };
 	interactive?: boolean;
 	/** Tests: a fake engine, fleet and slot builder. */
-	deps?: { luau?: LuauDeps; fleet?: FleetClient | null; slots?: (build: BuildRef) => Promise<{ bytes: Uint8Array; cliSlots: SlotInventory[] }>; now?: number };
+	deps?: { luau?: LuauDeps; fleet?: FleetClient | null; slots?: (build: BuildRef) => Promise<{ bytes: Uint8Array; cliSlots: SlotInventory[]; slots?: SlotRef[] }>; now?: number };
 }): Promise<BackupOutcome | undefined> {
 	const { proj, previous } = input;
 	try {
@@ -228,9 +259,11 @@ export async function autoRefreshBackup(input: {
 		if (!health.proven) return skip(`${health.reason} (later: typetorch backup refresh --build #${previous.seq})`);
 		const luau = input.deps?.luau ?? (openCloud("place", true) ? luauDeps(proj) : undefined);
 		if (!luau) return skip("no place key (OPENCLOUD_PLACE_KEY or the shared key)");
-		const slots = await (input.deps?.slots ?? ((b: BuildRef) => backupSlots(proj, b)))(build);
+		const baked = input.deps?.slots ? {} : await bakedKernelPackage(proj).catch((error: Error) => ({ note: error.message }) as { path?: string; version?: string; note?: string });
+		if ("note" in baked && baked.note) line(dim(`the baked kernel stays as it is: ${baked.note}`));
+		const slots = await (input.deps?.slots ?? ((b: BuildRef) => backupSlots(proj, b, new Date(), baked.path)))(build);
 		line(`refreshing to #${build.seq} ${build.artifactId} (${health.reason}); the deploy itself is done`);
-		const outcome = await refreshBackup({ universeId: proj.config.universeId, placeId: proj.config.placeId, build, slotsBytes: slots.bytes, cliSlots: slots.cliSlots, dryRun: false, yes: true, timeoutSeconds: 300 }, luau);
+		const outcome = await refreshBackup({ universeId: proj.config.universeId, placeId: proj.config.placeId, build, slotsBytes: slots.bytes, cliSlots: slots.cliSlots, slots: slots.slots, dryRun: false, yes: true, timeoutSeconds: 300 }, luau);
 		if (outcome.status === "refreshed") {
 			line(`${build.artifactId} is the backup build now (place v${outcome.placeVersionBefore} -> v${outcome.placeVersionAfter ?? "?"})${outcome.verified === false ? `; verify: ${outcome.problems?.join("; ")}` : ""}`);
 			assetsNote(proj);
@@ -277,13 +310,16 @@ export async function backupCommand(args: ParsedArgs) {
 	}
 	let slots;
 	try {
-		slots = await watch.stage("slots", () => backupSlots(proj, build));
+		const baked = await bakedKernelPackage(proj);
+		if (baked.path) info(`  kernel      the baked fallback kernel becomes ${baked.version} (the prod kernel; plans/22)`);
+		else if (baked.note) info(dim(`  kernel      the baked fallback kernel stays as it is: ${baked.note}`));
+		slots = await watch.stage("slots", () => backupSlots(proj, build, new Date(), baked.path));
 	} catch (error) {
 		if (error instanceof BackupError) throw new LuauEngineError(error.message);
 		throw error;
 	}
 	const outcome = await refreshBackup(
-		{ universeId: proj.config.universeId, placeId: proj.config.placeId, build, slotsBytes: slots.bytes, cliSlots: slots.cliSlots, dryRun: flagBool(args, "dry-run"), yes: flagBool(args, "yes"), timeoutSeconds: taskTimeout(args) },
+		{ universeId: proj.config.universeId, placeId: proj.config.placeId, build, slotsBytes: slots.bytes, cliSlots: slots.cliSlots, slots: slots.slots, dryRun: flagBool(args, "dry-run"), yes: flagBool(args, "yes"), timeoutSeconds: taskTimeout(args) },
 		luauDeps(proj),
 	);
 	if (isJson()) return emitJson({ build, health, outcome });

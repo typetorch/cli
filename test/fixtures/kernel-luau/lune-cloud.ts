@@ -51,6 +51,16 @@ export function loaderSlotsFile(kernel: string): string {
 	return out;
 }
 
+/** The backup slot plus the loader's baked kernel (kernel-v2's slots), as backup refresh sends it to a loader place. */
+export function backupBakedSlotsFile(artifactId: string): string {
+	const out = join(dir, `backup-baked-${artifactId}.slots.rbxm`);
+	if (!existsSync(out)) {
+		const r = Bun.spawnSync([lune, "run", join(fixtures, "kernel-luau", "make-slots.luau"), join(dir, "kernel-v2.rbxl"), out, "backup", artifactId, "baked"], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+		if (r.exitCode !== 0) throw new Error(r.stderr.toString());
+	}
+	return out;
+}
+
 /** A backup-only slots .rbxm: ServerStorage.TypeTorchBackup, a prod payload stamped BackupArtifactId = artifactId. */
 export function backupSlotsFile(artifactId: string): string {
 	const out = join(dir, `backup-${artifactId}.slots.rbxm`);

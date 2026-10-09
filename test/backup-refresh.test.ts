@@ -13,7 +13,11 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "../src/args";
-import { autoRefreshBackup, lastBackupHere, provenHealthy, refreshBackup, type BuildRef } from "../src/commands/backup";
+import { autoRefreshBackup, bakedKernelPackage, lastBackupHere, provenHealthy, refreshBackup, type BuildRef } from "../src/commands/backup";
+import { BAKED_SLOT, keepKernel } from "../src/commands/kernel-asset";
+import { signSettings } from "../src/settings";
+import { parseSigningKey, TEST_VECTOR_FALLBACK_SEED, TEST_VECTOR_MAIN_SEED } from "../src/signing";
+import { fakeDataStoreCloud } from "./fixtures/fake-datastore";
 import { deployCommand, deployFlags } from "../src/commands/deploy";
 import { loadProject, validateBackup } from "../src/config";
 import { appendUpload, readUploads } from "../src/deployments";
@@ -22,7 +26,7 @@ import type { FleetClient, ReportRow, ServerRow } from "../src/fleet";
 import { parseKernelTaskResult, readSlotsRbxm, kernelTaskScript } from "../src/kernelpatch-task";
 import { captureJson, setOutputMode } from "../src/log";
 import { BACKUP_SLOT, keepPayload } from "../src/payloads";
-import { backupSlotsFile, fakeCloud, harness, hasLune, makeDeps, place, quiet } from "./fixtures/kernel-luau/lune-cloud";
+import { backupBakedSlotsFile, backupSlotsFile, fakeCloud, harness, hasLune, loaderSlotsFile, makeDeps, place, quiet } from "./fixtures/kernel-luau/lune-cloud";
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -146,6 +150,45 @@ describe.skipIf(!hasLune)("backup refresh through the luau engine (fake Open Clo
 		const d = makeDeps(cloud.oc, { confirm: async () => false });
 		expect(await refreshBackup(input("abc1234-cccccc", { yes: false }), d)).toEqual({ status: "declined" });
 		expect(cloud.tasks.map((t) => t.kind)).toEqual(["check"]);
+	});
+});
+
+describe("the loader place (kernel 0.4.1): the baked kernel refreshes with the backup", () => {
+	test("bakedKernelPackage: the prod pointer's kept package; nothing for a project without a kernel asset", async () => {
+		const plain = gameRoot();
+		expect(await bakedKernelPackage(loadProject(join(plain, "typetorch.json")))).toEqual({});
+		const root = gameRoot({ kernelAssetId: 555 });
+		const proj = loadProject(join(root, "typetorch.json"));
+		const signer = { main: parseSigningKey(TEST_VECTOR_MAIN_SEED), fallback: parseSigningKey(TEST_VECTOR_FALLBACK_SEED) };
+		const pointer = { asset: 555, versionId: 777001, version: "0.4.1", hash: "a".repeat(64), loaderApi: 1, at: "2026-10-09T00:00:00.000Z" };
+		const empty = fakeDataStoreCloud();
+		expect((await bakedKernelPackage(proj, empty.oc as never)).note).toContain("no kernel.prod pointer");
+		const cloud = fakeDataStoreCloud({ settings: signSettings(signer, 3, "2026-10-09T00:00:00.000Z", { kernel: { prod: pointer } } as never) });
+		expect((await bakedKernelPackage(proj, cloud.oc as never)).note).toContain("no kept package");
+		const kept = keepKernel(join(root, ".typetorch"), "0.4.1", "a".repeat(64), new Uint8Array([1]));
+		expect(await bakedKernelPackage(proj, cloud.oc as never)).toEqual({ path: kept, version: "0.4.1" });
+	});
+
+	test.skipIf(!hasLune)("a refresh in a loader place swaps the backup and the baked kernel, nothing else", async () => {
+		// The place after install-loader (the direct kernel removed, the loader in).
+		const LOADER = [
+			{ service: "ServerScriptService", name: "TypeTorchLoader" },
+			{ service: "ReplicatedFirst", name: "TypeTorchLoaderClient" },
+			{ service: "ServerStorage", name: "TypeTorchKernelBaked" },
+		];
+		const KERNEL = [
+			{ service: "ServerScriptService", name: "TypeTorchKernel" },
+			{ service: "ReplicatedStorage", name: "TypeTorchKernelShared" },
+			{ service: "ReplicatedFirst", name: "TypeTorchKernelClient" },
+		];
+		const installed = harness(kernelTaskScript({ mode: "save", placeId: 2, placeVersion: 57, slots: LOADER, remove: KERNEL, settings: [], install: true, identitySlot: KERNEL[0], expect: {} }), place("game-installed.rbxl"), loaderSlotsFile("kernel-v2"));
+		expect(installed.result.saved).toBe(true);
+		const cloud = fakeCloud(installed.saved!);
+		const bytes = new Uint8Array(readFileSync(backupBakedSlotsFile("abc1234-dddddd")));
+		const slots = [BACKUP_SLOT, BAKED_SLOT];
+		const outcome = await refreshBackup({ universeId: 1, placeId: 2, build: build({ artifactId: "abc1234-dddddd" }), slotsBytes: bytes, cliSlots: readSlotsRbxm(bytes, slots, BACKUP_SLOT).slots, slots, dryRun: false, yes: true, timeoutSeconds: 300 }, makeDeps(cloud.oc));
+		expect(outcome).toMatchObject({ status: "refreshed", artifactId: "abc1234-dddddd", verified: true });
+		expect(cloud.tasks[1].script).toContain('["name"] = "TypeTorchKernelBaked"');
 	});
 });
 

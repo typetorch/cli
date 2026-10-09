@@ -90,6 +90,19 @@ elseif process.args[3] == "backup" then
 	boot.Source = "return { boot = function() return function() end end } -- " .. id .. "\n"
 	boot.Parent = model:FindFirstChild("Server")
 	model.Parent = serviceFolder("ServerStorage")
+	-- "backup <id> baked": the loader's baked kernel too (the kernel slots of <kernel.rbxl>), as backup refresh sends it.
+	if process.args[5] == "baked" then
+		local kernel = roblox.deserializePlace(fs.readFile(process.args[1]))
+		local baked = roblox.Instance.new("Model")
+		baked.Name = "TypeTorchKernelBaked"
+		for _, slot in { { "ServerScriptService", "TypeTorchKernel" }, { "ReplicatedStorage", "TypeTorchKernelShared" }, { "ReplicatedFirst", "TypeTorchKernelClient" } } do
+			local holder = baked:FindFirstChild(slot[1]) or roblox.Instance.new("Folder")
+			holder.Name = slot[1]
+			holder.Parent = baked
+			kernel:GetService(slot[1]):FindFirstChild(slot[2]):Clone().Parent = holder
+		end
+		baked.Parent = serviceFolder("ServerStorage")
+	end
 else
 	local kernel = roblox.deserializePlace(fs.readFile(process.args[1]))
 	for _, slot in { { "ServerScriptService", "TypeTorchKernel" }, { "ReplicatedStorage", "TypeTorchKernelShared" }, { "ReplicatedFirst", "TypeTorchKernelClient" } } do
