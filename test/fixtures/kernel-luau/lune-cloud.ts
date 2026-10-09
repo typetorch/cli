@@ -31,6 +31,16 @@ export function slotsFile(kernel: string, extra = false): string {
 	return out;
 }
 
+/** A kernel package .rbxm (kernel deploy --asset) of a fixture place: `variant` "enabled" or "trust" breaks it. */
+export function packageFile(kernel: string, hash: string, variant = ""): string {
+	const out = join(dir, `${kernel}-${hash.slice(0, 6)}${variant ? `-${variant}` : ""}.package.rbxm`);
+	if (!existsSync(out)) {
+		const r = Bun.spawnSync([lune, "run", join(fixtures, "kernel-luau", "make-slots.luau"), join(dir, `${kernel}.rbxl`), out, "package", hash, ...(variant ? [variant] : [])], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+		if (r.exitCode !== 0) throw new Error(r.stderr.toString());
+	}
+	return out;
+}
+
 /** The loader slots .rbxm (install-loader) with the kernel of a fixture place baked in. */
 export function loaderSlotsFile(kernel: string): string {
 	const out = join(dir, `${kernel}.loader.slots.rbxm`);
@@ -62,6 +72,8 @@ export interface HarnessOptions {
 	tamperOnSetting?: boolean;
 	noEncoding?: boolean;
 	unstableBytes?: boolean;
+	/** InsertService for the kernel resolve task: latest version per asset id, package file per version id. */
+	assets?: { latest: Record<string, number>; files: Record<string, string> };
 }
 
 /** Runs a task script in the harness; returns the result, the engine calls, and the saved place (if any). */

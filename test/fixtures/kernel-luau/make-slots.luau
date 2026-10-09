@@ -25,7 +25,32 @@ local function serviceFolder(name)
 	return folder
 end
 
-if process.args[3] == "loader" then
+if process.args[3] == "package" then
+	-- kernel deploy --asset: the kernel package (Model TypeTorchKernelPackage, KernelHash = args[4], scripts disabled, no
+	-- trust roots) of <kernel.rbxl>; args[5] = "enabled" leaves the scripts enabled, "trust" keeps KeyAssetId.
+	local kernel = roblox.deserializePlace(fs.readFile(process.args[1]))
+	local package = roblox.Instance.new("Model")
+	package.Name = "TypeTorchKernelPackage"
+	package:SetAttribute("KernelHash", process.args[4])
+	for _, slot in { { "ServerScriptService", "TypeTorchKernel" }, { "ReplicatedStorage", "TypeTorchKernelShared" }, { "ReplicatedFirst", "TypeTorchKernelClient" } } do
+		local holder = package:FindFirstChild(slot[1]) or roblox.Instance.new("Folder")
+		holder.Name = slot[1]
+		holder.Parent = package
+		local copy = kernel:GetService(slot[1]):FindFirstChild(slot[2]):Clone()
+		copy.Parent = holder
+	end
+	for _, instance in package:GetDescendants() do
+		if (instance.ClassName == "Script" or instance.ClassName == "LocalScript") and process.args[5] ~= "enabled" then
+			instance.Disabled = true
+		end
+	end
+	if process.args[5] ~= "trust" then
+		package.ServerScriptService.TypeTorchKernel:SetAttribute("KeyAssetId", nil)
+	end
+	fs.writeFile(process.args[2], roblox.serializeModel({ package }))
+	print("ok")
+	return
+elseif process.args[3] == "loader" then
 	-- install-loader: the loader Script (identity on it), its client, and the kernel of <kernel.rbxl> baked in ServerStorage.
 	local kernel = roblox.deserializePlace(fs.readFile(process.args[1]))
 	local loader = roblox.Instance.new("Script")

@@ -90,6 +90,31 @@ if options.denySetting or options.tamperOnSetting then
 	})
 end
 
+-- InsertService (kernel deploy --asset resolve task): options.assets = { latest = { ["<assetId>"] = versionId },
+-- files = { ["<versionId>"] = "<package.rbxm>" } }; a version without a file raises like a moderated one.
+if options.assets then
+	mocks.InsertService = {
+		GetLatestAssetVersionAsync = function(_, id)
+			local version = options.assets.latest[tostring(id)]
+			if version == nil then
+				error("HTTP 404 (Not Found)", 0)
+			end
+			return version
+		end,
+		LoadAssetVersion = function(_, version)
+			local file = options.assets.files[string.format("%d", version)]
+			if file == nil then
+				error("Asset is not approved", 0)
+			end
+			local container = roblox.Instance.new("Model")
+			for _, instance in roblox.deserializeModel(fs.readFile(file)) do
+				instance.Parent = container
+			end
+			return container
+		end,
+	}
+end
+
 local game = setmetatable({}, {
 	__index = function(_, key)
 		if key == "GetService" then
@@ -113,7 +138,7 @@ local game = setmetatable({}, {
 	end,
 })
 
-local chunk = luau.load(source, { debugName = "kernel-task", environment = { game = game, Enum = { HashAlgorithm = { Sha256 = "Sha256" } } } })
+local chunk = luau.load(source, { debugName = "kernel-task", environment = { game = game, task = require("@lune/task"), Enum = { HashAlgorithm = { Sha256 = "Sha256" } } } })
 local input = if args[3] ~= "-" then { BinaryInput = buffer.fromstring(fs.readFile(args[3])) } else {}
 local result = chunk(input)
 fs.writeFile(args[5], serde.encode("json", { result = result, calls = calls }))
