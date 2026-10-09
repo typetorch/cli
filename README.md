@@ -205,6 +205,9 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch access push [--dry-run]` / `access status` | typetorch.json `members`, `revoked`, `devBadgeId` into the settings record's `access` / compare it with typetorch.json |
 | `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--engine luau\|splice\|lune] [--place-file <file>] [--timeout <s>] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build) into the live place (check, y/N, save, verify); no download: Luau Execution tasks do it (the luau engine), or `--place-file` patches a Studio copy (splice); `--replace-place --yes` for the template/test place only; see below |
 | `typetorch kernel restore --version <n> [--dry-run] [--yes]` | republish place version `n` (a task on it calls SavePlaceAsync): the undo of a kernel deploy |
+| `typetorch kernel install-loader [--dry-run] [--yes] [--min-kernel <v>]` | kernel 0.4.1+: put the kernel loader into the place (luau engine), with the trust roots and a baked fallback kernel; the kernel installed directly goes out. See "The kernel as an asset" |
+| `typetorch kernel deploy --asset [--channel dev\|prod] [--drain <min>] [--reupload] [--new-asset]` | upload the kernel as a new version of the kernel asset and sign the pointer servers boot (no place save) |
+| `typetorch kernel promote [--force]` / `kernel rollback [--channel] [--to <v>]` / `kernel drain [--channel] [--window <min>]` | the dev kernel to prod once proven healthy / a pointer back / move players off older kernels |
 | `typetorch kernel restore <file> [--dry-run] [--yes]` | publish a place file: a backup from `.typetorch/place-backups/`, or a dry run's patched file |
 | `typetorch backup refresh [--build <x>] [--dry-run] [--yes] [--force]` | make a proven-healthy prod build the place's backup build now (luau engine, only that slot); see "Backup build" |
 | `typetorch deploy --reupload <artifactId|#seq|commit|assetId> [--branch <b>]` | moderation took down an approved build: upload its kept bytes as a NEW asset, then deploy it (cloud test, approval, new seq, signed on prod); see "Backup build" |
@@ -648,6 +651,43 @@ run yourself.
    publishes a place file back: a backup (undo of a splice deploy), or a dry run's patched file (publish exactly what
    was inspected). `--replace-place --yes` publishes the whole kernel place instead and **wipes Studio/Team Create
    content** (the template/test place only). The place version before and after go to `kernel-deploys.jsonl`.
+
+### The kernel as an asset (kernel 0.4.1+)
+
+Design: TypeTorch plans/22 ("The kernel as an uploaded asset"). The place holds a small **loader**
+(`ServerScriptService.TypeTorchLoader` and `ReplicatedFirst.TypeTorchLoaderClient`) and a **baked fallback kernel**
+(`ServerStorage.TypeTorchKernelBaked`). At boot the loader installs the kernel the signed settings record points at
+(an exact version of a group-owned Model asset), else the baked one. Kernel updates are uploads and one signed pointer:
+no place save, no Team Create conflict, no Save Place API setting.
+1. **Once:** `typetorch kernel install-loader` (the luau engine, see "Kernel deploy"): the loader with the trust roots
+   (`KeyAssetId`, `FallbackPublicKey`, `BootstrapHeads`) and `MinKernelVersion` (`--min-kernel`, default 0.4.1),
+   its client script, the baked kernel (this kernel build) and the backup build go in; every copy of the kernel
+   installed directly goes out. Run it again to change a trust root. From then on `kernel deploy` without `--asset`
+   is refused on that place.
+2. **Each kernel update:** `typetorch kernel deploy --asset` builds the **kernel package** (the three kernel slots,
+   every script disabled, no trust roots; kept in `<state dir>/kernels/`), uploads it as a new version of the kernel
+   asset (typetorch.json `kernelAssetId`; the first run creates a group-owned asset and writes it), waits for
+   moderation, checks the version in a Luau Execution task (the loader's own checks), then signs `kernel.dev` in the
+   settings record (both prod keys) and pings servers. `--channel prod` sets prod and dev at once. Reserved servers on
+   dev-channel branches boot the dev kernel; public and player-owned private servers boot prod.
+3. **To prod:** `typetorch kernel promote` copies dev to prod once the dev kernel is proven healthy: pointed at for
+   at least 1 h, at least one live server runs it, no failed or rolled back deploy report from a server on it
+   (`--force` skips the proof).
+4. **Running servers** keep their kernel; new servers boot the new one. `--drain <minutes>` (deploy, promote,
+   rollback; off by default) or `typetorch kernel drain [--window <min>]` sends a signed message: public servers on
+   another kernel move their players to fresh servers at a random moment in the window. Open Cloud's restartServers
+   needs universe:read, which API keys can't get.
+5. **Undo:** `typetorch kernel rollback [--channel prod] [--to <version|versionId>]` re-signs an earlier pointer from
+   this machine's kernel-deploys.jsonl.
+6. **Moderation took the kernel asset down:** new servers run the baked fallback kernel by themselves and report it
+   (`typetorch servers` shows BAKED; the alert `kernel_asset_unavailable` names the asset, the version and why).
+   Recovery: `typetorch kernel deploy --asset --reupload` (the kept package of the channel's kernel again; add
+   `--new-asset` when the whole asset is gone).
+7. **The baked kernel** refreshes with the backup build: `typetorch backup refresh` (and the automatic refresh after
+   prod deploys) also bakes the prod kernel's kept package, in the same save.
+
+Keys: the assets key (asset:read/write, Luau Execution) for the upload and the check, the deploy key (DataStores,
+messaging) for the pointer and the drain, the place key (Luau Execution) for install-loader and backup refreshes.
 
 ### Backup build
 
