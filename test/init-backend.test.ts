@@ -378,9 +378,18 @@ describe("backend phase", () => {
 		expect(second.key).toBe(first.key);
 	});
 
+	test("keys: a short existing key is never replaced", () => {
+		const dir = gameDir();
+		writeFileSync(join(dir, ".env"), "TYPETORCH_API_KEY=short\n");
+		expect(() => ensureBackendKeys(context(dir, fakes([])))).toThrow("shorter than 32");
+		expect(readFileSync(join(dir, ".env"), "utf8")).toBe("TYPETORCH_API_KEY=short\n");
+	});
+
 	test("Coolify over SSH with a password, sslip.io, clicked: the env block goes to a private file, then health and setup", async () => {
 		const dir = gameDir();
 		const fetched: string[] = [];
+		let block = "";
+		let mode = 0;
 		const f = fakes(["coolify", "ssh", "203.0.113.5", "", "", "password", "n", "clicked", "y"], {
 			shell: (_cmd, input) => {
 				if (input.includes("uname")) return ok("os=Ubuntu 24.04\nos_id=ubuntu\narch=x86_64\nroot=yes\n");
@@ -389,6 +398,9 @@ describe("backend phase", () => {
 			},
 			fetch: (async (input: string | URL | Request) => {
 				fetched.push(String(input));
+				// The pasted settings exist until the backend answers.
+				block = readFileSync(join(dir, COOLIFY_ENV_FILE), "utf8");
+				mode = statSync(join(dir, COOLIFY_ENV_FILE)).mode & 0o777;
 				return new Response('{"ok":true}', { status: 200 });
 			}) as typeof fetch,
 		});
@@ -400,10 +412,10 @@ describe("backend phase", () => {
 		expect(f.scripts[0].cmd.slice(-2)).toEqual(["root@203.0.113.5", "bash -s"]);
 		const dotEnv = readFileSync(join(dir, ".env"), "utf8");
 		const key = /TYPETORCH_API_KEY=(\w+)/.exec(dotEnv)![1];
-		const block = readFileSync(join(dir, COOLIFY_ENV_FILE), "utf8");
 		expect(block).toContain(`TYPETORCH_API_KEY=${key}`);
 		expect(block).toContain(`TYPETORCH_PUBLIC_URL=${url}`);
-		if (process.platform !== "win32") expect(statSync(join(dir, COOLIFY_ENV_FILE)).mode & 0o777).toBe(0o600);
+		if (process.platform !== "win32") expect(mode).toBe(0o600);
+		expect(existsSync(join(dir, COOLIFY_ENV_FILE))).toBe(false);
 		expect(f.tui.output.join("\n")).not.toContain(key);
 		expect(f.tui.output.join("\n")).toContain(`https://${url.slice(8)}:8787`);
 		expect(ctx.state.answers).toMatchObject({ backend: "coolify", reach: "ssh", sshHost: "203.0.113.5", sshUser: "root", sshPort: 22, sshAuth: "password", coolifyMode: "clicked", backendUrl: url });
@@ -490,6 +502,8 @@ describe("backend phase", () => {
 			expect(`${step.label}: ${check.stderr}`).toBe(`${step.label}: `);
 		}
 		expect(caddySite(o.hostname)).toContain("reverse_proxy 127.0.0.1:8787");
+		expect(() => installSteps({ ...o, key: "k".repeat(40) + "\nTYPETORCH_ENV" })).toThrow("line breaks");
+		expect(() => installSteps({ ...o, admin: "TYPETORCH_ENV" })).toThrow("line breaks");
 		expect(teardownSteps({ deleteData: false }).some((s) => s.script.includes(DATA_DIR))).toBe(false);
 	});
 

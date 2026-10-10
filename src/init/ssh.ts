@@ -5,7 +5,7 @@
  * for a minute. Key files go to `ssh -i`; the agent (SSH_AUTH_SOCK) is passed on when there is one.
  */
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { childEnv } from "../env.ts";
 import type { RunResult } from "../proc.ts";
@@ -68,7 +68,11 @@ export function sshMachine(target: SshTarget, deps: Pick<InitDeps, "shell" | "pl
 		label: `${target.user}@${target.host}`,
 		host: target.host,
 		ssh: target,
-		exec: (script) => deps.shell(sshArgs(target, deps.platform, deps.home), cwd, PRELUDE + script),
+		exec: (script) => {
+			// The control socket lives in ~/.ssh; without the folder ssh drops it and asks for a password every step.
+			if (deps.platform !== "win32") mkdirSync(join(deps.home, ".ssh"), { recursive: true, mode: 0o700 });
+			return deps.shell(sshArgs(target, deps.platform, deps.home), cwd, PRELUDE + script);
+		},
 	};
 }
 

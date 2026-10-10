@@ -43,6 +43,10 @@ ${hostname} {
 }
 
 export function envFile(o: ServiceOptions): string {
+	// Printable ASCII with no spaces only, so nothing can end the quoted heredoc that carries the file.
+	for (const [what, value] of [["the game key", o.key], ["the admin token", o.admin], ["the host name", o.hostname]]) {
+		if (!/^[\x21-\x7e]+$/.test(value) || value === "TYPETORCH_ENV") throw new Error(`${what} has spaces, line breaks or other characters a settings file cannot hold`);
+	}
 	return [
 		"# Written by typetorch init. The two secrets: never commit or share this file.",
 		`TYPETORCH_API_KEY=${o.key}`,

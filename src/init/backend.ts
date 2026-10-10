@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { ADMIN_TOKEN_VAR, BACKEND_KEY_VAR, Settings, registerSecret, useSettings } from "../env.ts";
 import { DOCS } from "../tui.ts";
 import { configFlag, slugify, upsertDotEnv, type InitContext } from "./common.ts";
-import { chooseHostname, coolifyBackend } from "./coolify.ts";
+import { chooseHostname, COOLIFY_ENV_FILE, coolifyBackend } from "./coolify.ts";
 import { linuxServiceInstall, runSteps, teardownSteps } from "./linuxservice.ts";
 import { loginTask } from "./logintask.ts";
 import { localMachine, privateKeys, probeMachine, sshMachine, type Machine } from "./ssh.ts";
@@ -35,7 +35,9 @@ export function ensureBackendKeys(ctx: InitContext): { key: string; admin: strin
 	const out: Record<string, string> = {};
 	for (const name of [BACKEND_KEY_VAR, ADMIN_TOKEN_VAR]) {
 		const have = current.get(name)?.value;
-		if (have && have.length >= 32) out[name] = have;
+		// A short one may be what a running backend uses: never replaced without the user removing it.
+		if (have && have.length < 32) throw new Error(`${name} in ${current.get(name)!.source} is shorter than 32 characters. A backend may be using it, so it is not replaced: delete that line to have new keys generated, or set one of 32 characters or more, then run \`typetorch init\` again`);
+		if (have) out[name] = have;
 		else values[name] = out[name] = randomBytes(32).toString("hex");
 		registerSecret(out[name]);
 	}
@@ -144,6 +146,12 @@ export async function backendPhase(ctx: InitContext): Promise<void> {
 	ctx.state.answers.backendUrl = url;
 	tui.note(`waiting for ${url}/healthz`);
 	await waitHealthy(ctx, url);
+	// The clicked Coolify path left a copy of both keys for pasting; the server has them now.
+	const pasted = join(ctx.dir, COOLIFY_ENV_FILE);
+	if (existsSync(pasted)) {
+		rmSync(pasted);
+		tui.note(`removed ${pasted} (the keys stay in .env and on the server)`);
+	}
 	await pointGame(ctx, url);
 }
 
