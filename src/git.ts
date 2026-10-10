@@ -31,6 +31,27 @@ export function porcelainPaths(output: string): string[] {
 	return paths;
 }
 
+/**
+ * True for an editor's swap, backup or lock file (`.x.swp`, `.x.swo`, `x~`, `.#x`, Vim's `4913` probe). Only untracked
+ * ones are ignored by the dirty check (`untrackedEditorFiles`): nothing builds them, and an open editor shouldn't block a
+ * prod deploy. A committed one still counts.
+ */
+export function isEditorTempFile(path: string): boolean {
+	const name = path.slice(path.lastIndexOf("/") + 1);
+	return /\.sw[a-p]$/.test(name) || name.endsWith("~") || name.startsWith(".#") || name === "4913";
+}
+
+/** The untracked (`??`) paths of `git status --porcelain` output that are editor temp files. */
+export function untrackedEditorFiles(output: string): Set<string> {
+	const files = new Set<string>();
+	for (const line of output.split(/\r?\n/)) {
+		if (!line.startsWith("?? ")) continue;
+		const [path] = porcelainPaths(line);
+		if (path !== undefined && isEditorTempFile(path)) files.add(path);
+	}
+	return files;
+}
+
 /** True when `path` (repo-relative, forward slashes) is one of TypeTorch's own outputs. */
 export function isGeneratedPath(path: string, generated: string[]): boolean {
 	return generated.some((g) => (g.endsWith("/") ? path === g.slice(0, -1) || path.startsWith(g) : path === g));
@@ -64,8 +85,9 @@ export function gitInfo(cwd: string, generated: string[] = []): GitInfo {
 	// Paths from porcelain are relative to the repo top; `generated` is relative to the project root (cwd).
 	const prefix = query(["git", "rev-parse", "--show-prefix"], cwd) ?? "";
 	const status = query(["git", "status", "--porcelain", "--untracked-files=all"], cwd, false) ?? "";
+	const editorFiles = untrackedEditorFiles(status);
 	const dirtyFiles = porcelainPaths(status).filter(
-		(path) => !isGeneratedPath(path, generated.map((g) => prefix + g)),
+		(path) => !isGeneratedPath(path, generated.map((g) => prefix + g)) && !editorFiles.has(path),
 	);
 	return {
 		commit,
