@@ -63,6 +63,12 @@ const server = Bun.serve({
 			requests.push(`store ${url.searchParams.get("entryKey")}`);
 			return json({ version: "v1", deleted: false });
 		}
+		// A dev deploy while prod has no head reads the place once (livecheck.ts): no kernel here, so no warning.
+		if (method === "POST" && url.pathname === "/cloud/v2/universes/42/places/2/luau-execution-session-tasks") {
+			await req.text();
+			requests.push("place read");
+			return json({ path: "universes/42/places/2/luau-execution-session-tasks/t1", state: "COMPLETE", output: { results: [{ slots: [] }] } });
+		}
 		requests.push(`unexpected ${method} ${url.pathname}`);
 		return json({ message: "not faked" }, 404);
 	},
@@ -144,7 +150,7 @@ describe("non-interactive deploys never wait on stdin", () => {
 			const output = (await new Response(child.stdout).text()) + (await new Response(child.stderr).text());
 			expect({ code, output }).toMatchObject({ code: 0 });
 			expect(output).toContain("deployed #1 dev");
-			expect(requests.filter((r) => !r.startsWith("store "))).toEqual(["create", "publish TypeTorch/deploy dev", "name check"]);
+			expect(requests.filter((r) => !r.startsWith("store "))).toEqual(["create", "publish TypeTorch/deploy dev", "name check", "place read"]);
 			// The durable head after the message: heads and deployments (in parallel).
 			const stores = requests.filter((r) => r.startsWith("store "));
 			expect([...stores].sort()).toEqual(["store deployments", "store heads"]);

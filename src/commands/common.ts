@@ -1,4 +1,5 @@
 /** Helpers shared by the commands. */
+import { readRemovals, withoutRemoved } from "../branches.ts";
 import { flagString, UsageError, type ParsedArgs } from "../args.ts";
 import { loadProject, type Project } from "../config.ts";
 import {
@@ -83,7 +84,8 @@ export function withLocal(proj: Project): History {
 	return {
 		local,
 		rows,
-		heads: liveHeads(undefined, rows),
+		// `typetorch branch rm`: a removed branch's heads (up to the removed seq) are gone.
+		heads: withoutRemoved(liveHeads(undefined, rows), readRemovals(dir, proj.config.universeId)),
 		uploads: readUploads(dir, proj.config.universeId),
 		stateDir: dir,
 	};

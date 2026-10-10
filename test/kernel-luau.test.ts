@@ -519,6 +519,25 @@ describe.skipIf(!hasLune)("kernel restore --version (fake Open Cloud, tasks in L
 		expect(json).toMatchObject({ mode: "restore", engine: "luau", fromVersion: 56, placeVersionAfter: 58 });
 	});
 
+	test("the guard sees the version's kernel identity before the y/N; a throwing guard stops before the save", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"));
+		const seen: Record<string, unknown>[] = [];
+		const { error } = await quiet(() =>
+			luauRestore(
+				restoreInput({
+					guard: async (identity) => {
+						seen.push(identity);
+						throw new Error("prod has nothing to run");
+					},
+				}),
+				makeDeps(cloud.oc),
+			),
+		);
+		expect(seen[0]).toMatchObject({ KernelVersion: "1.0.0" });
+		expect(error?.message).toBe("prod has nothing to run");
+		expect(cloud.tasks.map((t) => t.kind)).toEqual(["restore-check"]);
+	});
+
 	test("a version newer than the newest is refused", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
 		const { error } = await quiet(() => luauRestore(restoreInput({ version: 99 }), makeDeps(cloud.oc)));

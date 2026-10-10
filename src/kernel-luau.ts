@@ -357,6 +357,8 @@ export interface RestoreInput {
 	dryRun: boolean;
 	yes: boolean;
 	timeoutSeconds: number;
+	/** Runs after the check, before the y/N (and in a dry run): throws to stop (kernel.ts guardDefaultBranch). */
+	guard?: (identity: Record<string, unknown>) => Promise<void>;
 }
 
 /** `typetorch kernel restore --version <n>`: republish version n through SavePlaceAsync in a task on it. */
@@ -385,6 +387,7 @@ export async function luauRestore(input: RestoreInput, deps: LuauDeps): Promise<
 	}
 	warn(`this publishes v${version} as the new live version of place ${placeId}: everything published after it (Studio work, other kernel deploys) leaves the live place (it stays in version history)${version < newest ? ` (v${version + 1}..v${newest})` : ""}`);
 	if (version === newest) warn(`v${version} is already the newest version: this only publishes it again`);
+	if (input.guard) await input.guard(check.identity);
 	if (input.dryRun) {
 		if (isJson()) return emitJson({ dryRun: true, placeId, version, newest, check });
 		info(bold("dry run: nothing saved (the check task never calls SavePlaceAsync)"));

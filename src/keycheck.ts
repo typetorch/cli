@@ -15,6 +15,7 @@ import { parseKeyList, placeKeysScript } from "./keyasset.ts";
 import { BACKUP_STALE_DAYS, backupAge, backupFromPlace } from "./payloads.ts";
 import { inspectKeyFile, type KeyFileInfo, type KeyRole } from "./keyfiles.ts";
 import { isRecord } from "./json.ts";
+import { placeGameFrom, type PlaceGame } from "./livecheck.ts";
 import { keyFingerprint } from "./signing.ts";
 import type { OpenCloud } from "./opencloud.ts";
 
@@ -47,6 +48,8 @@ export interface KeyFacts {
 	devFolder?: { present: boolean; payload?: boolean; descendants?: number };
 	/** Kernel 0.3.6: ServerStorage.TypeTorchBackup in the place (or the last kernel deploy's record of it). */
 	backup?: ReturnType<typeof backupFromPlace> & { source: string };
+	/** The kernel slots, BootstrapHeads and an old game build in the place (livecheck.ts; Luau Execution only). */
+	game?: PlaceGame & { source: string };
 }
 
 /** Keys are shown by fingerprint, like the kernel's dev menu (first 8 hex of the SHA-256 of the raw key). */
@@ -281,6 +284,7 @@ export async function gatherKeyFacts(input: {
 			? { present: true, payload: result.devFolder.payload === true, descendants: Number(result.devFolder.descendants) || 0 }
 			: { present: false };
 		facts.backup = { ...backupFromPlace(result.backup), source: "the place (Luau Execution)" };
+		facts.game = { ...placeGameFrom(result), source: "the place (Luau Execution)" };
 		if (c.keyAssetId) {
 			facts.asset = isRecord(result.asset)
 				? { publicKeys: parseKeyList(result.asset.publicKeys), revokedKeys: parseKeyList(result.asset.revokedKeys), children: Number(result.asset.children) || 0 }

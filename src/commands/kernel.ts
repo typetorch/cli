@@ -61,6 +61,9 @@ import { addBackupToProject, BACKUP_FILE, BACKUP_SLOT, BackupError, backupHead, 
 import { luauDeploy, luauRestore, type LuauDeps } from "../kernel-luau.ts";
 import { readSlotsRbxm, settingValues, slotsProject, TASK_TIMEOUT_MAX } from "../kernelpatch-task.ts";
 import { announce, markPosterFor } from "../marks.ts";
+import { readSharedSeq, type SharedSeq } from "../seqstore.ts";
+import { defaultBranchHead, deployDefaultHint, nothingToRunReason, type HeadState } from "../livecheck.ts";
+import type { Interaction } from "../interact.ts";
 
 export const kernelFlags = {
 	kernel: "string",
@@ -87,6 +90,8 @@ export const kernelFlags = {
 	version: "string",
 	/** The luau engine's task timeout in seconds (default and maximum 300). */
 	timeout: "string",
+	/** Publish even though the default branch has no verified head and no backup is baked (live servers kick players). */
+	force: "boolean",
 } as const;
 
 /** One bootstrap head: what the kernel trusts unsigned for that branch (plans/03 "Bootstrap heads"). */
@@ -537,9 +542,61 @@ async function kernelDeploy(args: ParsedArgs) {
 	if (engine !== "luau" && args.flags.timeout !== undefined) throw new UsageError("--timeout is for the luau engine's tasks");
 	const timeout = engine === "luau" ? taskTimeout(args) : TASK_TIMEOUT_MAX;
 	const prepared = await prepareKernel(args);
+	// The default branch's head (the kernel's DataStore heads, else the BootstrapHeads stamped now) before publishing.
+	await checkDefaultBranch(args, prepared.proj, { backup: prepared.backup !== null, bootstrap: prepared.heads as Record<string, unknown> });
 	if (replacePlace) return replacePlaceFlow(args, prepared);
 	if (engine === "luau") return luauFlow(args, prepared, timeout);
 	return patchFlow(args, prepared, engine, placeFile);
+}
+
+/** guardDefaultBranch with the head read now: the DataStore heads (deploy key), this machine's log, `bootstrap`. */
+async function checkDefaultBranch(args: ParsedArgs, proj: Project, place: { backup: boolean; bootstrap?: Record<string, unknown> }): Promise<void> {
+	const deployer = openCloud("deploy", true);
+	const shared: SharedSeq | undefined = deployer ? await readSharedSeq(deployer, proj.config.universeId) : undefined;
+	await guardDefaultBranch({
+		config: proj.config,
+		head: defaultBranchHead({ config: proj.config, shared, local: (await readHistory(proj)).heads, bootstrap: place.bootstrap }),
+		backupBaked: place.backup,
+		force: flagBool(args, "force"),
+		dryRun: flagBool(args, "dry-run"),
+		io: interaction(),
+	});
+}
+
+/**
+ * Kernel 0.3.6+ ("never an empty server"): a kernel whose default branch has no verified head, published without a
+ * backup build, moves every player of the live game out after 15 s and kicks them after 3 bounces (cecot, 2026-10).
+ * So: refuse unless a person says y (or --force). A dry run only warns; an unreadable DataStore only warns.
+ */
+export async function guardDefaultBranch(input: {
+	config: Pick<Project["config"], "defaultBranch" | "branches">;
+	head: HeadState;
+	backupBaked: boolean;
+	force: boolean;
+	dryRun: boolean;
+	io: Pick<Interaction, "interactive" | "confirm">;
+}): Promise<void> {
+	const { config, head } = input;
+	if (input.backupBaked || head.state === "verified") return;
+	const fix = `Deploy ${config.defaultBranch} first (${deployDefaultHint(config)}): servers without the kernel ignore it`;
+	if (head.state === "unknown") {
+		warn(`can't tell whether ${config.defaultBranch} has a verified head (${head.detail}) and no backup build is baked: if it was never deployed, ${nothingToRunReason(config.defaultBranch)}. ${fix}`);
+		return;
+	}
+	const reason = `${nothingToRunReason(config.defaultBranch)} (${head.detail}; the place keeps any older backup it has: \`typetorch doctor\` shows it)`;
+	if (input.dryRun) {
+		warn(`a real deploy would ask first: ${reason}. ${fix}`);
+		return;
+	}
+	if (input.force) {
+		warn(`${reason} (--force)`);
+		return;
+	}
+	if (!input.io.interactive) throw new KernelCheckError(`refusing to publish the kernel: ${reason}. ${fix}, or pass --force`);
+	warn(reason);
+	if (!(await input.io.confirm(`Publish the kernel anyway? Live players are moved out and kicked until ${config.defaultBranch} is deployed`))) {
+		throw new KernelCheckError(`not published. ${fix}`);
+	}
 }
 
 /**
@@ -916,6 +973,11 @@ async function replacePlaceFlow(args: ParsedArgs, prepared: PreparedKernel) {
 	info(dim(`  recorded in ${join(stateDir, KERNEL_LOG)}; revert from the place's version history in Creator Hub if needed`));
 }
 
+/** A restored version's kernel identity (the restore check task) says it has the kernel. */
+export function restoredKernel(identity: Record<string, unknown>): boolean {
+	return identity.KernelVersion !== undefined || identity.KernelHash !== undefined || identity.constantsVersion !== undefined;
+}
+
 /** The default slots, for describing a place file outside a deploy (restore). */
 export const DEFAULT_SLOTS: SlotRef[] = [
 	{ service: "ServerScriptService", name: "TypeTorchKernel" },
@@ -950,6 +1012,8 @@ async function kernelRestore(args: ParsedArgs) {
 				dryRun: flagBool(args, "dry-run"),
 				yes: flagBool(args, "yes"),
 				timeoutSeconds: taskTimeout(args),
+				// A version with the kernel and no backup, while the default branch has nothing: the same guard as a deploy.
+				guard: (identity) => (restoredKernel(identity) ? checkDefaultBranch(args, proj, { backup: identity.BackupArtifactId !== undefined }) : Promise.resolve()),
 			},
 			luauDepsKeeping(proj, done),
 		);
@@ -965,7 +1029,7 @@ async function kernelRestore(args: ParsedArgs) {
 	if (new TextDecoder().decode(bytes.subarray(0, 8)) !== PLACE_MAGIC) throw new KernelCheckError(`${file} is not a binary place file (.rbxl)`);
 	let summary;
 	try {
-		summary = summarizePlace(new PlaceFile(bytes), DEFAULT_SLOTS);
+		summary = summarizePlace(new PlaceFile(bytes), [...DEFAULT_SLOTS, BACKUP_SLOT]);
 	} catch (error) {
 		throw new KernelCheckError(`${file} can't be read as a place: ${(error as Error).message}`);
 	}
@@ -992,6 +1056,7 @@ async function kernelRestore(args: ParsedArgs) {
 			warn(`could not read the place's current version (asset:read): ${(error as Error).message}`);
 		}
 	}
+	if (summary.kernel.version) await checkDefaultBranch(args, proj, { backup: (summary.slots.find((slot) => slot.slot === `${BACKUP_SLOT.service}.${BACKUP_SLOT.name}`)?.copies ?? 0) > 0 });
 	const since = named && latest !== undefined && latest > named.version ? ` (versions v${named.version + 1}..v${latest} were saved after the version this file comes from)` : "";
 	warn(`this publishes ${basename(path)} as the new live version of place ${placeId}: everything published after it (Studio work, other kernel deploys) leaves the live place (it stays in version history)${since}`);
 	if (dryRun || !oc) {
