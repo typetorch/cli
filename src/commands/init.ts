@@ -10,6 +10,7 @@
  *   --dir <folder>    where to start (default: the working directory, or the game it is inside)
  *   --phase <name>    run again from this phase (preflight, project, roblox, keys, kernel, backend, deploy, agent)
  *   --agent           print AGENT_PROMPT.md again and stop
+ *   --teardown        remove the backend the backend phase installed, after a y/N
  */
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -18,7 +19,7 @@ import { findProjectRoot } from "../config.ts";
 import { NotInteractiveError, PromptCancelledError } from "../interact.ts";
 import { bold, dim, green, info, isJson, warn } from "../log.ts";
 import { agentPhase, readAgentPrompt } from "../init/agent.ts";
-import { backendPhase } from "../init/backend.ts";
+import { backendPhase, backendTeardown } from "../init/backend.ts";
 import { realDeps, type InitContext, type InitDeps } from "../init/common.ts";
 import { deployPhase } from "../init/deploy.ts";
 import { kernelPhase } from "../init/kernel.ts";
@@ -29,9 +30,9 @@ import { robloxPhase } from "../init/roblox.ts";
 import { emptyState, isDone, markDone, PHASES, readState, writeState, type PhaseName } from "../init/state.ts";
 import { scriptedTui, terminalTui, type Tui } from "../tui.ts";
 
-export const initFlags = { answers: "string", dir: "string", phase: "string", agent: "boolean" } as const;
+export const initFlags = { answers: "string", dir: "string", phase: "string", agent: "boolean", teardown: "boolean" } as const;
 
-export const INIT_USAGE = `typetorch init [--dir <folder>] [--phase <name>] [--answers <file>] [--agent]
+export const INIT_USAGE = `typetorch init [--dir <folder>] [--phase <name>] [--answers <file>] [--agent] [--teardown]
 
   The guided setup: from an empty folder to a live game that hot-swaps, one question at a time. Each step says why
   it exists and which doc it replaces, does the work, and checks it the way \`typetorch doctor\` would.
@@ -42,7 +43,7 @@ export const INIT_USAGE = `typetorch init [--dir <folder>] [--phase <name>] [--a
     4. keys         the two prod signing keys and the key asset (\`keys init\`, \`keys init --fallback\`)
     5. kernel       the kernel place (\`kernel deploy --replace-place\` for an empty place, a patch otherwise)
     6. backend      optional: a VPS with Coolify (over SSH or on it; Coolify installed when missing; your domain or
-                    a free sslip.io name), this PC behind a free Cloudflare quick tunnel (\`backend run\` as a login
+                    a free sslip.io name), a VPS with no Docker (a systemd service with Caddy in front), this PC behind a free Cloudflare quick tunnel (\`backend run\` as a login
                     task), a backend you already run, or skip
     7. deploy       the first prod deploy, a dev branch, \`access push\`
     8. agent        AGENT_PROMPT.md for your coding agent (and starts Claude Code when it is installed)
@@ -52,7 +53,8 @@ export const INIT_USAGE = `typetorch init [--dir <folder>] [--phase <name>] [--a
   --phase <name>    run again from that step: preflight, project, roblox, keys, kernel, backend, deploy, agent
   --answers <file>  a JSON array of answers, one per question, for scripts and tests; secrets come from the
                     environment or .env, never from the file
-  --agent           print AGENT_PROMPT.md again`;
+  --agent           print AGENT_PROMPT.md again
+  --teardown        remove the backend step 6 installed (asks first; its data only when you say so)`;
 
 const RUNNERS: Record<PhaseName, (ctx: InitContext) => Promise<void>> = {
 	preflight: preflightPhase,
@@ -72,6 +74,8 @@ export interface InitOptions {
 	deps?: Partial<InitDeps>;
 	/** Only these phases run (tests). Default: all. */
 	only?: PhaseName[];
+	/** Remove the installed backend instead of running phases. */
+	teardown?: boolean;
 }
 
 /** Runs the installer; returns the phases that ran. Throws on a failed phase (the message says how to continue). */
@@ -96,6 +100,10 @@ export async function runInit(options: InitOptions = {}): Promise<{ ran: PhaseNa
 		},
 	};
 	const ran: PhaseName[] = [];
+	if (options.teardown) {
+		await backendTeardown(ctx);
+		return { ran, dir };
+	}
 	const pending = phases.filter((name) => !isDone(state, name));
 	if (pending.length === 0) {
 		tui.note(`every step is done for ${dir}. \`typetorch init --phase <name>\` runs one again; \`typetorch init --agent\` prints the agent prompt`);
@@ -142,7 +150,7 @@ export async function initCommand(args: ParsedArgs): Promise<void> {
 	}
 	info(bold("typetorch init") + dim("  the guided setup; Ctrl+C stops, running it again continues"));
 	try {
-		const { ran, dir: finalDir } = await runInit({ dir, phase: phaseFlag as PhaseName | undefined, tui });
+		const { ran, dir: finalDir } = await runInit({ dir, phase: phaseFlag as PhaseName | undefined, tui, teardown: flagBool(args, "teardown") });
 		if (ran.length) {
 			info("");
 			info(green(bold("done.")) + ` ${finalDir}`);

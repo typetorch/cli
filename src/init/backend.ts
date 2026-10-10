@@ -2,26 +2,31 @@
  * Phase 6, the backend (optional; plans "typetorch init", backend phase). Where it runs:
  *   coolify   a VPS with Coolify, reached over SSH or this machine (coolify.ts): Coolify detected or installed, the
  *             backend added by hand with printed settings or through Coolify's API, a domain or an sslip.io name
+ *   linux     a plain Linux service on a VPS (or this machine): Bun, systemd, Caddy with a certificate for a domain or
+ *             an sslip.io name, no Docker (linuxservice.ts)
  *   this PC   the backend next to the game behind a Cloudflare quick tunnel, kept pointed by `backend run` as a login
  *             task (thispc.ts)
  *   existing  a backend that already runs: its URL and two keys
  *   skip      nothing; the summary says what is lost
  * Every path that installs one generates the two 32-byte keys here, writes them to the game's .env and nowhere else on
  * this PC; they reach the server only inside its environment. Then `backend setup` signs the address into the settings
- * record. A Linux service without Coolify is the next milestone.
+ * record. `typetorch init --teardown` removes what the chosen path installed (backendTeardown).
  */
 import { randomBytes } from "node:crypto";
+import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { ADMIN_TOKEN_VAR, BACKEND_KEY_VAR, Settings, registerSecret, useSettings } from "../env.ts";
 import { DOCS } from "../tui.ts";
-import { configFlag, upsertDotEnv, type InitContext } from "./common.ts";
-import { coolifyBackend } from "./coolify.ts";
+import { configFlag, slugify, upsertDotEnv, type InitContext } from "./common.ts";
+import { chooseHostname, coolifyBackend } from "./coolify.ts";
+import { linuxServiceInstall, runSteps, teardownSteps } from "./linuxservice.ts";
+import { loginTask } from "./logintask.ts";
 import { localMachine, privateKeys, probeMachine, sshMachine, type Machine } from "./ssh.ts";
 import { thisPcBackend } from "./thispc.ts";
 
 export const BACKEND_README = "https://github.com/typetorch/backend#readme";
 
-export type BackendChoice = "coolify" | "thispc" | "existing" | "skip";
+export type BackendChoice = "coolify" | "linux" | "thispc" | "existing" | "skip";
 
 /** The two keys from the environment or the game's .env; missing ones are generated and written to .env. */
 export function ensureBackendKeys(ctx: InitContext): { key: string; admin: string; generated: string[] } {
@@ -83,7 +88,7 @@ export async function reachMachine(ctx: InitContext): Promise<Machine> {
 	const info = await probeMachine(machine);
 	tui.note(`${machine.label}: ${info.os} (${info.arch})`);
 	if (info.root === "no") throw new Error(`${machine.label} needs root or sudo without a password for the install steps: log in as root, or add the user to sudoers with NOPASSWD, then run \`typetorch init\` again`);
-	if (!/^(ubuntu|debian)$/.test(info.osId)) tui.warn(`${info.os} is not Debian or Ubuntu, which is what Coolify supports best; continuing`);
+	if (!/^(ubuntu|debian)$/.test(info.osId)) tui.warn(`${info.os} is not Debian or Ubuntu, which is what the install steps are written for; continuing`);
 	return machine;
 }
 
@@ -118,6 +123,7 @@ export async function backendPhase(ctx: InitContext): Promise<void> {
 		"Where should the backend run?",
 		[
 			{ value: "coolify", label: "A VPS with Coolify", hint: "installs Coolify when it is missing; a domain, or a free sslip.io name" },
+			{ value: "linux", label: "A VPS, no Docker", hint: "a plain Linux service with Caddy in front; lightest on a small server" },
 			{ value: "thispc", label: "This PC", hint: "for testing: a free Cloudflare quick tunnel, no account; runs while the PC is on" },
 			{ value: "existing", label: "I already run one", hint: `its https address and its two keys (${BACKEND_README})` },
 			{ value: "skip", label: "Skip for now", hint: "everything else works; you lose alerts, the automatic rollback after a bad deploy, and analytics" },
@@ -134,11 +140,53 @@ export async function backendPhase(ctx: InitContext): Promise<void> {
 	if (keys.generated.length) tui.note(`generated ${keys.generated.join(" and ")} into ${join(ctx.dir, ".env")} (never printed)`);
 	if (choice === "thispc") return thisPcBackend(ctx);
 	const machine = await reachMachine(ctx);
-	const url = await coolifyBackend(ctx, machine, keys);
+	const url = choice === "coolify" ? await coolifyBackend(ctx, machine, keys) : await linuxBackend(ctx, machine, keys);
 	ctx.state.answers.backendUrl = url;
 	tui.note(`waiting for ${url}/healthz`);
 	await waitHealthy(ctx, url);
 	await pointGame(ctx, url);
+}
+
+async function linuxBackend(ctx: InitContext, machine: Machine, keys: { key: string; admin: string }): Promise<string> {
+	const { tui } = ctx;
+	const { hostname } = await chooseHostname(ctx, machine);
+	tui.note(`on ${machine.label}: packages, 2 GB swap, the firewall (SSH, 80 and 443 only), Bun, a typetorch user, the backend in /opt/typetorch-backend as a systemd service, Caddy with a certificate for ${hostname}`);
+	if (!(await tui.confirm(`Install the backend on ${machine.label}?`, true))) throw new Error("nothing was installed. Run `typetorch init` again to choose another way");
+	await linuxServiceInstall(tui, machine, { hostname, key: keys.key, admin: keys.admin });
+	return `https://${hostname}`;
+}
+
+/**
+ * `typetorch init --teardown`: removes what the backend phase installed, after a y/N. The Linux service: the service,
+ * the code, the settings and the Caddy site (the data only when asked). This PC: the login task. Coolify: the
+ * resource is deleted in its panel. The game keeps pointing at the old address until the backend phase runs again.
+ */
+export async function backendTeardown(ctx: InitContext): Promise<void> {
+	const { tui, deps } = ctx;
+	const choice = ctx.state.answers.backend as BackendChoice | undefined;
+	if (choice === "linux") {
+		const machine = await reachMachine(ctx);
+		if (!(await tui.confirm(`Remove the backend service, its code, its settings and its Caddy site from ${machine.label}?`, false))) return;
+		const deleteData = await tui.confirm("Also delete its data (deploy reports, analytics) and the typetorch user? This cannot be undone", false);
+		await runSteps(tui, machine, teardownSteps({ deleteData }));
+		tui.note("kept: Bun, Caddy, the swap file and the firewall rules (other programs may use them)");
+	} else if (choice === "thispc") {
+		const bun = deps.which("bun") ?? "bun";
+		const task = loginTask({ platform: deps.platform, home: deps.home, appData: deps.env.APPDATA, slug: slugify(String(ctx.state.answers.project ?? "")) || "game", gameDir: ctx.dir, bun, path: deps.env.PATH ?? "" });
+		if (!(await tui.confirm(`Remove the login task that runs the backend on this PC? (${task.describe})`, false))) return;
+		for (const cmd of task.remove) await deps.capture(cmd, ctx.dir);
+		for (const file of task.files) if (existsSync(file.path)) rmSync(file.path);
+		tui.note(`the backend's code stays in ${String(ctx.state.answers.backendDir ?? "its folder")}; delete it by hand if you want`);
+	} else if (choice === "coolify") {
+		tui.note("delete the typetorch-backend resource in the Coolify panel (Projects, TypeTorch); Coolify itself stays");
+	} else {
+		tui.note("no backend was installed by `typetorch init` here; nothing to remove");
+		return;
+	}
+	ctx.state.answers.backend = "skip";
+	delete ctx.state.done.backend;
+	ctx.save();
+	tui.warn("the game still points at the old address: `typetorch init --phase backend` points it at a new backend");
 }
 
 async function existingBackend(ctx: InitContext): Promise<void> {

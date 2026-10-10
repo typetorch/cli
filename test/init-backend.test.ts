@@ -1,10 +1,11 @@
 /**
- * `typetorch init`, backend phase (milestone 2): `backend run` (the local backend, its quick tunnel and the re-pointing
- * loop) against fake processes, the login task files per OS, the SSH helpers, Coolify detection and its API path
- * against a fake API, and the phase end to end for Coolify over SSH and for this PC. Nothing here opens a socket, runs
+ * `typetorch init`, backend phase (milestones 2 and 3): `backend run` (the local backend, its quick tunnel and the
+ * re-pointing loop) against fake processes, the login task files per OS, the SSH helpers, Coolify detection and its API path
+ * against a fake API, and the phase end to end for Coolify over SSH, the Linux service (and its teardown) and this PC. Nothing here opens a socket, runs
  * ssh or touches the real home folder.
  */
 import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,10 +16,11 @@ process.env.HOME = FAKE_HOME;
 process.env.USERPROFILE = FAKE_HOME;
 
 import { BACKEND_STATUS_FILE, readLocalBackendConfig, readRunStatus, runLocalBackend, serverEnv, tunnelUrlIn, type Child, type RunDeps } from "../src/backendrun";
-import { backendPhase, ensureBackendKeys } from "../src/init/backend";
+import { backendPhase, backendTeardown, ensureBackendKeys } from "../src/init/backend";
 import type { CommandName, InitContext, InitDeps } from "../src/init/common";
 import { COOLIFY_ENV_FILE, coolifyEnv, coolifyInstalled, ensureCoolify, parseDetect, provisionWithApi, type CoolifyApi } from "../src/init/coolify";
 import { loginTask } from "../src/init/logintask";
+import { caddySite, DATA_DIR, ENV_FILE, installSteps, teardownSteps } from "../src/init/linuxservice";
 import { isIpv4, localMachine, PRELUDE, privateKeys, probeMachine, readKeyValues, sshArgs, sshMachine, sslipName } from "../src/init/ssh";
 import { emptyState, PHASES, type InitState } from "../src/init/state";
 import { cloudflaredInstall } from "../src/init/thispc";
@@ -412,6 +414,83 @@ describe("backend phase", () => {
 		const f = fakes(["coolify", "local"], { shell: () => ok("os=Ubuntu\nos_id=ubuntu\nroot=no\n") });
 		await expect(backendPhase(context(dir, f))).rejects.toThrow("needs root or sudo");
 		expect(f.scripts).toHaveLength(1);
+	});
+
+	test("a VPS with no Docker over SSH with a key: each install step in order, the keys only on stdin, then health and setup", async () => {
+		const dir = gameDir();
+		const fetched: string[] = [];
+		const f = fakes(["linux", "ssh", "203.0.113.5", "", "", "key", "", "n", "y"], {
+			shell: (_cmd, input) => (input.includes("uname") ? ok("os=Debian 12\nos_id=debian\narch=x86_64\nroot=sudo\n") : ok()),
+			fetch: (async (input: string | URL | Request) => {
+				fetched.push(String(input));
+				return new Response("ok", { status: 200 });
+			}) as typeof fetch,
+		});
+		const ctx = context(dir, f);
+		await backendPhase(ctx);
+		const url = "https://backend.203-0-113-5.sslip.io";
+		const key = /TYPETORCH_API_KEY=(\w+)/.exec(readFileSync(join(dir, ".env"), "utf8"))![1];
+		const steps = installSteps({ hostname: url.slice(8), key, admin: "x" });
+		// The probe, then one script per step.
+		expect(f.scripts).toHaveLength(1 + steps.length);
+		expect(f.scripts[0].cmd).toContain("BatchMode=yes");
+		expect(f.scripts[0].cmd).toContain(join(FAKE_HOME, ".ssh", "id_ed25519"));
+		for (const [i, step] of steps.entries()) expect(f.scripts[i + 1].input).toContain(step.script.split("\n")[0]);
+		const envScript = f.scripts.find((s) => s.input.includes(ENV_FILE) && s.input.includes("TYPETORCH_ENV"))!;
+		expect(envScript.input).toContain(`TYPETORCH_API_KEY=${key}`);
+		expect(envScript.input).toContain(`TYPETORCH_PUBLIC_URL=${url}`);
+		expect(f.scripts.some((s) => s.cmd.join(" ").includes(key))).toBe(false);
+		expect(f.tui.output.join("\n")).not.toContain(key);
+		expect(f.scripts.at(-1)!.input).toContain(`${url.slice(8)} {`);
+		expect(fetched).toEqual([`${url}/healthz`]);
+		expect(f.commands).toEqual([{ name: "backend", argv: ["setup", "--url", url, "--config", join(dir, "typetorch.json")] }]);
+		expect(ctx.state.answers).toMatchObject({ backend: "linux", sshAuth: "key", sshIdentity: join(FAKE_HOME, ".ssh", "id_ed25519") });
+	});
+
+	test("a VPS with no Docker: a failed step stops the install with its output", async () => {
+		const dir = gameDir();
+		const f = fakes(["linux", "local", "n", "y"], {
+			shell: (_cmd, input) => {
+				if (input.includes("uname")) return ok("os=Ubuntu 24.04\nos_id=ubuntu\nroot=yes\n");
+				if (input.includes("api.ipify.org")) return ok("198.51.100.7\n");
+				if (input.includes("ss -ltnpH")) return { exitCode: 3, stdout: "another program listens on 80, 443 or 8787:\nLISTEN 0 511 *:80 users:((\"nginx\"))", stderr: "" };
+				return ok();
+			},
+		});
+		await expect(backendPhase(context(dir, f))).rejects.toThrow("nginx");
+		expect(f.scripts.some((s) => s.input.includes("apt-get"))).toBe(false);
+		expect(f.commands).toEqual([]);
+	});
+
+	test("teardown: the Linux service goes after a yes, the data only on a second yes; the phase runs again next time", async () => {
+		const dir = gameDir();
+		const f = fakes(["local", "y", "n"], { shell: (_cmd, input) => (input.includes("uname") ? ok("os=Ubuntu\nos_id=ubuntu\nroot=yes\n") : ok()) });
+		const ctx = context(dir, f);
+		ctx.state.answers.backend = "linux";
+		ctx.state.done.backend = { at: "2026-10-10T12:00:00Z" };
+		await backendTeardown(ctx);
+		const scripts = f.scripts.slice(1).map((s) => s.input).join("\n");
+		expect(scripts).toContain("systemctl disable");
+		expect(scripts).not.toContain(`rm -rf ${DATA_DIR}`);
+		expect(ctx.state.done.backend).toBeUndefined();
+		expect(ctx.state.answers.backend).toBe("skip");
+
+		const g = fakes(["local", "n"], { shell: () => ok("os=Ubuntu\nos_id=ubuntu\nroot=yes\n") });
+		const kept = context(dir, g);
+		kept.state.answers.backend = "linux";
+		await backendTeardown(kept);
+		expect(g.scripts).toHaveLength(1);
+		expect(kept.state.answers.backend).toBe("linux");
+	});
+
+	test("the install and teardown scripts are valid bash; the Caddy site and env file", () => {
+		const o = { hostname: "backend.example.com", key: "k".repeat(64), admin: "a".repeat(64) };
+		for (const step of [...installSteps(o), ...teardownSteps({ deleteData: true })]) {
+			const check = spawnSync("bash", ["-n"], { input: PRELUDE + step.script, encoding: "utf8" });
+			expect(`${step.label}: ${check.stderr}`).toBe(`${step.label}: `);
+		}
+		expect(caddySite(o.hostname)).toContain("reverse_proxy 127.0.0.1:8787");
+		expect(teardownSteps({ deleteData: false }).some((s) => s.script.includes(DATA_DIR))).toBe(false);
 	});
 
 	test("this PC: checkout, install, explorer build, backend.json, the login task, and the wait for a pointed tunnel", async () => {
