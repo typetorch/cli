@@ -25,6 +25,7 @@ import { deployPhase } from "../init/deploy.ts";
 import { kernelPhase } from "../init/kernel.ts";
 import { keysPhase } from "../init/keys.ts";
 import { preflightPhase } from "../init/preflight.ts";
+import { repairMenu } from "../init/repair.ts";
 import { projectPhase } from "../init/project.ts";
 import { robloxPhase } from "../init/roblox.ts";
 import { emptyState, isDone, markDone, PHASES, readState, writeState, type PhaseName } from "../init/state.ts";
@@ -48,7 +49,8 @@ export const INIT_USAGE = `typetorch init [--dir <folder>] [--phase <name>] [--a
     7. deploy       the first prod deploy, a dev branch, \`access push\`
     8. agent        AGENT_PROMPT.md for your coding agent (and starts Claude Code when it is installed)
   Stopped half way (Ctrl+C, a failed check)? Run it again: it continues at the first unfinished step
-  (.typetorch/init.json; it holds no secret).
+  (.typetorch/init.json; it holds no secret). In a game that is already set up it checks what each step left behind
+  and offers to run again the ones that are missing or broken.
   --dir <folder>    start there instead of the working directory
   --phase <name>    run again from that step: preflight, project, roblox, keys, kernel, backend, deploy, agent
   --answers <file>  a JSON array of answers, one per question, for scripts and tests; secrets come from the
@@ -105,6 +107,21 @@ export async function runInit(options: InitOptions = {}): Promise<{ ran: PhaseNa
 		return { ran, dir };
 	}
 	const pending = phases.filter((name) => !isDone(state, name));
+	// A set-up game (every step done, or set up by hand before init existed) gets the repair menu, not every step again.
+	const setUp = existsSync(resolve(dir, "typetorch.json")) && (pending.length === 0 || Object.keys(state.done).length === 0);
+	if (setUp && !options.phase && !options.only) {
+		ran.push(
+			...(await repairMenu(ctx, async (name) => {
+				try {
+					await RUNNERS[name](ctx);
+				} catch (error) {
+					ctx.save();
+					throw error;
+				}
+			})),
+		);
+		return { ran, dir };
+	}
 	if (pending.length === 0) {
 		tui.note(`every step is done for ${dir}. \`typetorch init --phase <name>\` runs one again; \`typetorch init --agent\` prints the agent prompt`);
 		return { ran, dir };

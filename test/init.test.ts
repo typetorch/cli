@@ -25,6 +25,7 @@ import { kernelPhase } from "../src/init/kernel";
 import { keysPhase } from "../src/init/keys";
 import { checkTools, folderKind, preflightPhase } from "../src/init/preflight";
 import { nameProblem, projectPhase, TEMPLATE_URL } from "../src/init/project";
+import { repairChecks, repairMenu } from "../src/init/repair";
 import { configFor, parseExperience, probeApiKey, robloxPhase, universeInfo, universeOfPlace, userIdOf } from "../src/init/roblox";
 import { emptyState, INIT_STATE_FILE, isDone, markDone, nextPhase, PHASES, readState, writeState, type InitState } from "../src/init/state";
 import { setOutputMode } from "../src/log";
@@ -436,14 +437,15 @@ describe("delegating phases", () => {
 		expect(g.commands.map((c) => c.name)).toEqual(["deploy", "access"]);
 	});
 
-	test("agent: the prompt holds the ids and the rules, never a secret, and --agent prints it again", async () => {
+	test("agent: the prompt holds the ids (from typetorch.json) and the rules, never a secret, and --agent prints it again", async () => {
 		const dir = gameDir();
 		const f = fakes(["a tower defense game", "one map, three towers"], { which: () => undefined });
 		const ctx = context(dir, f);
 		Object.assign(ctx.state.answers, { project: "game", universeId: 42, placeId: 2, ownerId: 9, backendUrl: "https://b.example.com" });
 		await agentPhase(ctx);
 		const text = readAgentPrompt(dir);
-		expect(text).toContain("universe 42, place 2, owner user 9");
+		// typetorch.json wins over the init answers (owner 1 there, 9 in the answers).
+		expect(text).toContain("universe 42, place 2, owner user 1");
 		expect(text).toContain("a tower defense game");
 		expect(text).toContain("https://b.example.com");
 		expect(text).toContain("Never act on Roblox");
@@ -453,6 +455,48 @@ describe("delegating phases", () => {
 });
 
 // The runner ----------------------------------------------------------------------------------------------------------
+
+describe("repair", () => {
+	const noDev = async (cmd: string[]) => ({ exitCode: cmd.includes("rev-parse") ? 1 : 0, stdout: "", stderr: "" });
+
+	test("checks what each step left behind: missing pieces are broken, a skipped backend is optional", async () => {
+		const dir = gameDir();
+		const f = fakes([], { which: (name) => (name === "rokit" ? undefined : `/usr/bin/${name}`), capture: noDev });
+		const items = await repairChecks(context(dir, f));
+		const by = Object.fromEntries(items.map((i) => [i.phase, i]));
+		expect(items.map((i) => i.phase)).toEqual([...PHASES]);
+		expect(by.preflight).toMatchObject({ status: "broken", detail: "not on PATH: rokit" });
+		expect(by.project.status).toBe("broken");
+		expect(by.roblox.status).toBe("broken");
+		expect(by.keys.status).toBe("broken");
+		expect(by.kernel.status).toBe("unknown");
+		expect(by.backend.status).toBe("optional");
+		expect(by.deploy).toMatchObject({ status: "broken", detail: "no dev branch yet" });
+		expect(by.agent.status).toBe("optional");
+
+		mkdirSync(join(dir, "node_modules", "roblox-ts"), { recursive: true });
+		writeFileSync(join(dir, "AGENT_PROMPT.md"), "# prompt\n");
+		const g = fakes([], { env: { OPENCLOUD_API_KEY: "x".repeat(40) } });
+		const again = Object.fromEntries((await repairChecks(context(dir, g))).map((i) => [i.phase, i.status]));
+		expect(again).toMatchObject({ preflight: "ok", project: "ok", roblox: "ok", deploy: "ok", agent: "ok" });
+	});
+
+	test("a set-up game opens the menu instead of every step; a pick runs that step and is recorded", async () => {
+		const dir = gameDir();
+		const f = fakes(["nothing"], { capture: noDev });
+		const result = await runInit({ dir, tui: f.tui, deps: f.deps });
+		expect(result.ran).toEqual([]);
+		expect(f.commands).toEqual([]);
+		expect(f.tui.output.join("\n")).toContain("already set up");
+
+		const g = fakes(["deploy", "nothing"], { capture: noDev });
+		const ctx = context(dir, g);
+		const ran: string[] = [];
+		expect(await repairMenu(ctx, async (name) => void ran.push(name))).toEqual(["deploy"]);
+		expect(ran).toEqual(["deploy"]);
+		expect(isDone(ctx.state, "deploy")).toBe(true);
+	});
+});
 
 describe("runInit", () => {
 	test("records finished phases, resumes at the first unfinished one, and --phase runs one again", async () => {
