@@ -32,6 +32,7 @@ import { GATE_USAGE, TEST_USAGE, testCommand, testFlags } from "./commands/test.
 import { ROLLOUT_USAGE, WIDEN_USAGE } from "./rollout.ts";
 import { branchCommand, branchFlags, deploymentsCommand, deploymentsFlags } from "./commands/history.ts";
 import { approveCommand, approveFlags, proposalsCommand, proposalsFlags, rejectCommand, rejectFlags } from "./commands/approve.ts";
+import { INIT_USAGE, initCommand, initFlags } from "./commands/init.ts";
 import { kernelCommand, kernelFlags } from "./commands/kernel.ts";
 import { backupCommand, backupFlags } from "./commands/backup.ts";
 import { MIGRATE_USAGE, migrateCommand, migrateFlags } from "./commands/migrate.ts";
@@ -287,7 +288,7 @@ ${ROLLOUT_USAGE}`,
 	backend: {
 		flags: backendFlags,
 		run: (args) => backendCommand(args),
-		summary: "point game servers at the TypeTorch backend (checked first)",
+		summary: "point game servers at the TypeTorch backend (checked first); `backend run`: it on this PC behind a quick tunnel",
 		usage: BACKEND_USAGE,
 	},
 	fleet: {
@@ -412,6 +413,12 @@ typetorch assets list
 		run: doctorCommand,
 		summary: "check tools, typetorch.json, keys and scopes",
 		usage: `typetorch doctor [--json]`,
+	},
+	init: {
+		flags: initFlags,
+		run: initCommand,
+		summary: "guided setup: from an empty folder to a live game",
+		usage: INIT_USAGE,
 	},
 };
 

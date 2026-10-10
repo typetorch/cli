@@ -253,3 +253,40 @@ export function describeOwnerSync(sync: OwnerSync): { level: "info" | "warn"; te
 			return sync.reason.startsWith("no backend") ? undefined : { level: "info", text: `backend owner list not sent: ${sync.reason}` };
 	}
 }
+
+// Trusting a browser (`backend bless`) -------------------------------------------------------------------------------
+
+/** What `backend bless` signs; the backend checks the same string (typetorch/backend devices.ts). */
+export function blessMessage(fingerprint: string, challenge: string): string {
+	return `typetorch-bless-v1\n${fingerprint}\n${challenge}`;
+}
+
+/**
+ * The signing keys a blessing link may be signed with, on the backend (GET, then PUT /v1/access/keys with the admin
+ * token when they differ). Returns whether they changed. A 404 means the backend has the typetorch.dev login off.
+ */
+export async function syncBlessKeys(options: BackendRequestOptions, keys: string[]): Promise<boolean> {
+	const current = await adminRequest(options, "GET", "/v1/access/keys");
+	if (current.status === 404) throw new BackendError("the backend has no trusted-browser support (TYPETORCH_CENTRAL_LOGIN is off, or it predates it)", 404);
+	if (current.status !== 200) throw new BackendError(`GET /v1/access/keys answered ${current.status} ${shortBody(current.text)}`, current.status, current.json);
+	const have = Array.isArray(current.json?.keys) ? (current.json!.keys as unknown[]).filter((k): k is string => typeof k === "string") : [];
+	if (have.length === keys.length && keys.every((k) => have.includes(k))) return false;
+	const reply = await adminRequest(options, "PUT", "/v1/access/keys", { keys });
+	if (reply.status !== 200) throw new BackendError(`PUT /v1/access/keys answered ${reply.status} ${shortBody(reply.text)}`, reply.status, reply.json);
+	return true;
+}
+
+/** GET /auth/bless/challenge (no credentials): a one-time challenge and the backend's fingerprint. */
+export async function blessChallenge(url: string, fetcher: typeof fetch = fetch): Promise<{ challenge: string; fingerprint: string; expiresIn: number }> {
+	const base = url.replace(/\/+$/, "");
+	const response = await fetcher(`${base}/auth/bless/challenge`, { headers: { accept: "application/json" }, redirect: "manual", signal: AbortSignal.timeout(10_000) });
+	const text = await response.text();
+	let json: Record<string, unknown> = {};
+	try {
+		json = JSON.parse(text) as Record<string, unknown>;
+	} catch {}
+	if (response.status !== 200 || typeof json.challenge !== "string" || typeof json.fingerprint !== "string") {
+		throw new BackendError(`GET /auth/bless/challenge answered ${response.status} ${shortBody(text)}`, response.status, json);
+	}
+	return { challenge: json.challenge, fingerprint: json.fingerprint, expiresIn: typeof json.expires_in === "number" ? json.expires_in : 300 };
+}
