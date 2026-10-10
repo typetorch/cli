@@ -4,7 +4,7 @@
  * scheduled task "at logon" needs an administrator; the Startup folder does not). Output goes to
  * `.typetorch/backend.log` in the game repo. Nothing here holds a key: the command reads them from the game's .env.
  */
-import { join } from "node:path";
+import { posix, win32 } from "node:path";
 import { BACKEND_LOG_FILE } from "../backendrun.ts";
 
 export interface LoginTask {
@@ -41,6 +41,8 @@ function unitArg(text: string): string {
 }
 
 export function loginTask(o: LoginTaskOptions): LoginTask {
+	// Paths follow the target OS, not the OS running the CLI (so tests and previews are stable everywhere).
+	const join = o.platform === "win32" ? win32.join : posix.join;
 	const log = join(o.gameDir, BACKEND_LOG_FILE);
 	if (o.platform === "linux") {
 		const unit = `typetorch-backend-${o.slug}.service`;

@@ -18,7 +18,7 @@ import { isRecord } from "./json.ts";
 
 export const BACKEND_CONFIG_FILE = join(".typetorch", "backend.json");
 export const BACKEND_STATUS_FILE = join(".typetorch", "backend-run.json");
-export const BACKEND_LOG_FILE = join(".typetorch", "backend.log");
+export const BACKEND_LOG_FILE = ".typetorch/backend.log";
 export const DEFAULT_PORT = 8787;
 
 /** `.typetorch/backend.json`: where the local backend lives. Never a secret. */

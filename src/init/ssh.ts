@@ -6,7 +6,7 @@
  */
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, posix } from "node:path";
 import { childEnv } from "../env.ts";
 import type { RunResult } from "../proc.ts";
 import { resolveCommand } from "../runtime.ts";
@@ -58,7 +58,7 @@ export const PRELUDE = 'set -eu\nif [ "$(id -u)" = 0 ]; then SUDO=""; else SUDO=
 export function sshArgs(target: SshTarget, platform: NodeJS.Platform, home: string): string[] {
 	const args = ["ssh", "-p", String(target.port), "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=15"];
 	if (target.keyFile) args.push("-i", target.keyFile, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes");
-	if (platform !== "win32") args.push("-o", "ControlMaster=auto", "-o", `ControlPath=${join(home, ".ssh", "typetorch-%C")}`, "-o", "ControlPersist=60");
+	if (platform !== "win32") args.push("-o", "ControlMaster=auto", "-o", `ControlPath=${posix.join(home, ".ssh", "typetorch-%C")}`, "-o", "ControlPersist=60");
 	args.push(`${target.user}@${target.host}`, "bash -s");
 	return args;
 }
