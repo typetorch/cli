@@ -454,3 +454,46 @@ describe("backend phase", () => {
 		await expect(backendPhase(context(dir, f))).rejects.toThrow("the deploy key lacks DataStore scopes");
 	});
 });
+
+// backend bless --------------------------------------------------------------------------------------------------------
+
+describe("backend bless", () => {
+	test("sends the public keys when they changed, signs the challenge with the main key, and opens the single-use link", async () => {
+		const { backendCommand, backendFlags } = await import("../src/commands/backend");
+		const { parseArgs } = await import("../src/args");
+		const { Settings } = await import("../src/env");
+		const { generateSigningKey, parseSigningKey } = await import("../src/signing");
+		const { blessMessage } = await import("../src/backend");
+		const { verify, createPublicKey } = await import("node:crypto");
+		const dir = gameDir();
+		writeFileSync(join(dir, ".env"), `TYPETORCH_ADMIN_TOKEN=${"a".repeat(64)}\n`);
+		useSettings(new Settings({ gameDir: dir, env: {} }));
+		const signer = { main: parseSigningKey(generateSigningKey().seed), fallback: parseSigningKey(generateSigningKey().seed) };
+		const calls: string[] = [];
+		let stored: string[] = [];
+		const fetcher = (async (input: string | URL | Request, init?: RequestInit) => {
+			const url = new URL(String(input));
+			calls.push(`${init?.method ?? "GET"} ${url.pathname}`);
+			if (url.pathname === "/v1/access/keys") {
+				expect(new Headers(init?.headers).get("authorization")).toBe(`Bearer ${"a".repeat(64)}`);
+				if (init?.method === "PUT") stored = JSON.parse(String(init.body)).keys;
+				return Response.json({ keys: stored });
+			}
+			if (url.pathname === "/auth/bless/challenge") return Response.json({ challenge: "ch-1", fingerprint: "tt1-abc", expires_in: 300 });
+			return new Response("", { status: 404 });
+		}) as typeof fetch;
+		const opened: string[] = [];
+		const run = () => backendCommand(parseArgs(["bless", "--url", "https://backend.example.com", "--config", join(dir, "typetorch.json")], backendFlags), { signer, fetch: fetcher, open: async (u) => void opened.push(u) });
+		await run();
+		expect(calls).toEqual(["GET /v1/access/keys", "PUT /v1/access/keys", "GET /auth/bless/challenge"]);
+		expect(stored).toEqual([signer.main.publicKey, signer.fallback.publicKey]);
+		const link = new URL(opened[0]);
+		expect(`${link.origin}${link.pathname}`).toBe("https://backend.example.com/auth/bless");
+		expect(link.searchParams.get("challenge")).toBe("ch-1");
+		const pub = createPublicKey({ key: { kty: "OKP", crv: "Ed25519", x: Buffer.from(signer.main.publicKey, "base64").toString("base64url") }, format: "jwk" });
+		expect(verify(null, Buffer.from(blessMessage("tt1-abc", "ch-1")), pub, Buffer.from(link.searchParams.get("sig")!, "base64url"))).toBe(true);
+		calls.length = 0;
+		await run();
+		expect(calls).toEqual(["GET /v1/access/keys", "GET /auth/bless/challenge"]);
+	});
+});

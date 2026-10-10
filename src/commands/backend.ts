@@ -13,12 +13,14 @@
  *
  * Replaces `typetorch fleet setup` and `typetorch settings set analytics` (CLI 0.8).
  */
+import { sign } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { flagBool, flagString, parseArgs, UsageError, type ParsedArgs } from "../args.ts";
 import { BACKEND_CONFIG_FILE, DEFAULT_PORT, readLocalBackendConfig, runLocalBackend, spawnChild } from "../backendrun.ts";
 import { sleep, which } from "../runtime.ts";
-import { backendCredentialsWarned } from "../backend.ts";
+import { backendCredentialsWarned, blessChallenge, blessMessage, syncBlessKeys } from "../backend.ts";
+import { capture } from "../proc.ts";
 import { backendUrlError, updateProjectConfig, type Project } from "../config.ts";
 import { checkBackendEndpoint, enforceEndpoints, reportsJson } from "../endpoints.ts";
 import { ADMIN_TOKEN_VAR, BACKEND_KEY_VAR, childEnv, settings } from "../env.ts";
@@ -46,6 +48,7 @@ export const backendFlags = {
 	"dry-run": "boolean",
 	"no-ping": "boolean",
 	force: "boolean",
+	"no-open": "boolean",
 	"backend-dir": "string",
 	port: "string",
 	cloudflared: "string",
@@ -83,7 +86,17 @@ typetorch backend run [--backend-dir <checkout>] [--port <n>] [--cloudflared <pa
   with the admin token; Roblox sign-in needs a fixed address, which a quick tunnel is not).
   --backend-dir    the typetorch/backend checkout (default: .typetorch/backend.json)
   --port           the local port (default 8787)
-  --cloudflared    cloudflared's path when it is not on PATH`;
+  --cloudflared    cloudflared's path when it is not on PATH
+
+typetorch backend bless [--url <https url>] [--no-open] [--key-file <path>] [--fallback-key-file <path>]
+
+  Trusts one browser for admin when you sign in with typetorch.dev (TYPETORCH_CENTRAL_LOGIN on the backend): an owner
+  gets admin only on a trusted browser, so typetorch.dev alone can never make anyone an admin. Sends the game's two
+  public signing keys to the backend (PUT /v1/access/keys with ${ADMIN_TOKEN_VAR}, when they changed), asks it for a
+  one-time challenge, signs it with the main prod key (it never leaves this PC) and opens the single-use link
+  <url>/auth/bless?challenge=...&sig=... in your browser; open it in the browser you want to trust within 5 minutes.
+  --url       the backend (default: typetorch.json backend.url)
+  --no-open   print the link instead of opening it`;
 
 function dial(args: ParsedArgs, flag: string, [low, high]: readonly [number, number]): number | undefined {
 	const raw = flagString(args, flag);
@@ -103,14 +116,19 @@ export function analyticsDials(body: SettingsBody, flags: BackendAnalytics): Bac
 	return Object.keys(dials).length ? dials : undefined;
 }
 
-export async function backendCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; fetch?: typeof fetch } = {}) {
+export async function backendCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; fetch?: typeof fetch; open?: (url: string) => Promise<void> } = {}) {
 	const [sub, extra] = args.positionals;
+	if (sub === "bless") {
+		if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
+		return backendBless(args, deps);
+	}
 	if (sub === "run") {
 		if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
 		return backendRun(args);
 	}
-	if (sub !== "setup") throw new UsageError(`unknown backend subcommand "${sub ?? ""}" (setup, run)`);
+	if (sub !== "setup") throw new UsageError(`unknown backend subcommand "${sub ?? ""}" (setup, run, bless)`);
 	for (const flag of ["backend-dir", "port", "cloudflared"]) if (flagString(args, flag) !== undefined) throw new UsageError(`--${flag} belongs to \`backend run\``);
+	if (flagBool(args, "no-open")) throw new UsageError("--no-open belongs to `backend bless`");
 	if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
 	const proj = project(args);
 	const url = (flagString(args, "url") ?? proj.config.backend?.url)?.replace(/\/+$/, "");
@@ -225,4 +243,40 @@ async function backendRun(args: ParsedArgs) {
 		process.off("SIGINT", stop);
 		process.off("SIGTERM", stop);
 	}
+}
+
+/** `backend bless`: a link signed by the main prod key that trusts the browser opening it (typetorch.dev login). */
+async function backendBless(args: ParsedArgs, deps: { signer?: DualSigner; fetch?: typeof fetch; open?: (url: string) => Promise<void> }) {
+	const proj = project(args);
+	const url = (flagString(args, "url") ?? proj.config.backend?.url)?.replace(/\/+$/, "");
+	if (!url) throw new UsageError("which backend? pass --url https://<host>, or run `typetorch backend setup` first");
+	const problem = backendUrlError(url);
+	if (problem) throw new UsageError(`--url ${problem}`);
+	const admin = backendCredentialsWarned().admin?.value;
+	if (!admin) throw new Error(`${ADMIN_TOKEN_VAR} must be in ${settings().dotEnv}: sending the signing keys to the backend needs the admin token`);
+	const signer = deps.signer ?? settingsSigner(proj, args);
+	const fetcher = deps.fetch ?? fetch;
+	const changed = await syncBlessKeys({ url, adminToken: admin, fetch: fetcher }, [signer.main.publicKey, signer.fallback.publicKey]);
+	const { challenge, fingerprint, expiresIn } = await blessChallenge(url, fetcher);
+	const sig = sign(null, Buffer.from(blessMessage(fingerprint, challenge), "utf8"), signer.main.privateKey).toString("base64url");
+	const link = `${url}/auth/bless?challenge=${encodeURIComponent(challenge)}&sig=${encodeURIComponent(sig)}`;
+	if (isJson()) return emitJson({ url, fingerprint, keysUpdated: changed, link, expiresIn });
+	if (changed) info(dim(`  sent the game's public signing keys to ${new URL(url).host}`));
+	const open = flagBool(args, "no-open") ? undefined : (deps.open ?? openInBrowser);
+	if (open) {
+		try {
+			await open(link);
+			info(`opened the trust link in your browser (single use, ${Math.round(expiresIn / 60)} minutes). If it opened in the wrong browser, run this again with --no-open and paste the link there.`);
+			return;
+		} catch {}
+	}
+	info(`open this link in the browser to trust (single use, ${Math.round(expiresIn / 60)} minutes):`);
+	info(link);
+}
+
+/** The system's default browser. */
+async function openInBrowser(url: string): Promise<void> {
+	const cmd = process.platform === "win32" ? ["rundll32", "url.dll,FileProtocolHandler", url] : process.platform === "darwin" ? ["open", url] : ["xdg-open", url];
+	const result = await capture(cmd, process.cwd());
+	if (result.exitCode !== 0) throw new Error(`${cmd[0]} exited with ${result.exitCode}`);
 }
