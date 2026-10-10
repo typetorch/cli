@@ -18,6 +18,7 @@ import { deployCommand, deployFlags } from "../src/commands/deploy";
 import { loadProject, validateBackup } from "../src/config";
 import { appendUpload, readUploads } from "../src/deployments";
 import { Settings, useSettings } from "../src/env";
+import { scriptedInteraction, useInteraction } from "../src/interact";
 import type { FleetClient, ReportRow, ServerRow } from "../src/fleet";
 import { parseKernelTaskResult, readSlotsRbxm, kernelTaskScript } from "../src/kernelpatch-task";
 import { captureJson, setOutputMode } from "../src/log";
@@ -276,7 +277,9 @@ describe("typetorch deploy --reupload", () => {
 		const root = gameRoot({ approval: "prod" });
 		withUpload(root, { channel: "prod", branch: "prod" });
 		const calls = mockCloud();
-		const { json, error } = await deploy(root, ["--reupload", "111111111111", "--skip-test", "moderation took the asset down"]);
+		// "Without a person", even when the tests run in a terminal (npm publish runs them there).
+		useInteraction(scriptedInteraction({ interactive: false }));
+		const { json, error } = await deploy(root, ["--reupload", "111111111111", "--skip-test", "moderation took the asset down"]).finally(() => useInteraction(undefined));
 		expect(error).toBeUndefined();
 		expect(json).toMatchObject({ proposal: { kind: "deploy", branch: "prod", artifact: { assetId: 222222222222 } }, reuploadOf: 111111111111 });
 		expect(calls.some((c) => c.path.endsWith(":publishMessage"))).toBe(false);
