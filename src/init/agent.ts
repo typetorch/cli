@@ -6,6 +6,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { loadProject, type ProjectConfig } from "../config.ts";
 import { DOCS } from "../tui.ts";
 import type { InitContext } from "./common.ts";
 
@@ -68,12 +69,19 @@ export async function agentPhase(ctx: InitContext): Promise<void> {
 	const first = await tui.text("What should the first version do?", { default: (ctx.state.answers.first as string | undefined) ?? "" });
 	ctx.state.answers.about = about;
 	ctx.state.answers.first = first;
+	// typetorch.json wins: it is what the game uses, and a game set up by hand has no init answers.
+	let config: Partial<ProjectConfig> = {};
+	try {
+		config = loadProject(undefined, ctx.dir).config;
+	} catch {}
+	const owner = Object.entries(config.members ?? {}).find(([, role]) => role === "owner")?.[0];
+	const answers = ctx.state.answers;
 	const text = agentPrompt({
-		project: String(ctx.state.answers.project ?? "my-game"),
-		universeId: Number(ctx.state.answers.universeId ?? 0),
-		placeId: Number(ctx.state.answers.placeId ?? 0),
-		ownerId: Number(ctx.state.answers.ownerId ?? 0),
-		backend: typeof ctx.state.answers.backendUrl === "string" ? ctx.state.answers.backendUrl : undefined,
+		project: String(config.project ?? answers.project ?? "my-game"),
+		universeId: Number(config.universeId ?? answers.universeId ?? 0),
+		placeId: Number(config.placeId ?? answers.placeId ?? 0),
+		ownerId: Number(owner ?? answers.ownerId ?? 0),
+		backend: config.backend?.url ?? (typeof answers.backendUrl === "string" ? answers.backendUrl : undefined),
 		about,
 		first,
 	});
