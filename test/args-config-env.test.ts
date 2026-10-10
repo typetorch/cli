@@ -6,7 +6,7 @@ import { parseArgs, UsageError } from "../src/args";
 import { validateConfig } from "../src/config";
 import { childEnv, parseDotEnv, Settings } from "../src/env";
 import { generateSigningKey, TEST_VECTOR_PUBLIC_KEYS } from "../src/signing";
-import { isGeneratedPath, porcelainPaths } from "../src/git";
+import { isEditorTempFile, isGeneratedPath, porcelainPaths, untrackedEditorFiles } from "../src/git";
 import { jsonEqual, parseJsonc, setJsonFields, topLevelValueSpan } from "../src/json";
 
 describe("parseArgs", () => {
@@ -219,6 +219,17 @@ describe("git helpers", () => {
 			"with space.ts",
 		]);
 	});
+	test("editor temp files: only untracked ones are ignored", () => {
+		for (const path of [".typetorch.json.swp", "src/.a.ts.swo", "src/a.ts~", "src/.#a.ts", "4913", "src/.b.ts.swn"]) {
+			expect(isEditorTempFile(path)).toBe(true);
+		}
+		for (const path of ["src/swp.ts", "src/a.ts", ".typetorch.json", "src/a.swpx"]) expect(isEditorTempFile(path)).toBe(false);
+		expect([...untrackedEditorFiles("?? .typetorch.json.swp\n M src/.a.ts.swp\n?? src/a.ts\n?? src/b.ts~\n")]).toEqual([
+			".typetorch.json.swp",
+			"src/b.ts~",
+		]);
+	});
+
 	test("isGeneratedPath", () => {
 		const generated = ["src/shared/build.ts", ".typetorch/"];
 		expect(isGeneratedPath("src/shared/build.ts", generated)).toBe(true);
