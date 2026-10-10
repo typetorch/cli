@@ -5,7 +5,7 @@
  * no URL for the user to handle: the wrapper re-points the game whenever the tunnel's address changes.
  */
 import { chmodSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, posix, resolve } from "node:path";
 import { BACKEND_LOG_FILE, BACKEND_STATUS_FILE, DEFAULT_PORT, readLocalBackendConfig, readRunStatus, writeLocalBackendConfig } from "../backendrun.ts";
 import { BACKEND_REPO_URL } from "./coolify.ts";
 import { slugify, type InitContext } from "./common.ts";
@@ -16,7 +16,7 @@ export function cloudflaredInstall(platform: NodeJS.Platform, arch: string, home
 	if (platform === "win32") return { show: "winget install --id Cloudflare.cloudflared -e", cmd: ["winget", "install", "--id", "Cloudflare.cloudflared", "-e", "--accept-source-agreements", "--accept-package-agreements"] };
 	if (platform === "darwin") return { show: "brew install cloudflared", cmd: ["brew", "install", "cloudflared"] };
 	const asset = arch === "arm64" ? "arm64" : arch === "arm" ? "arm" : "amd64";
-	const path = join(home, ".local", "bin", "cloudflared");
+	const path = posix.join(home, ".local", "bin", "cloudflared");
 	const url = `https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${asset}`;
 	return { show: `curl -fsSL ${url} -o ${path} && chmod +x ${path}`, cmd: ["curl", "-fsSL", "--create-dirs", url, "-o", path], path };
 }
