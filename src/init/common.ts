@@ -4,6 +4,7 @@
  * against fakes. Helpers for the files init writes (.env, .gitignore) live here too.
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { parseArgs, type FlagSpec, type ParsedArgs } from "../args.ts";
 import { accessCommand, accessFlags } from "../commands/access.ts";
@@ -12,7 +13,8 @@ import { deployCommand, deployFlags } from "../commands/deploy.ts";
 import { kernelCommand, kernelFlags } from "../commands/kernel.ts";
 import { keysCommand, keysFlags } from "../commands/keys.ts";
 import { capture, run, type RunResult } from "../proc.ts";
-import { which } from "../runtime.ts";
+import { sleep, which } from "../runtime.ts";
+import { withStdin } from "./ssh.ts";
 import type { Tui } from "../tui.ts";
 import type { InitState, PhaseName } from "./state.ts";
 
@@ -31,6 +33,11 @@ export interface InitDeps {
 	/** Runs another CLI command in this process, with its own argument parsing. */
 	command: (name: CommandName, argv: string[]) => Promise<void>;
 	now: () => Date;
+	/** A child process fed `input` on stdin (a script for `bash -s`, locally or over ssh); its exit code is returned. */
+	shell: (cmd: string[], cwd: string, input: string) => Promise<RunResult>;
+	/** The user's home folder (~/.ssh, the login task's folders). */
+	home: string;
+	sleep: (ms: number) => Promise<void>;
 }
 
 export interface InitContext {
@@ -77,6 +84,9 @@ export function realDeps(tui: Tui): InitDeps {
 		platform: process.platform,
 		command: runCliCommand,
 		now: () => new Date(),
+		shell: (cmd, cwd, input) => withStdin(cmd, cwd, input),
+		home: homedir(),
+		sleep,
 	};
 }
 

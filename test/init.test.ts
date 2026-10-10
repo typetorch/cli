@@ -67,7 +67,7 @@ interface Fakes {
 }
 
 /** Deps where every tool exists, every process succeeds, and delegated commands are recorded. */
-function fakes(answers: string[], options: { which?: (name: string) => string | undefined; capture?: (cmd: string[], cwd: string) => Promise<{ exitCode: number; stdout: string; stderr: string }>; env?: Record<string, string>; command?: (name: CommandName, argv: string[]) => Promise<void> } = {}): Fakes {
+function fakes(answers: string[], options: { which?: (name: string) => string | undefined; capture?: (cmd: string[], cwd: string) => Promise<{ exitCode: number; stdout: string; stderr: string }>; env?: Record<string, string>; command?: (name: CommandName, argv: string[]) => Promise<void>; shell?: (cmd: string[], cwd: string, input: string) => Promise<{ exitCode: number; stdout: string; stderr: string }> } = {}): Fakes {
 	const tui = scriptedTui(answers);
 	const commands: Fakes["commands"] = [];
 	const processes: string[][] = [];
@@ -93,6 +93,12 @@ function fakes(answers: string[], options: { which?: (name: string) => string | 
 			await options.command?.(name, argv);
 		},
 		now: () => new Date("2026-10-10T12:00:00Z"),
+		shell: async (cmd, cwd, input) => {
+			processes.push([...cmd, input]);
+			return options.shell ? options.shell(cmd, cwd, input) : { exitCode: 0, stdout: "", stderr: "" };
+		},
+		home: FAKE_HOME,
+		sleep: async () => {},
 	};
 	return { deps, tui, commands, processes };
 }

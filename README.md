@@ -49,13 +49,14 @@ Alternatively `bun link` in this folder, then `bun link @typetorch/cli` in a gam
 
 ## Setup
 
-**New game: `bunx @typetorch/cli init` in an empty folder.** The guided setup asks one question at a time and does
-the rest: the tools, the starter template, your experience (paste its URL), the Open Cloud key (probed, written to the
+**New game: `bunx @typetorch/cli init` in an empty folder.** The guided setup asks one question at a time and does the
+rest: the tools, the starter template, your experience (paste its URL), the Open Cloud key (probed, written to the
 game repo's `.env`), the owner, `typetorch.json`, the two prod signing keys and the key asset, the kernel place, an
-optional backend you already run, the first prod deploy and a dev branch, and `AGENT_PROMPT.md` for your coding agent.
-Each step says why it exists and which doc it replaces, and checks its result the way `typetorch doctor` would. Stopped
-half way? Run it again: `.typetorch/init.json` (never a secret) records what is done. `typetorch init --phase <name>`
-runs one step again; `--answers <file>` replays answers for scripts (a secret never comes from the file).
+optional backend (a VPS with Coolify over SSH, this PC behind a free Cloudflare quick tunnel, or one you already run),
+the first prod deploy and a dev branch, and `AGENT_PROMPT.md` for your coding agent. Each step says why it exists and
+which doc it replaces, and checks its result the way `typetorch doctor` would. Stopped half way? Run it again:
+`.typetorch/init.json` (never a secret) records what is done. `typetorch init --phase <name>` runs one step again;
+`--answers <file>` replays answers for scripts (a secret never comes from the file).
 
 By hand, a game repo has `typetorch.json` next to `default.project.json`:
 

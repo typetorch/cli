@@ -41,7 +41,9 @@ export const INIT_USAGE = `typetorch init [--dir <folder>] [--phase <name>] [--a
                     typetorch.json (shown before it is written)
     4. keys         the two prod signing keys and the key asset (\`keys init\`, \`keys init --fallback\`)
     5. kernel       the kernel place (\`kernel deploy --replace-place\` for an empty place, a patch otherwise)
-    6. backend      optional: a backend you already run (\`backend setup\`), or skip
+    6. backend      optional: a VPS with Coolify (over SSH or on it; Coolify installed when missing; your domain or
+                    a free sslip.io name), this PC behind a free Cloudflare quick tunnel (\`backend run\` as a login
+                    task), a backend you already run, or skip
     7. deploy       the first prod deploy, a dev branch, \`access push\`
     8. agent        AGENT_PROMPT.md for your coding agent (and starts Claude Code when it is installed)
   Stopped half way (Ctrl+C, a failed check)? Run it again: it continues at the first unfinished step

@@ -13,12 +13,15 @@
  *
  * Replaces `typetorch fleet setup` and `typetorch settings set analytics` (CLI 0.8).
  */
-import { readFileSync } from "node:fs";
-import { flagBool, flagString, UsageError, type ParsedArgs } from "../args.ts";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { flagBool, flagString, parseArgs, UsageError, type ParsedArgs } from "../args.ts";
+import { BACKEND_CONFIG_FILE, DEFAULT_PORT, readLocalBackendConfig, runLocalBackend, spawnChild } from "../backendrun.ts";
+import { sleep, which } from "../runtime.ts";
 import { backendCredentialsWarned } from "../backend.ts";
 import { backendUrlError, updateProjectConfig, type Project } from "../config.ts";
 import { checkBackendEndpoint, enforceEndpoints, reportsJson } from "../endpoints.ts";
-import { ADMIN_TOKEN_VAR, BACKEND_KEY_VAR, settings } from "../env.ts";
+import { ADMIN_TOKEN_VAR, BACKEND_KEY_VAR, childEnv, settings } from "../env.ts";
 import { bold, dim, emitJson, info, isJson } from "../log.ts";
 import type { OpenCloud } from "../opencloud.ts";
 import {
@@ -43,6 +46,9 @@ export const backendFlags = {
 	"dry-run": "boolean",
 	"no-ping": "boolean",
 	force: "boolean",
+	"backend-dir": "string",
+	port: "string",
+	cloudflared: "string",
 	...KEY_FILE_FLAGS,
 } as const;
 
@@ -65,7 +71,19 @@ export const BACKEND_USAGE = `typetorch backend setup [--url <https url>] [--flu
   --record-share   share (0-1) of new players whose first session is recorded in detail (default: the record's)
   Keys: ${BACKEND_KEY_VAR} (the backend's game key) and ${ADMIN_TOKEN_VAR} (its admin token), from the environment
   or the game repo's .env (never printed, never on a command line). Needs both signing keys and the deploy key's
-  DataStore read/create/update scopes. Replaces \`fleet setup\` and \`settings set analytics\` (CLI 0.8).`;
+  DataStore read/create/update scopes. Replaces \`fleet setup\` and \`settings set analytics\` (CLI 0.8).
+
+typetorch backend run [--backend-dir <checkout>] [--port <n>] [--cloudflared <path>]
+
+  The backend on this PC behind a Cloudflare quick tunnel (no account): starts the backend checkout's server with the
+  two keys above, opens the tunnel, and runs \`backend setup --url <tunnel>\` each time the tunnel's address changes, so
+  game servers follow it within seconds. Restarts the tunnel or the server when either drops; Ctrl+C stops both.
+  \`typetorch init\` sets it up (.typetorch/backend.json holds the checkout folder and the port) and registers it as a
+  login task. The current address is in .typetorch/backend-run.json. The explorer is http://localhost:<port> (sign in
+  with the admin token; Roblox sign-in needs a fixed address, which a quick tunnel is not).
+  --backend-dir    the typetorch/backend checkout (default: .typetorch/backend.json)
+  --port           the local port (default 8787)
+  --cloudflared    cloudflared's path when it is not on PATH`;
 
 function dial(args: ParsedArgs, flag: string, [low, high]: readonly [number, number]): number | undefined {
 	const raw = flagString(args, flag);
@@ -87,7 +105,12 @@ export function analyticsDials(body: SettingsBody, flags: BackendAnalytics): Bac
 
 export async function backendCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; fetch?: typeof fetch } = {}) {
 	const [sub, extra] = args.positionals;
-	if (sub !== "setup") throw new UsageError(`unknown backend subcommand "${sub ?? ""}" (setup)`);
+	if (sub === "run") {
+		if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
+		return backendRun(args);
+	}
+	if (sub !== "setup") throw new UsageError(`unknown backend subcommand "${sub ?? ""}" (setup, run)`);
+	for (const flag of ["backend-dir", "port", "cloudflared"]) if (flagString(args, flag) !== undefined) throw new UsageError(`--${flag} belongs to \`backend run\``);
 	if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
 	const proj = project(args);
 	const url = (flagString(args, "url") ?? proj.config.backend?.url)?.replace(/\/+$/, "");
@@ -159,4 +182,47 @@ function setConfigUrl(proj: Project, url: string): boolean {
 	if (raw.backend?.url === url && raw.fleet === undefined) return false;
 	updateProjectConfig(proj, { backend: { url } });
 	return true;
+}
+
+/** `backend run`: the local backend and its quick tunnel (backendrun.ts), until Ctrl+C. */
+async function backendRun(args: ParsedArgs) {
+	if (isJson()) throw new UsageError("backend run keeps running and has no --json");
+	const proj = project(args);
+	const gameDir = dirname(proj.configPath);
+	const saved = readLocalBackendConfig(gameDir);
+	const backendDir = flagString(args, "backend-dir") ?? saved?.dir;
+	if (!backendDir) throw new UsageError(`which backend checkout? pass --backend-dir <folder> (\`typetorch init\` writes it to ${BACKEND_CONFIG_FILE})`);
+	if (!existsSync(join(backendDir, "src", "server", "main.ts"))) throw new UsageError(`${backendDir} is not a typetorch/backend checkout (no src/server/main.ts)`);
+	const portRaw = flagString(args, "port");
+	const port = portRaw !== undefined ? Number(portRaw) : (saved?.port ?? DEFAULT_PORT);
+	if (!Number.isInteger(port) || port < 1 || port > 65535) throw new UsageError(`--port must be a number from 1 to 65535, got "${portRaw}"`);
+	const cloudflared = flagString(args, "cloudflared") ?? saved?.cloudflared ?? which("cloudflared");
+	if (!cloudflared) throw new Error("cloudflared is not installed (Windows: winget install --id Cloudflare.cloudflared -e; macOS: brew install cloudflared; Linux: https://pkg.cloudflare.com)");
+	const bun = which("bun") ?? process.execPath;
+	const creds = backendCredentialsWarned();
+	const key = creds.key?.value;
+	const admin = creds.admin?.value;
+	if (!key || !admin) throw new Error(`${BACKEND_KEY_VAR} and ${ADMIN_TOKEN_VAR} must both be in ${settings().dotEnv} (\`typetorch init\` writes them)`);
+	const controller = new AbortController();
+	const stop = () => controller.abort();
+	process.on("SIGINT", stop);
+	process.on("SIGTERM", stop);
+	const stamp = () => new Date().toTimeString().slice(0, 8);
+	try {
+		await runLocalBackend(
+			{ gameDir, backendDir: resolve(backendDir), port, cloudflared, bun, key, admin, baseEnv: childEnv(), signal: controller.signal },
+			{
+				spawn: spawnChild,
+				fetch: globalThis.fetch,
+				setup: (url) => backendCommand(parseArgs(["setup", "--url", url, "--config", proj.configPath], backendFlags)),
+				sleep,
+				log: (line) => info(`${dim(stamp())} ${line}`),
+				now: () => new Date(),
+				pid: process.pid,
+			},
+		);
+	} finally {
+		process.off("SIGINT", stop);
+		process.off("SIGTERM", stop);
+	}
 }
