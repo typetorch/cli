@@ -49,7 +49,15 @@ Alternatively `bun link` in this folder, then `bun link @typetorch/cli` in a gam
 
 ## Setup
 
-A game repo has `typetorch.json` next to `default.project.json`:
+**New game: `bunx @typetorch/cli init` in an empty folder.** The guided setup asks one question at a time and does
+the rest: the tools, the starter template, your experience (paste its URL), the Open Cloud key (probed, written to the
+game repo's `.env`), the owner, `typetorch.json`, the two prod signing keys and the key asset, the kernel place, an
+optional backend you already run, the first prod deploy and a dev branch, and `AGENT_PROMPT.md` for your coding agent.
+Each step says why it exists and which doc it replaces, and checks its result the way `typetorch doctor` would. Stopped
+half way? Run it again: `.typetorch/init.json` (never a secret) records what is done. `typetorch init --phase <name>`
+runs one step again; `--answers <file>` replays answers for scripts (a secret never comes from the file).
+
+By hand, a game repo has `typetorch.json` next to `default.project.json`:
 
 ```jsonc
 {
@@ -193,6 +201,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 
 | Command | Does |
 |---|---|
+| `typetorch init [--dir <folder>] [--phase <name>] [--answers <file>] [--agent]` | the guided setup, from an empty folder to a live game (see "Setup"); `--agent` prints `AGENT_PROMPT.md` again |
 | `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs rbxtsc (`bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first |
 | `typetorch upload [--no-build]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
 | `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: deploy message, durable head, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
