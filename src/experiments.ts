@@ -8,6 +8,8 @@
  *   variant         everyone gets this variant (stamped, forced = true); ignored unless it is one of the game's variants
  *   weights         relative weights in the game's variant order; hashed on unitHash("<name>:<pid>"), so a change
  *                   moves as few players as possible; ignored (equal split) unless there is one per variant
+ *   players         { [UserId or pid]: variant }: that player gets the variant over all of the above (stamped,
+ *                   forced); frameworks without per-player overrides ignore it
  *
  * The variants themselves live in game code (`analytics.experiment("onboarding", ["short", "long"])`), so the CLI
  * can't check them; `--variants` and the backend's recent `experiment` rows (`recentVariants`) help.
@@ -24,12 +26,16 @@ export const EXPERIMENT_NAME_PATTERN = /^[A-Za-z0-9_\-./]{1,64}$/;
 /** The framework's isVariantList: 1-16 distinct names of 1-32 characters. */
 export const VARIANT_NAME_MAX = 32;
 export const VARIANTS_MAX = 16;
-const OVERRIDE_FIELDS = new Set(["active", "weights", "variant"]);
+/** The framework's EXPERIMENT_PLAYERS_MAX: per-player overrides one experiment may hold. */
+export const PLAYERS_MAX = 200;
+const OVERRIDE_FIELDS = new Set(["active", "weights", "variant", "players"]);
 
 export interface ExperimentOverride {
 	active?: boolean;
 	weights?: number[];
 	variant?: string;
+	/** Per-player forced variants, keyed by UserId or pid. */
+	players?: Record<string, string>;
 }
 
 export type Experiments = Record<string, ExperimentOverride>;
@@ -44,6 +50,11 @@ export function isExperimentName(value: unknown): value is string {
 
 export function isVariantName(value: unknown): value is string {
 	return typeof value === "string" && value.length >= 1 && value.length <= VARIANT_NAME_MAX;
+}
+
+/** A `players` key: a Roblox UserId (digits) or an analytics pid (32 lowercase hex), as the framework accepts them. */
+export function isPlayerKey(value: unknown): value is string {
+	return typeof value === "string" && (/^[0-9]{1,19}$/.test(value) || /^[0-9a-f]{32}$/.test(value));
 }
 
 /** What is wrong with a weights list (numbers >= 0, 1-16 of them, not all 0), or undefined. */
@@ -75,6 +86,18 @@ export function experimentsProblems(value: unknown, where = "experiments"): stri
 		if (entry.weights !== undefined) {
 			const problem = weightsProblem(entry.weights);
 			if (problem) problems.push(`${where}.${name}.weights ${problem}`);
+		}
+		if (entry.players !== undefined) {
+			const players = plainObject(entry.players);
+			if (!players) problems.push(`${where}.${name}.players must be { [UserId or pid]: variant }`);
+			else {
+				const keys = Object.keys(players);
+				if (keys.length > PLAYERS_MAX) problems.push(`${where}.${name}.players holds ${keys.length} players, over ${PLAYERS_MAX}`);
+				const badKey = keys.find((key) => !isPlayerKey(key));
+				if (badKey !== undefined) problems.push(`${where}.${name}.players: "${String(badKey).slice(0, 40)}" isn't a UserId or a pid`);
+				const badVariant = keys.find((key) => !isVariantName(players[key]));
+				if (badVariant !== undefined) problems.push(`${where}.${name}.players.${badVariant.slice(0, 40)} must be a variant name (1-${VARIANT_NAME_MAX} characters)`);
+			}
 		}
 	}
 	return problems;
@@ -160,6 +183,7 @@ export function describeOverride(override: ExperimentOverride | undefined): stri
 	const weights = override.weights?.length ? override.weights : undefined;
 	const total = weights?.reduce((sum, w) => sum + w, 0) ?? 0;
 	const split = weights ? `weights ${weights.join(",")} (${weights.map((w) => (total > 0 ? percent(w / total) : "?")).join(" / ")})` : undefined;
+	const forcedPlayers = Object.entries(override.players ?? {});
 	if (override.active === false) {
 		parts.push("stopped: everyone gets the control (first variant), not stamped");
 		if (override.variant !== undefined) parts.push(`also settled on "${override.variant}" (stop wins; resume drops both)`);
@@ -168,7 +192,12 @@ export function describeOverride(override: ExperimentOverride | undefined): stri
 		parts.push(`settled: everyone gets "${override.variant}"`);
 		if (split) parts.push(`${split} kept for resume`);
 	} else if (split) parts.push(split);
-	else parts.push(override.active === true ? "running (equal split)" : "no change (equal split)");
+	else if (!forcedPlayers.length) parts.push(override.active === true ? "running (equal split)" : "no change (equal split)");
+	else parts.push("equal split");
+	if (forcedPlayers.length) {
+		const shown = forcedPlayers.slice(0, 3).map(([player, variant]) => `${player} -> "${variant}"`).join(", ");
+		parts.push(`${forcedPlayers.length} player${forcedPlayers.length === 1 ? "" : "s"} forced: ${shown}${forcedPlayers.length > 3 ? ", ..." : ""}`);
+	}
 	return parts.join("; ");
 }
 
@@ -182,7 +211,7 @@ export function overrideState(override: ExperimentOverride | undefined): "defaul
 
 // The log -----------------------------------------------------------------------------------------------------------
 
-export type ExperimentAction = "weights" | "settle" | "stop" | "resume" | "clear";
+export type ExperimentAction = "weights" | "settle" | "stop" | "resume" | "clear" | "force" | "unforce";
 
 export interface ExperimentLogRecord {
 	at: string;
@@ -190,6 +219,8 @@ export interface ExperimentLogRecord {
 	/** The settings record's seq this change was written as. */
 	seq: number;
 	experiment: string;
+	/** force / unforce: the player (UserId or pid). */
+	player?: string;
 	action: ExperimentAction;
 	before: ExperimentOverride | null;
 	after: ExperimentOverride | null;

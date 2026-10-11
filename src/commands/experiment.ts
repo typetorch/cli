@@ -13,6 +13,7 @@ import {
 	experimentsDiffer,
 	experimentsOf,
 	isExperimentName,
+	isPlayerKey,
 	isVariantName,
 	NoAnalyticsError,
 	overrideState,
@@ -44,6 +45,8 @@ typetorch experiment settle <name> <variant>            everyone gets this varia
 typetorch experiment stop <name>                        everyone gets the control (the first variant), not stamped
 typetorch experiment resume <name>                      drop stop / settle, keep the weights
 typetorch experiment clear <name>                       remove the override (equal split again)
+typetorch experiment force <name> <player> <variant>    one player (UserId or pid) gets this variant, over everything
+typetorch experiment unforce <name> <player>            drop that player's forced variant
   [--variants a,b,...] [--dry-run] [--force] [--no-ping] [--key-file <path>] [--fallback-key-file <path>]
 
   Changes how the framework's analytics experiments (analytics.experiment(name, variants) in game code) split players,
@@ -57,6 +60,9 @@ typetorch experiment clear <name>                       remove the override (equ
   The variants live in game code, so the CLI can't check them:
     weights  one weight per variant, in the order the game lists them; a list of another length is ignored (equal split)
     settle   the variant exactly as the game names it; a name the game doesn't use is ignored
+  force: the player is a Roblox UserId or an analytics pid (32 hex, the pid column); it wins over stop, settle and
+  weights for that player (stamped, forced = true), at most 200 per experiment. Each client only learns its own entry.
+  Needs a framework with per-player overrides; older ones ignore it. \`clear\` drops forced players too.
   \`list\` shows the variants the backend's experiment rows named in the last ${RECENT_DAYS} days (--days), with
   ${ADMIN_TOKEN_VAR} and typetorch.json backend.url, so you can check. --variants a,b (the game's list, in order)
   checks the weights' count and the settled variant before anything is written.
@@ -65,11 +71,15 @@ typetorch experiment clear <name>                       remove the override (equ
   --no-ping   don't ping servers (they still read it within about a minute)
   Needs both signing keys and the deploy key's DataStore read/create/update scopes (like \`typetorch settings set\`).`;
 
-const ACTIONS: readonly ExperimentAction[] = ["weights", "settle", "stop", "resume", "clear"];
+const ACTIONS: readonly ExperimentAction[] = ["weights", "settle", "stop", "resume", "clear", "force", "unforce"];
 
 /** The override after one action (undefined: no override). */
-export function applyAction(action: ExperimentAction, before: ExperimentOverride | undefined, value?: { weights?: number[]; variant?: string }): ExperimentOverride | undefined {
-	const current: ExperimentOverride = { ...(before ?? {}) };
+export function applyAction(
+	action: ExperimentAction,
+	before: ExperimentOverride | undefined,
+	value?: { weights?: number[]; variant?: string; player?: string },
+): ExperimentOverride | undefined {
+	const current: ExperimentOverride = { ...(before ?? {}), ...(before?.players ? { players: { ...before.players } } : {}) };
 	switch (action) {
 		case "weights":
 			return { ...current, weights: [...(value?.weights ?? [])] };
@@ -87,13 +97,21 @@ export function applyAction(action: ExperimentAction, before: ExperimentOverride
 		}
 		case "clear":
 			return undefined;
+		case "force":
+			return { ...current, players: { ...(current.players ?? {}), [value!.player!]: value!.variant! } };
+		case "unforce": {
+			if (!current.players || current.players[value!.player!] === undefined) return before;
+			delete current.players[value!.player!];
+			if (Object.keys(current.players).length === 0) delete current.players;
+			return Object.keys(current).length ? current : undefined;
+		}
 	}
 }
 
 type Deps = { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; now?: () => Date; fetch?: typeof fetch; by?: string };
 
 export async function experimentCommand(args: ParsedArgs, deps: Deps = {}) {
-	const [sub, name, valueArg, extra] = args.positionals;
+	const [sub, name, ...rest] = args.positionals;
 	if (sub === "list") {
 		if (name !== undefined) throw new UsageError(`unexpected argument "${name}"`);
 		return experimentList(args, deps);
@@ -101,15 +119,18 @@ export async function experimentCommand(args: ParsedArgs, deps: Deps = {}) {
 	if (!ACTIONS.includes(sub as ExperimentAction)) throw new UsageError(`unknown experiment subcommand "${sub ?? ""}" (list, weights, settle, stop, resume, clear)`);
 	const action = sub as ExperimentAction;
 	if (flagString(args, "days") !== undefined) throw new UsageError("--days belongs to `experiment list`");
-	if (name === undefined) throw new UsageError(`typetorch experiment ${action} <name>${action === "weights" ? " <w1,w2,...>" : action === "settle" ? " <variant>" : ""}`);
+	const shape = { weights: ["<w1,w2,...>"], settle: ["<variant>"], force: ["<player>", "<variant>"], unforce: ["<player>"] }[action as string] ?? [];
+	const usage = `typetorch experiment ${action} <name>${shape.map((part) => ` ${part}`).join("")}`;
+	if (name === undefined || rest.length < shape.length) throw new UsageError(usage);
+	if (rest.length > shape.length) throw new UsageError(`unexpected argument "${rest[shape.length]}"`);
 	if (!isExperimentName(name)) throw new UsageError(`"${name}" isn't an experiment name (1-64 letters, digits and _ - . /, as the game passes it to analytics.experiment)`);
-	const takesValue = action === "weights" || action === "settle";
-	if (takesValue && valueArg === undefined) throw new UsageError(`typetorch experiment ${action} ${name} ${action === "weights" ? "<w1,w2,...>" : "<variant>"}`);
-	const unexpected = takesValue ? extra : (valueArg ?? extra);
-	if (unexpected !== undefined) throw new UsageError(`unexpected argument "${unexpected}"`);
+	const takesVariant = action === "settle" || action === "force";
+	const valueArg = action === "weights" ? rest[0] : takesVariant ? rest[rest.length - 1] : undefined;
+	const player = action === "force" || action === "unforce" ? rest[0] : undefined;
+	if (player !== undefined && !isPlayerKey(player)) throw new UsageError(`"${player}" isn't a player: give a Roblox UserId (digits) or an analytics pid (32 lowercase hex, the pid column)`);
 
 	const variantsFlag = flagString(args, "variants");
-	if (variantsFlag !== undefined && !takesValue) throw new UsageError("--variants belongs to `experiment weights` and `experiment settle`");
+	if (variantsFlag !== undefined && action !== "weights" && !takesVariant) throw new UsageError("--variants belongs to `experiment weights`, `settle` and `force`");
 	let variants: string[] | undefined;
 	if (variantsFlag !== undefined) {
 		const parsed = parseVariants(variantsFlag);
@@ -128,12 +149,13 @@ export async function experimentCommand(args: ParsedArgs, deps: Deps = {}) {
 		}
 		if (variants) notes.push(`split: ${variants.map((v, i) => `${v} ${Math.round((weights![i] / weights!.reduce((a, b) => a + b, 0)) * 1000) / 10}%`).join(", ")}`);
 		else notes.push(`the weights go in the game's variant order (the list it passes to analytics.experiment("${name}", ...)), one per variant; another count is ignored (equal split). Check the variants with \`typetorch experiment list\` or pass --variants`);
-	} else if (action === "settle") {
+	} else if (takesVariant) {
 		variant = valueArg!;
 		if (!isVariantName(variant)) throw new UsageError(`"${variant}" isn't a variant name (1-${VARIANT_NAME_MAX} characters)`);
 		if (variants && !variants.includes(variant)) throw new UsageError(`"${variant}" isn't one of --variants (${variants.join(", ")})`);
 		if (!variants) notes.push(`"${variant}" must be exactly one of the game's variants, or servers ignore it. Check with \`typetorch experiment list\` or pass --variants`);
 	}
+	if (action === "force") notes.push("per-player overrides need a framework that reads `players` (older frameworks ignore it); the player gets it on their next join or experiment() call");
 
 	const proj = project(args);
 	let cloud = deps.oc;
@@ -145,7 +167,7 @@ export async function experimentCommand(args: ParsedArgs, deps: Deps = {}) {
 		noAnalytics = undefined;
 		const current = experimentsOf(body);
 		before = current[name];
-		after = applyAction(action, before, { weights, variant });
+		after = applyAction(action, before, { weights, variant, player });
 		const next = { ...current };
 		if (after === undefined) delete next[name];
 		else next[name] = after;
@@ -157,7 +179,7 @@ export async function experimentCommand(args: ParsedArgs, deps: Deps = {}) {
 			return undefined;
 		}
 	};
-	const what = `experiment ${action} ${name}`;
+	const what = `experiment ${action} ${name}${player !== undefined ? ` ${player}` : ""}`;
 
 	if (flagBool(args, "dry-run")) {
 		const read = await readSettings(client(), proj.config.universeId);
@@ -168,7 +190,7 @@ export async function experimentCommand(args: ParsedArgs, deps: Deps = {}) {
 		if (noAnalytics) throw noAnalytics;
 		const changed = next !== undefined && encodeBody(next) !== encodeBody(current);
 		const seq = read.record ? read.record.seq + (changed ? 1 : 0) : 1;
-		if (isJson()) return emitJson({ dryRun: true, experiment: name, action, changed, seq, before: before ?? null, after: after ?? null, state: overrideState(after) });
+		if (isJson()) return emitJson({ dryRun: true, experiment: name, ...(player !== undefined ? { player } : {}), action, changed, seq, before: before ?? null, after: after ?? null, state: overrideState(after) });
 		info(bold(`dry run: ${changed ? `would write settings #${seq}` : "nothing to change"} (${what})`));
 		info(`  before  ${describeOverride(before)}`);
 		info(`  after   ${describeOverride(after)}`);
@@ -183,13 +205,22 @@ export async function experimentCommand(args: ParsedArgs, deps: Deps = {}) {
 	if (result.outcome === "written" && result.seq !== undefined) {
 		appendExperimentLog(
 			projectStateDir(proj),
-			{ universeId: proj.config.universeId, seq: result.seq, experiment: name, action, before: before ?? null, after: after ?? null, by: deps.by ?? gitInfo(proj.root).userName },
+			{
+				universeId: proj.config.universeId,
+				seq: result.seq,
+				experiment: name,
+				...(player !== undefined ? { player } : {}),
+				action,
+				before: before ?? null,
+				after: after ?? null,
+				by: deps.by ?? gitInfo(proj.root).userName,
+			},
 			deps.now?.(),
 		);
 		logged = true;
 	}
 	if (isJson()) {
-		return emitJson({ outcome: result.outcome ?? null, seq: result.seq ?? null, pinged: result.pinged ?? false, experiment: name, action, before: before ?? null, after: after ?? null, state: overrideState(after), logged, owners: result.owners ?? null });
+		return emitJson({ outcome: result.outcome ?? null, seq: result.seq ?? null, pinged: result.pinged ?? false, experiment: name, ...(player !== undefined ? { player } : {}), action, before: before ?? null, after: after ?? null, state: overrideState(after), logged, owners: result.owners ?? null });
 	}
 	reportChange(result, what);
 	info(`  ${name}: ${describeOverride(after)}`);
@@ -200,7 +231,7 @@ export async function experimentCommand(args: ParsedArgs, deps: Deps = {}) {
 }
 
 async function experimentList(args: ParsedArgs, deps: Deps) {
-	for (const flag of ["variants"]) if (flagString(args, flag) !== undefined) throw new UsageError(`--${flag} belongs to \`experiment weights\` and \`experiment settle\``);
+	if (flagString(args, "variants") !== undefined) throw new UsageError("--variants belongs to `experiment weights`, `settle` and `force`");
 	const daysRaw = flagString(args, "days");
 	const days = daysRaw === undefined ? RECENT_DAYS : Number(daysRaw);
 	if (!Number.isInteger(days) || days < 1 || days > 90) throw new UsageError(`--days must be a whole number from 1 to 90, got "${daysRaw}"`);

@@ -82,6 +82,13 @@ describe("validation (the framework's parseExperiments rules)", () => {
 		expect(experimentsProblems({ a: { variant: "v".repeat(33) } })[0]).toContain("variant must be a variant name");
 		expect(experimentsProblems({ a: { active: "no" } })[0]).toContain("active must be true or false");
 		expect(experimentsProblems({ a: { wieghts: [1] } })[0]).toContain("wieghts isn't an override");
+		// Per-player: UserIds or pids to variant names, at most 200.
+		expect(experimentsProblems({ a: { players: { "123456": "b", "0123456789abcdef0123456789abcdef": "a" } } })).toEqual([]);
+		expect(experimentsProblems({ a: { players: { Roblox: "b" } } })[0]).toContain(`"Roblox" isn't a UserId or a pid`);
+		expect(experimentsProblems({ a: { players: { "1": "" } } })[0]).toContain("players.1 must be a variant name");
+		expect(experimentsProblems({ a: { players: [] } })[0]).toContain("players must be");
+		const many = Object.fromEntries(Array.from({ length: 201 }, (_, i) => [String(i + 1), "b"]));
+		expect(experimentsProblems({ a: { players: many } })[0]).toContain("over 200");
 	});
 
 	test("backend.analytics allows experiments and checks them; a bad one blocks the whole record", () => {
@@ -110,6 +117,16 @@ describe("validation (the framework's parseExperiments rules)", () => {
 		expect(applyAction("resume", { active: false })).toBeUndefined();
 		expect(applyAction("resume", undefined)).toBeUndefined();
 		expect(applyAction("clear", { weights: [1, 1] })).toBeUndefined();
+		const forced = applyAction("force", { active: false }, { player: "123", variant: "b" });
+		expect(forced).toEqual({ active: false, players: { "123": "b" } });
+		expect(applyAction("resume", forced)).toEqual({ players: { "123": "b" } });
+		expect(applyAction("unforce", forced, { player: "123" })).toEqual({ active: false });
+		expect(applyAction("unforce", { players: { "123": "b" } }, { player: "123" })).toBeUndefined();
+		expect(applyAction("unforce", { weights: [1, 1] }, { player: "9" })).toEqual({ weights: [1, 1] });
+		// The input isn't changed in place.
+		const shared = { players: { "1": "a", "2": "b" } };
+		applyAction("unforce", shared, { player: "1" });
+		expect(shared.players).toEqual({ "1": "a", "2": "b" });
 	});
 
 	test("withExperiments writes backend.analytics and mirrors into the old section; none drops the field; no sink refuses", () => {
@@ -226,6 +243,37 @@ describe("experiment commands", () => {
 		];
 		expect(usage.map((u) => u.error?.name)).toEqual(["UsageError", "UsageError", "UsageError", "UsageError", "UsageError", "UsageError"]);
 		expect(cloud.published).toHaveLength(1);
+	});
+
+	test("force / unforce one player: written to both sections, logged with the player; bad players are usage errors", async () => {
+		const proj = project();
+		const signer = newSigner();
+		const cloud = seeded(signer, withExperiments(withBackendBody(), { tutorial_ui: { weights: [3, 1] } }));
+		const deps = { oc: cloud.oc, signer, now: AT, by: "qa" };
+		const forced = await run(proj, () => experimentCommand(exp(["force", "tutorial_ui", "123456", "new", "--variants", "old,new"]), deps));
+		expect(forced.error).toBeUndefined();
+		expect(forced.out).toContain("experiment force tutorial_ui 123456: written as settings #2");
+		expect(forced.out).toContain('1 player forced: 123456 -> "new"');
+		const expected = { tutorial_ui: { weights: [3, 1], players: { "123456": "new" } } };
+		expect(bodyOf(cloud).backend?.analytics?.experiments).toEqual(expected);
+		expect(bodyOf(cloud).analytics?.experiments).toEqual(expected);
+		await run(proj, () => experimentCommand(exp(["force", "tutorial_ui", "0123456789abcdef0123456789abcdef", "old"]), deps));
+		await run(proj, () => experimentCommand(exp(["unforce", "tutorial_ui", "123456"]), deps));
+		expect(bodyOf(cloud).backend?.analytics?.experiments).toEqual({ tutorial_ui: { weights: [3, 1], players: { "0123456789abcdef0123456789abcdef": "old" } } });
+		const log = readExperimentLog(join(proj.root, ".typetorch"), 42);
+		expect(log.map((r) => [r.action, r.player])).toEqual([
+			["force", "123456"],
+			["force", "0123456789abcdef0123456789abcdef"],
+			["unforce", "123456"],
+		]);
+		const bad = [
+			await run(proj, () => experimentCommand(exp(["force", "tutorial_ui", "SomeName", "new"]), deps)),
+			await run(proj, () => experimentCommand(exp(["force", "tutorial_ui", "123"]), deps)),
+			await run(proj, () => experimentCommand(exp(["force", "tutorial_ui", "123", "zzz", "--variants", "old,new"]), deps)),
+			await run(proj, () => experimentCommand(exp(["unforce", "tutorial_ui", "123", "new"]), deps)),
+		];
+		expect(bad.map((b) => b.error?.name)).toEqual(["UsageError", "UsageError", "UsageError", "UsageError"]);
+		expect(cloud.published).toHaveLength(3);
 	});
 
 	test("--dry-run shows before and after and writes, pings and logs nothing", async () => {

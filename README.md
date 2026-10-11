@@ -213,7 +213,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch branch ls` | branches (the kernel's DataStore heads and this machine's log), channels, heads, signed or not, live servers per branch; warns from 28 of the kernel's 32 stored branches |
 | `typetorch branch rm <branch>` | removes a dev branch's head from the DataStore heads (y/N or `--yes`; `--dry-run`). Refuses the default and prod-channel branches, a branch live servers run (the fleet API; without it only with `--force`), and a head that changed meanwhile. Servers' MemoryStore copy keeps it until it expires (up to 45 days) |
 | `typetorch settings status` / `get [field\|game.<key>]` / `set game.<key> <json\|->` / `unset <field>` / `push` | the signed settings record (see "Settings"); `push` writes `defaultBranch`, `channels` and dev access from typetorch.json. `--dry-run`, `--force`, `--no-ping` |
-| `typetorch experiment list` / `weights <name> <w1,w2,...>` / `settle <name> <variant>` / `stop <name>` / `resume <name>` / `clear <name>` | live analytics experiment overrides in the signed settings record, no deploy (see "Experiments"). `--variants a,b`, `--dry-run`, `--force`, `--no-ping` |
+| `typetorch experiment list` / `weights <name> <w1,w2,...>` / `settle <name> <variant>` / `stop <name>` / `resume <name>` / `clear <name>` / `force <name> <player> <variant>` / `unforce <name> <player>` | live analytics experiment overrides in the signed settings record, no deploy (see "Experiments"). `--variants a,b`, `--dry-run`, `--force`, `--no-ping` |
 | `typetorch access push [--dry-run]` / `access status` | typetorch.json `members`, `revoked`, `devBadgeId` into the settings record's `access` / compare it with typetorch.json |
 | `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--engine luau\|splice\|lune] [--place-file <file>] [--timeout <s>] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build) into the live place (check, y/N, save, verify); no download: Luau Execution tasks do it (the luau engine), or `--place-file` patches a Studio copy (splice); `--replace-place --yes` for the template/test place only; see below |
 | `typetorch kernel restore --version <n> [--dry-run] [--yes]` | republish place version `n` (a task on it calls SavePlaceAsync): the undo of a kernel deploy |
@@ -410,9 +410,17 @@ typetorch experiment settle tutorial_ui new      # everyone gets "new" (stamped,
 typetorch experiment stop tutorial_ui            # everyone gets the control (the first variant), not stamped
 typetorch experiment resume tutorial_ui          # drop stop / settle, keep the weights
 typetorch experiment clear tutorial_ui           # remove the override: equal split again
+typetorch experiment force tutorial_ui 123456 new   # one player (UserId or pid) gets "new", over everything else
+typetorch experiment unforce tutorial_ui 123456     # back to whatever the override says for them
 ```
 
-The overrides are `backend.analytics.experiments` = `{ [name]: { active?, weights?, variant? } }` (what framework 0.4+
+`force` writes `players` = `{ [UserId or pid]: variant }` into the override (at most 200 players per experiment): that
+player gets the variant over `stop`, `settle` and the weights, stamped with `forced`, for QA and support. The player is
+a Roblox UserId or an analytics pid (32 hex, the `pid` column). Each client's hello carries only its own entry, never
+the other players' ids. It needs a framework that reads `players`; older frameworks ignore it. `resume` keeps forced
+players, `clear` drops them.
+
+The overrides are `backend.analytics.experiments` = `{ [name]: { active?, weights?, variant?, players? } }` (what framework 0.4+
 reads), mirrored into the old `analytics.experiments` for frameworks before 0.4; `backend setup` keeps them (and moves
 overrides that sat only in the old section into `backend.analytics`). Names are 1-64 letters, digits and `_ - . /`;
 weights are 1-16 numbers >= 0 that don't all add up to 0; a variant is 1-32 characters. The record needs a backend
