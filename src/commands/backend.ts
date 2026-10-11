@@ -3,10 +3,11 @@
  * (endpoints.ts: the URL, GET /healthz, the game key answers role "game" with the fleet and analytics parts running, the
  * admin token answers role "admin") and refuses a broken one unless --force, then writes the signed settings record's
  *
- *   backend   = { url, key, analytics?: { flushSeconds, recordShare } }
+ *   backend   = { url, key, analytics?: { flushSeconds, recordShare, experiments } }
  *   fleet     = { url, token: key }                                   (kernels 0.3.8/0.3.9 read this one)
  *   analytics = { backend: "duckdb", events: url/v1/ingest, token: key, ... }   (frameworks before 0.4; other fields kept)
  *
+ * (the experiment overrides, `typetorch experiment`'s, are kept: backend.analytics' or else the old section's, in both)
  * with both prod keys, pings servers, sends the owner list to the backend (PUT /v1/access) and sets typetorch.json
  * `backend.url` (dropping CLI 0.8's `fleet`). The key is TYPETORCH_API_KEY and the admin token TYPETORCH_ADMIN_TOKEN,
  * from the environment or the game repo's .env (backend.ts); neither is printed or passed on a command line.
@@ -21,6 +22,7 @@ import { BACKEND_CONFIG_FILE, DEFAULT_PORT, readLocalBackendConfig, runLocalBack
 import { sleep, which } from "../runtime.ts";
 import { backendCredentialsWarned, blessChallenge, blessMessage, syncBlessKeys } from "../backend.ts";
 import { capture } from "../proc.ts";
+import { experimentsOf } from "../experiments.ts";
 import { backendUrlError, updateProjectConfig, type Project } from "../config.ts";
 import { checkBackendEndpoint, enforceEndpoints, reportsJson } from "../endpoints.ts";
 import { ADMIN_TOKEN_VAR, BACKEND_KEY_VAR, childEnv, settings } from "../env.ts";
@@ -67,7 +69,7 @@ export const BACKEND_USAGE = `typetorch backend setup [--url <https url>] [--flu
     admin    GET <url>/v1/auth/check with ${ADMIN_TOKEN_VAR} says role "admin" (the CLI's reads, the owner list)
   A failure prints what is wrong and how to fix it, writes nothing and exits 1; --force writes it anyway (the failures
   print as warnings). Then it writes the signed settings record's backend = {url, key, analytics?} and, for kernels
-  before 0.4, the fleet and analytics sections derived from it (an existing analytics section keeps its experiments),
+  before 0.4, the fleet and analytics sections derived from it (experiment overrides are kept, in both sections),
   pings servers, sends the owner list to the backend (PUT /v1/access) and sets typetorch.json backend.url.
   --url            the backend's public https address (default: typetorch.json backend.url)
   --flush-seconds  seconds between analytics sends (default: the record's, else the framework's ~15)
@@ -106,13 +108,20 @@ function dial(args: ParsedArgs, flag: string, [low, high]: readonly [number, num
 	return value;
 }
 
-/** The analytics dials to write: the flags, else what the record has (its backend section, else the old analytics). */
+/**
+ * The analytics dials to write: the flags, else what the record has (its backend section, else the old analytics).
+ * The experiment overrides always carry over (`typetorch experiment` owns them): the backend's, else the old
+ * section's, so a record from before they moved to `backend.analytics` keeps them.
+ */
 export function analyticsDials(body: SettingsBody, flags: BackendAnalytics): BackendAnalytics | undefined {
-	const old = body.backend?.analytics ?? {
+	const old: BackendAnalytics = body.backend?.analytics ?? {
 		...(typeof body.analytics?.flushSeconds === "number" ? { flushSeconds: body.analytics.flushSeconds } : {}),
 		...(typeof body.analytics?.recordShare === "number" ? { recordShare: body.analytics.recordShare } : {}),
 	};
+	const experiments = experimentsOf(body);
 	const dials: BackendAnalytics = { ...old, ...flags };
+	delete dials.experiments;
+	if (Object.keys(experiments).length) dials.experiments = JSON.parse(JSON.stringify(experiments)) as BackendAnalytics["experiments"];
 	return Object.keys(dials).length ? dials : undefined;
 }
 

@@ -148,7 +148,7 @@ export interface BackendRequestOptions {
 	timeoutMs?: number;
 }
 
-async function adminRequest(options: BackendRequestOptions, method: "GET" | "PUT", path: string, body?: unknown): Promise<{ status: number; json?: Record<string, unknown>; text: string }> {
+async function adminRequest(options: BackendRequestOptions, method: "GET" | "PUT" | "POST", path: string, body?: unknown, maxText = 4000): Promise<{ status: number; json?: Record<string, unknown>; text: string }> {
 	const base = options.url.replace(/\/+$/, "");
 	const host = new URL(base).host;
 	let response: Response;
@@ -164,7 +164,7 @@ async function adminRequest(options: BackendRequestOptions, method: "GET" | "PUT
 	} catch (error) {
 		throw new BackendError(fleetNetworkHint(error as Error, host) ?? `the backend at ${host} didn't answer: ${(error as Error).message}`);
 	}
-	const text = (await response.text()).slice(0, 4000);
+	const text = (await response.text()).slice(0, maxText);
 	let json: Record<string, unknown> | undefined;
 	try {
 		const parsed = JSON.parse(text) as unknown;
@@ -191,6 +191,25 @@ export async function getAccessList(options: BackendRequestOptions): Promise<Acc
 		owners: Array.isArray(owners) ? owners.filter((o): o is number => typeof o === "number").sort((a, b) => a - b) : [],
 		updatedAt: typeof updatedAt === "string" ? updatedAt : null,
 	};
+}
+
+export interface SqlResult {
+	/** Column names, in order. */
+	columns: string[];
+	rows: unknown[][];
+	truncated: boolean;
+}
+
+/** POST /v1/sql (admin): one read-only SELECT over the backend's `events` and `recordings` views. */
+export async function adminSql(options: BackendRequestOptions, sql: string, limit?: number): Promise<SqlResult> {
+	const reply = await adminRequest(options, "POST", "/v1/sql", { sql, ...(limit ? { limit } : {}) }, 1_000_000);
+	if (reply.status !== 200 || !reply.json) {
+		const error = typeof reply.json?.error === "string" ? reply.json.error : shortBody(reply.text);
+		throw new BackendError(`POST /v1/sql answered ${reply.status} ${error}`, reply.status, reply.json);
+	}
+	const columns = Array.isArray(reply.json.columns) ? reply.json.columns.map((column) => String((column as { name?: unknown })?.name ?? column)) : [];
+	const rows = Array.isArray(reply.json.rows) ? reply.json.rows.filter((row): row is unknown[] => Array.isArray(row)) : [];
+	return { columns, rows, truncated: reply.json.truncated === true };
 }
 
 export type OwnerSync =

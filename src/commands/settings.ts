@@ -51,7 +51,8 @@ typetorch settings push                            (defaultBranch, channels and 
   Sign in with Roblox). A failure there is a warning: the record is written anyway.
   Needs both signing keys (\`typetorch keys init\`, \`typetorch keys init --fallback\`) and the deploy key's
   ${DS_READ_SCOPE} and ${DS_WRITE_SCOPES}, plus messaging for the ping. The backend's address and key:
-  \`typetorch backend setup\` (CLI 0.9 moved \`fleet setup\` and \`settings set analytics\` there).`;
+  \`typetorch backend setup\` (CLI 0.9 moved \`fleet setup\` and \`settings set analytics\` there). Analytics experiment
+  overrides (backend.analytics.experiments, shown by status and \`get backend\`): \`typetorch experiment\`.`;
 
 /** CLI 0.9: what `settings set analytics` and `fleet setup` say (one release; then they are unknown). */
 export const MOVED_TO_BACKEND_SETUP = (what: string) =>
@@ -87,6 +88,20 @@ export interface ChangeSettingsInput {
 export const ENDPOINT_SECTIONS = ["backend", "fleet", "analytics"] as const;
 export type EndpointSection = (typeof ENDPOINT_SECTIONS)[number];
 
+/**
+ * A section as the endpoint check sees it: the experiment overrides left out (`backend.analytics.experiments`, the old
+ * `analytics.experiments`), since they hold no address or key and `typetorch experiment` changes them on their own.
+ */
+function endpointPart(body: SettingsBody, field: EndpointSection): string {
+	const value = JSON.parse(JSON.stringify(body[field] ?? null)) as Record<string, any> | null;
+	if (value && field === "backend" && value.analytics) {
+		delete value.analytics.experiments;
+		if (Object.keys(value.analytics).length === 0) delete value.analytics;
+	}
+	if (value && field === "analytics") delete value.experiments;
+	return encodeBody({ [field]: value ?? undefined });
+}
+
 export interface ChangeSettingsResult extends SettingsWrite {
 	pinged?: boolean;
 	pingError?: string;
@@ -103,12 +118,12 @@ export async function changeSettings(input: ChangeSettingsInput): Promise<Change
 	const checked = new Set(input.checked ?? []);
 	let unchecked: string | undefined;
 	const mutate = (body: SettingsBody): SettingsBody | undefined => {
-		const before = Object.fromEntries(ENDPOINT_SECTIONS.map((field) => [field, encodeBody({ [field]: body[field] })]));
+		const before = Object.fromEntries(ENDPOINT_SECTIONS.map((field) => [field, endpointPart(body, field)]));
 		const next = input.mutate(body);
 		if (next === undefined) return undefined;
 		for (const field of ENDPOINT_SECTIONS) {
 			if (checked.has(field) || next[field] === undefined) continue;
-			if (encodeBody({ [field]: next[field] }) !== before[field]) unchecked = field;
+			if (endpointPart(next, field) !== before[field]) unchecked = field;
 		}
 		return unchecked ? undefined : next;
 	};
