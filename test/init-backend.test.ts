@@ -505,7 +505,7 @@ describe("backend phase", () => {
 		expect(() => installSteps({ ...o, key: "k".repeat(40) + "\nTYPETORCH_ENV" })).toThrow("line breaks");
 		expect(() => installSteps({ ...o, admin: "TYPETORCH_ENV" })).toThrow("line breaks");
 		expect(teardownSteps({ deleteData: false }).some((s) => s.script.includes(DATA_DIR))).toBe(false);
-	});
+	}, 60_000); // one `bash -n` per step: slow to start on Windows (Git Bash)
 
 	test("this PC: checkout, install, explorer build, backend.json, the login task, and the wait for a pointed tunnel", async () => {
 		const dir = gameDir();
