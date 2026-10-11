@@ -213,6 +213,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch branch ls` | branches (the kernel's DataStore heads and this machine's log), channels, heads, signed or not, live servers per branch; warns from 28 of the kernel's 32 stored branches |
 | `typetorch branch rm <branch>` | removes a dev branch's head from the DataStore heads (y/N or `--yes`; `--dry-run`). Refuses the default and prod-channel branches, a branch live servers run (the fleet API; without it only with `--force`), and a head that changed meanwhile. Servers' MemoryStore copy keeps it until it expires (up to 45 days) |
 | `typetorch settings status` / `get [field\|game.<key>]` / `set game.<key> <json\|->` / `unset <field>` / `push` | the signed settings record (see "Settings"); `push` writes `defaultBranch`, `channels` and dev access from typetorch.json. `--dry-run`, `--force`, `--no-ping` |
+| `typetorch experiment list` / `weights <name> <w1,w2,...>` / `settle <name> <variant>` / `stop <name>` / `resume <name>` / `clear <name>` | live analytics experiment overrides in the signed settings record, no deploy (see "Experiments"). `--variants a,b`, `--dry-run`, `--force`, `--no-ping` |
 | `typetorch access push [--dry-run]` / `access status` | typetorch.json `members`, `revoked`, `devBadgeId` into the settings record's `access` / compare it with typetorch.json |
 | `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--engine luau\|splice\|lune] [--place-file <file>] [--timeout <s>] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build) into the live place (check, y/N, save, verify); no download: Luau Execution tasks do it (the luau engine), or `--place-file` patches a Studio copy (splice); `--replace-place --yes` for the template/test place only; see below |
 | `typetorch kernel restore --version <n> [--dry-run] [--yes]` | republish place version `n` (a task on it calls SavePlaceAsync): the undo of a kernel deploy |
@@ -344,7 +345,8 @@ The state dir (`TYPETORCH_STATE_DIR`, default `.typetorch/`) holds `deployments.
 `proposalId` and `proposedBy` when approved from a proposal), `uploads.jsonl` ("uploaded" lines, written as soon as
 moderation answers, before anything is published), `proposals.jsonl` (proposed / approved / rejected / failed events)
 `kernel-deploys.jsonl`, `assets.jsonl` (hot assets: created / uploaded / failed / synced), `tests.jsonl` (every cloud
-test: asset, pass or fail, seconds, place version, task) and `rollouts.jsonl` (`deploy --widen`). A deployment line
+test: asset, pass or fail, seconds, place version, task), `rollouts.jsonl` (`deploy --widen`) and `experiments.jsonl`
+(every `typetorch experiment` change: who, when, the settings seq, the override before and after). A deployment line
 carries `test` (`{ok, seconds, placeVersion}` or `{skipped: "<reason>"}`) and `rollout` when they apply. Choosing a seq and logging
 it happens under `deploy.lock` there (`assets sync` holds `assets-sync.lock` instead), and logs are only appended.
 The remote-claude dev-server points the deploys it runs from its worktree at the main repo's state dir, so both share
@@ -356,7 +358,8 @@ one log and one seq. If a deploy stops after the upload, `typetorch deployments`
 Kernel 0.3.8 reads ONE signed record instead of ConfigService (CLI 0.8 removed the ConfigService registry, `config
 push` and every `universe:write` / `universe:read` use): the game's DataStore `TypeTorch`, key `settings`,
 `{ v: 1, seq, at, body, sig, sigF }`. `body` is JSON text with `defaultBranch`, `channels`, `access` (`members`,
-`revoked`, `devBadgeId`), `backend` (`{url, key, analytics?}`; CLI 0.9), the old `fleet` (`{url, token}`) and `analytics` (the sink settings) derived from it for kernels before 0.4 and `game` (the game's live values,
+`revoked`, `devBadgeId`), `backend` (`{url, key, analytics?}`; CLI 0.9; `analytics` = `{flushSeconds?, recordShare?,
+experiments?}`), the old `fleet` (`{url, token}`) and `analytics` (the sink settings) derived from it for kernels before 0.4 and `game` (the game's live values,
 `TypeTorch.liveConfig`); at most 32 KB, `game` at most 16 KB. `sig` and `sigF` are Ed25519 by the main and the fallback
 prod key over the lines `tt1settings`, `<seq>`, `<at>` and `<body>` joined with `\n`: the body is the exact text stored,
 so nothing is re-encoded before verifying.
@@ -392,6 +395,38 @@ runs the checks too. Server text in messages has terminal escapes and control ch
 `Location` is scrubbed of the key (L5). `doctor` lists `backend url / healthz / key / admin` for typetorch.json's
 `backend.url` with your keys, the record's own backend (or the old fleet / analytics sections of a CLI 0.8 record),
 and compares the backend's owner list (`GET /v1/access`) with the signed record's owners.
+
+#### Experiments
+
+The framework's analytics experiments (`analytics.experiment("tutorial_ui", ["old", "new"])` in game code) split
+players by a hash of the experiment name and the player id. `typetorch experiment` changes that split live, through
+the same signed write as `settings set` (read, verify with your keys, change, sign with both keys, write with
+`matchVersion`, ping), so servers pick it up within seconds and no deploy is needed:
+
+```sh
+typetorch experiment list                        # every override and its state, with the variants the backend saw
+typetorch experiment weights tutorial_ui 3,1     # 75% get the first variant, 25% the second
+typetorch experiment settle tutorial_ui new      # everyone gets "new" (stamped, forced = true): make it final
+typetorch experiment stop tutorial_ui            # everyone gets the control (the first variant), not stamped
+typetorch experiment resume tutorial_ui          # drop stop / settle, keep the weights
+typetorch experiment clear tutorial_ui           # remove the override: equal split again
+```
+
+The overrides are `backend.analytics.experiments` = `{ [name]: { active?, weights?, variant? } }` (what framework 0.4+
+reads), mirrored into the old `analytics.experiments` for frameworks before 0.4; `backend setup` keeps them (and moves
+overrides that sat only in the old section into `backend.analytics`). Names are 1-64 letters, digits and `_ - . /`;
+weights are 1-16 numbers >= 0 that don't all add up to 0; a variant is 1-32 characters. The record needs a backend
+(`typetorch backend setup`) first. Weights move as few players as possible: a player only switches when the boundary
+moves past their hash, and `resume` puts everyone back where the weights say.
+
+The variants themselves live in game code, so the CLI can't check them: weights go in the order the game lists the
+variants (another count is ignored by servers: equal split), and `settle` takes the variant exactly as the game names
+it (a name the game doesn't use is ignored). `experiment list` shows the variants the backend's `experiment` rows named
+in the last 7 days (`--days`), through `POST /v1/sql` with `TYPETORCH_ADMIN_TOKEN` and typetorch.json `backend.url`;
+`--variants a,b` (the game's list, in order) makes `weights` and `settle` check the count and the name before anything
+is written. `--dry-run` shows the override before and after and writes nothing. `settings status` lists the overrides
+and `settings get backend` shows them (the key stays hidden). Every change is logged to `experiments.jsonl` in the
+state dir.
 
 `--no-registry` (deploy, rollback, promote, approve, kernel deploy) is accepted and prints a one-line note.
 `--require-shared-seq` and `--require-registry` are gone (CLI 0.9).

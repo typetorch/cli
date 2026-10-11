@@ -11,6 +11,7 @@ import { assetsCommand, assetsFlags } from "./commands/assets.ts";
 import { BACKEND_USAGE, backendCommand, backendFlags } from "./commands/backend.ts";
 import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands/build.ts";
 import { SETTINGS_USAGE, settingsCommand, settingsFlags } from "./commands/settings.ts";
+import { EXPERIMENT_USAGE, experimentCommand, experimentFlags } from "./commands/experiment.ts";
 import { deployCommand, deployFlags } from "./commands/deploy.ts";
 import { doctorCommand, doctorFlags } from "./commands/doctor.ts";
 import {
@@ -187,6 +188,12 @@ typetorch branch rm <branch> [--dry-run] [--yes] [--force] [--json]
 		run: (args) => settingsCommand(args),
 		summary: "the signed settings record (branches, dev access, game values)",
 		usage: SETTINGS_USAGE,
+	},
+	experiment: {
+		flags: experimentFlags,
+		run: (args) => experimentCommand(args),
+		summary: "live analytics experiment overrides: weights, settle on a variant, stop (signed settings, no deploy)",
+		usage: EXPERIMENT_USAGE,
 	},
 	access: {
 		flags: accessFlags,

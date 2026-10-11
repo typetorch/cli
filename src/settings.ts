@@ -4,7 +4,8 @@
  *
  *   { v: 1, seq, at, body, sig, sigF }
  *   body = JSON text: { defaultBranch?, channels?, access?, backend?, fleet?, analytics?, game? }
- *   backend = { url, key, analytics?: { flushSeconds?, recordShare? } } (CLI 0.9, plans/21; `typetorch backend setup`).
+ *   backend = { url, key, analytics?: { flushSeconds?, recordShare?, experiments? } } (CLI 0.9, plans/21; `typetorch
+ *   backend setup`; experiments: `typetorch experiment`, experiments.ts).
  *   For one release the CLI also writes the old `fleet` = { url, token } and `analytics` = { backend: "duckdb", events,
  *   token, ... } derived from it (`withLegacySections`): kernels 0.3.8/0.3.9 and their frameworks read only those.
  *   sig / sigF = Ed25519 by the main and the fallback prod key over  tt1settings \n seq \n at \n body
@@ -23,6 +24,7 @@ import { updateEntry, type KeyWrite } from "./durablehead.ts";
 import type { OpenCloud } from "./opencloud.ts";
 import { DEPLOY_TOPIC } from "./opencloud.ts";
 import { SEQ_DATASTORE } from "./seqstore.ts";
+import { describeOverride, experimentsDiffer, experimentsOf, experimentsProblems, type Experiments } from "./experiments.ts";
 import { signCanonical, verifyCanonical, type DualSigner } from "./signing.ts";
 
 export const SETTINGS_KEY = "settings";
@@ -53,6 +55,8 @@ export interface AccessLists {
 export interface BackendAnalytics {
 	flushSeconds?: number;
 	recordShare?: number;
+	/** Live experiment overrides (`typetorch experiment`; the framework's parseExperiments). */
+	experiments?: Experiments;
 }
 
 /** The backend section (CLI 0.9): one URL and the game key for heartbeats, reports, alerts, events and errors. */
@@ -104,11 +108,12 @@ export function backendProblems(value: unknown): string[] {
 	}
 	if (raw.analytics !== undefined) {
 		const a = raw.analytics as Record<string, unknown>;
-		if (typeof a !== "object" || a === null || Array.isArray(a)) problems.push("backend.analytics must be { flushSeconds?, recordShare? }");
+		if (typeof a !== "object" || a === null || Array.isArray(a)) problems.push("backend.analytics must be { flushSeconds?, recordShare?, experiments? }");
 		else {
 			const inRange = (v: unknown, [low, high]: readonly [number, number]) => typeof v === "number" && Number.isFinite(v) && v >= low && v <= high;
 			if (a.flushSeconds !== undefined && !inRange(a.flushSeconds, FLUSH_SECONDS_BOUNDS)) problems.push(`backend.analytics.flushSeconds must be ${FLUSH_SECONDS_BOUNDS[0]}-${FLUSH_SECONDS_BOUNDS[1]}`);
 			if (a.recordShare !== undefined && !inRange(a.recordShare, RECORD_SHARE_BOUNDS)) problems.push(`backend.analytics.recordShare must be ${RECORD_SHARE_BOUNDS[0]}-${RECORD_SHARE_BOUNDS[1]}`);
+			if (a.experiments !== undefined) problems.push(...experimentsProblems(a.experiments, "backend.analytics.experiments"));
 		}
 	}
 	return problems;
@@ -260,6 +265,12 @@ export function describeFields(body: SettingsBody): string[] {
 			host = typeof body.analytics.events === "string" ? ` ${new URL(body.analytics.events).host}` : "";
 		} catch {}
 		lines.push(`analytics      ${backend}${host}${body.analytics.token !== undefined ? " (token hidden)" : ""}`);
+	}
+	const experiments = Object.entries(experimentsOf(body)).sort(([a], [b]) => a.localeCompare(b));
+	const differ = experimentsDiffer(body) ? " (the old analytics section's differ: the next experiment change or backend setup rewrites them)" : "";
+	if (experiments.length) {
+		lines.push(`experiments    ${experiments.length} override${experiments.length === 1 ? "" : "s"}${differ}`);
+		for (const [name, override] of experiments) lines.push(`  ${name}: ${describeOverride(override)}`);
 	}
 	if (body.game) {
 		const keys = Object.keys(body.game);

@@ -138,7 +138,8 @@ describe("backend setup", () => {
 	test("the old analytics section keeps its experiments; the dials carry over from the record when no flag is given", () => {
 		const old = { analytics: { backend: "basin", events: "https://x.ingest.cloudflare.com", recordings: "https://y.ingest.cloudflare.com", token: "t", recordShare: 0.5, experiments: { onboarding_hint: { weights: [1, 3] } } } };
 		const next = withBackend(old, { url: `${HOST}/`, key: INGEST, analytics: analyticsDials(old, {}) });
-		expect(next.backend).toEqual({ url: HOST, key: INGEST, analytics: { recordShare: 0.5 } });
+		// `typetorch experiment`: the overrides also move to backend.analytics (frameworks 0.4+ read only that one).
+		expect(next.backend).toEqual({ url: HOST, key: INGEST, analytics: { recordShare: 0.5, experiments: { onboarding_hint: { weights: [1, 3] } } } });
 		expect(next.analytics).toEqual({ backend: "duckdb", events: `${HOST}/v1/ingest`, token: INGEST, recordShare: 0.5, experiments: { onboarding_hint: { weights: [1, 3] } } });
 		expect(analyticsDials({ backend: { url: HOST, key: INGEST, analytics: { flushSeconds: 30 } } }, { recordShare: 1 })).toEqual({ flushSeconds: 30, recordShare: 1 });
 		expect(analyticsDials({}, {})).toBeUndefined();

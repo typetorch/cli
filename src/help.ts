@@ -5,7 +5,7 @@ import { bold } from "./log.ts";
 export const HELP_GROUPS: [title: string, commands: string[]][] = [
 	["Ship a build", ["deploy", "build", "upload", "test", "promote", "rollback"]],
 	["Approvals", ["approve", "proposals", "reject"]],
-	["Live servers", ["servers", "report", "alerts", "deployments", "branch", "pin"]],
+	["Live servers", ["servers", "report", "alerts", "deployments", "branch", "pin", "experiment"]],
 	["Setup", ["init", "doctor", "keys", "settings", "access", "backend", "kernel", "backup", "assets"]],
 	["Tools", ["dev", "migrate", "update"]],
 ];
