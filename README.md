@@ -128,7 +128,7 @@ get an allowlisted environment without any key. Keys are never printed.
 Old names, read in CLI 0.9 only, with a warning naming the new one: `TYPETORCH_FLEET_TOKEN` (= `TYPETORCH_ADMIN_TOKEN`),
 `TYPETORCH_FLEET_INGEST_TOKEN` (= `TYPETORCH_API_KEY`).
 
-Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_CHILD_ENV=NAME,NAME` (extra
+Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_BUILD_CACHE=0` (turns the build cache off), `TYPETORCH_CHILD_ENV=NAME,NAME` (extra
 non-secret variables for child processes), `TYPETORCH_KEY_FILE` / `TYPETORCH_FALLBACK_KEY_FILE` (the signing key files;
 read from the real environment only, never from an env file, and never passed to a child process).
 
@@ -203,7 +203,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | Command | Does |
 |---|---|
 | `typetorch init [--dir <folder>] [--phase <name>] [--answers <file>] [--agent]` | the guided setup, from an empty folder to a live game (see "Setup"); `--agent` prints `AGENT_PROMPT.md` again |
-| `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs rbxtsc (`bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first |
+| `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs rbxtsc (`bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first, then restore the build cache |
 | `typetorch upload [--no-build]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
 | `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: deploy message, durable head, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
 | `typetorch deploy --widen <1-100> [--branch]` | re-send the branch's live deploy (same seq) to more servers; dev-channel branches only (see "Rollouts") |
@@ -319,6 +319,12 @@ and writes nothing.
 - **Clean deploys:** `deploy` and `upload` run `git clean -fdX` on out/ and include/ (ignored files only) before
   building. A clean id is refused when git-ignored files sit in the payload's source dirs, or a compiled file has no
   tracked source.
+- **Build cache:** after a successful clean build, out/ (with rbxtsc's `tsconfig.tsbuildinfo`) is copied to
+  `.typetorch/build-cache/<channel>/` with a sha256 per file. The next clean build cleans out/ as above, puts the cache
+  back, and rbxtsc recompiles only what changed (a one-file edit: seconds instead of a full compile). The cache is
+  dropped when any file fails its hash or when tsconfig.json, package.json or a lockfile changed; outputs whose source
+  is gone are removed first; dev and prod never share one. Needs `"incremental": true` with the tsbuildinfo inside
+  outDir. `TYPETORCH_BUILD_CACHE=0` turns it off.
 - **Payload check:** the built `.rbxm` must be one `Model` holding only `Folder`s and `ModuleScript`s; anything else
   (Scripts, values from `.txt` files, models from `.rbxm` files...) fails the build with its path.
 - **Debug macros per channel:** dev builds keep `rbxts-transform-debug`'s `$print`/`$warn`/`$dbg` with their
