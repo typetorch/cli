@@ -595,11 +595,18 @@ local function describeTree(root, phase, refs)
 	return table.concat(lines, "\n"), count
 end
 
+-- Services the engine fills per session and never saves into the place (their children differ between the check task
+-- and the save task, e.g. Stats.PerformanceStats): left out of the outside manifest.
+local SESSION_SERVICES = { Stats = true }
+
 -- The outside manifest: per service (its attributes and tags) and per top-level child that isn't a slot (descriptor
 -- hash, and the hash of its serialized bytes when serialize is set).
 local function manifest(phase, serialize, refs)
 	local m = { entries = {}, keys = {}, services = 0, subtrees = 0, instances = 0, unserializable = 0, unreadable = 0 }
 	for _, service in childrenOf(game) or {} do
+		if SESSION_SERVICES[service.ClassName] then
+			continue
+		end
 		m.services += 1
 		local serviceKey = service.ClassName .. "|" .. service.Name
 		local serviceMarks = attributesOf(service) .. "|" .. tagsOf(service)
