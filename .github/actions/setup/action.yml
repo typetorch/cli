@@ -1,0 +1,29 @@
+name: Setup
+description: Bun, Node, Lune and Rojo (the luau engine and backup tests run Lune and Rojo), and the dependencies.
+runs:
+  using: composite
+  steps:
+    - uses: oven-sh/setup-bun@v2
+      with:
+        bun-version: 1.4.2
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 22
+        registry-url: https://registry.npmjs.org
+    - name: Lune and Rojo
+      shell: bash
+      run: |
+        set -euo pipefail
+        tools="$RUNNER_TEMP/tools"
+        mkdir -p "$tools"
+        curl -sSLf -o "$tools/lune.zip" https://github.com/lune-org/lune/releases/download/v0.10.5/lune-0.10.5-linux-x86_64.zip
+        curl -sSLf -o "$tools/rojo.zip" https://github.com/rojo-rbx/rojo/releases/download/v7.6.1/rojo-7.6.1-linux-x86_64.zip
+        unzip -oq "$tools/lune.zip" -d "$tools"
+        unzip -oq "$tools/rojo.zip" -d "$tools"
+        chmod +x "$tools/lune" "$tools/rojo"
+        echo "$tools" >> "$GITHUB_PATH"
+        "$tools/lune" --version
+        "$tools/rojo" --version
+    - name: Dependencies
+      shell: bash
+      run: bun install --frozen-lockfile

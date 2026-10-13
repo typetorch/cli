@@ -1,0 +1,21 @@
+# Typecheck, tests (Lune and Rojo included, so nothing skips), the build and the pack smoke test under Node.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - run: bun run typecheck
+      - run: bun test
+      - run: bun run build
+      - run: node scripts/smoke.mjs --pack
