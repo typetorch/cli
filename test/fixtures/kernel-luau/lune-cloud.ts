@@ -62,6 +62,7 @@ export interface HarnessOptions {
 	tamperOnSetting?: boolean;
 	noEncoding?: boolean;
 	unstableBytes?: boolean;
+	statsNoise?: boolean;
 }
 
 /** Runs a task script in the harness; returns the result, the engine calls, and the saved place (if any). */

@@ -423,6 +423,14 @@ describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks i
 		expect(no.records).toEqual([]);
 	});
 
+	test("Stats (filled by the engine per session, never saved) differs between check and save: still saved and verified", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"), { statsNoise: true });
+		const { json, error } = await quiet(() => luauDeploy(deployInput({ yes: true }), makeDeps(cloud.oc)));
+		expect(error).toBeUndefined();
+		expect(json).toMatchObject({ placeVersionAfter: 58, verify: { ok: true, problems: [] } });
+		expect(cloud.tasks[0].script).toContain("SESSION_SERVICES");
+	});
+
 	test("someone published after the check: nothing saved", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"), { raceTo: 58 });
 		const { error } = await quiet(() => luauDeploy(deployInput({ yes: true }), makeDeps(cloud.oc)));
