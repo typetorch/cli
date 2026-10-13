@@ -1,6 +1,6 @@
 {
 	"name": "@typetorch/cli",
-	"version": "0.10.1",
+	"version": "0.10.2-next.0",
 	"description": "TypeTorch CLI: build, upload and hot-swap roblox-ts game code on live Roblox servers, roll back, and list deployments.",
 	"license": "MIT",
 	"repository": {
@@ -11,12 +11,24 @@
 	"bugs": {
 		"url": "https://github.com/typetorch/cli/issues"
 	},
-	"keywords": ["roblox", "roblox-ts", "rojo", "open-cloud", "hot-reload", "deploy", "typetorch"],
+	"keywords": [
+		"roblox",
+		"roblox-ts",
+		"rojo",
+		"open-cloud",
+		"hot-reload",
+		"deploy",
+		"typetorch"
+	],
 	"type": "module",
 	"bin": {
 		"typetorch": "dist/index.js"
 	},
-	"files": ["dist", "README.md", "LICENSE"],
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
 	"engines": {
 		"node": ">=20"
 	},
