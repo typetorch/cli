@@ -175,11 +175,13 @@ export async function refreshBackup(input: RefreshInput, deps: LuauDeps): Promis
 		const saved = await findSavedVersion(deps, placeId, base.newest);
 		let verified: boolean | undefined;
 		const verifyProblems: string[] = [];
+		let stampFound = true;
 		if (saved) {
 			try {
 				const v = parseKernelTaskResult((await runTask(deps, { universeId, placeId, version: saved.version, script: kernelTaskScript({ ...config, mode: "verify", placeVersion: saved.version }), timeoutSeconds: input.timeoutSeconds, what: "backup verify task" })).results);
 				if (v.identity.BackupArtifactId !== build.artifactId) verifyProblems.push(`the saved backup is ${v.identity.BackupArtifactId ?? "missing"}`);
-				if (save.assets?.holds && v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] !== String(save.assets.savedAs)) verifyProblems.push(`the saved backup's ${HOT_ASSETS_SAVED_AS} is ${v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] ?? "missing"}`);
+				stampFound = !save.assets?.holds || v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] === String(save.assets.savedAs);
+				if (!stampFound) verifyProblems.push(`the saved backup's ${HOT_ASSETS_SAVED_AS} is ${v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] ?? "missing"}`);
 				if (save.outside.afterD && v.outside.rootD !== save.outside.afterD) verifyProblems.push("the content outside the backup slot differs from what the save task wrote");
 				verifyProblems.push(...v.problems);
 				verified = verifyProblems.length === 0;
@@ -188,7 +190,7 @@ export async function refreshBackup(input: RefreshInput, deps: LuauDeps): Promis
 				verified = false;
 			}
 		}
-		const assets = input.assetsLock === undefined ? undefined : backupAssets(input.assetsLock, base.version, save.assets, saved?.version);
+		const assets = input.assetsLock === undefined ? undefined : backupAssets(input.assetsLock, base.version, save.assets, saved?.version, stampFound);
 		deps.record({ event: "backup-refreshed", ...record, placeVersionAfter: saved?.version ?? null, verified: verified ?? null, ...(assets ? { assets } : {}) });
 		return { status: "refreshed", artifactId: build.artifactId, placeVersionBefore: base.newest, placeVersionAfter: saved?.version, verified, ...(verifyProblems.length ? { problems: verifyProblems } : {}), ...(assets ? { assets } : {}) };
 	} catch (error) {

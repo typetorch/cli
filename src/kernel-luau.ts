@@ -348,13 +348,15 @@ export async function luauDeploy(input: DeployInput, deps: LuauDeps): Promise<vo
 	// 7. The new version, and a verify task on it.
 	const saved = await watch.stage("find", () => findSavedVersion(deps, placeId, base.newest));
 	let verify: { ok: boolean; problems: string[]; task?: string } | undefined;
+	let stampFound = true;
 	if (saved) {
 		try {
 			const verifyRun = await watch.stage("verify", () => runTask(deps, { universeId, placeId, version: saved.version, script: kernelTaskScript({ ...config, mode: "verify", placeVersion: saved.version }), timeoutSeconds: input.timeoutSeconds, what: "verify task" }));
 			const v = parseKernelTaskResult(verifyRun.results);
 			const vProblems = [...v.problems];
 			for (const [key, value] of Object.entries(config.expect)) if (v.identity[key] !== value) vProblems.push(`the saved kernel's ${key} is ${v.identity[key] ?? "missing"}, expected ${value}`);
-			if (save.assets?.holds && v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] !== String(save.assets.savedAs)) vProblems.push(`the saved backup's ${HOT_ASSETS_SAVED_AS} is ${v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] ?? "missing"}, expected ${save.assets.savedAs}`);
+			stampFound = !save.assets?.holds || v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] === String(save.assets.savedAs);
+			if (!stampFound) vProblems.push(`the saved backup's ${HOT_ASSETS_SAVED_AS} is ${v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] ?? "missing"}, expected ${save.assets?.savedAs}`);
 			vProblems.push(...compareSlots(v.newSlots, input.cliSlots, v.hashMode));
 			if (save.outside.afterD && v.outside.rootD && v.outside.rootD !== save.outside.afterD) vProblems.push(`the content outside the kernel in v${saved.version} differs from what the save task wrote (descriptor ${v.outside.rootD.slice(0, 12)} vs ${save.outside.afterD.slice(0, 12)})`);
 			verify = { ok: vProblems.length === 0, problems: vProblems, task: verifyRun.path };
@@ -363,7 +365,7 @@ export async function luauDeploy(input: DeployInput, deps: LuauDeps): Promise<vo
 		}
 	}
 	const timings = watch.total();
-	const assets = input.assets ? backupAssets(input.assets.lockPlaceVersion, base.version, save.assets, saved?.version) : undefined;
+	const assets = input.assets ? backupAssets(input.assets.lockPlaceVersion, base.version, save.assets, saved?.version, stampFound) : undefined;
 	const done = { ...record, placeVersionAfter: saved?.version ?? null, publishedAfter: saved?.published ?? null, verify, task: saveRun.path, timings, ...(assets ? { assets } : {}) };
 	deps.record({ event: "kernel-published", ...done });
 	writeFileSync(input.reportPath, JSON.stringify({ ...report, save, saved, verify }, null, "\t"));

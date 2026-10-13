@@ -83,6 +83,8 @@ export interface FakeOptions extends HarnessOptions {
 	raceTo?: number;
 	/** The save task answers FAILED with this error instead of running. */
 	failSave?: { code: string; message: string };
+	/** The place file a save leaves as the new version instead of the one the task wrote (a save that lost something). */
+	replaceSaved?: (saved: string) => string;
 }
 
 export type TaskKind = "check" | "save" | "verify" | "restore-check" | "restore-save";
@@ -137,7 +139,7 @@ export function fakeCloud(basePlace: string, options: FakeOptions = {}) {
 			if (run.result?.saved && run.saved) {
 				const next = newest() + 1;
 				versions.push({ version: next, published: true, hasPublishedField: true });
-				places.set(next, run.saved);
+				places.set(next, options.replaceSaved ? options.replaceSaved(run.saved) : run.saved);
 			}
 			if (kind === "check" && options.raceTo) versions.push({ version: options.raceTo, published: true, hasPublishedField: true });
 			return { state: "COMPLETE", results: [run.result], path };

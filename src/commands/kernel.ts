@@ -365,7 +365,7 @@ export function hotAssetsInput(proj: Project): HotAssetsInput | undefined {
 }
 
 /** After a place file publish: new servers on the new version load hot assets from their uploads unless the lock names it. */
-function fileAssetsNote(proj: Project, after: number | null) {
+export function fileAssetsNote(proj: Project, after: number | null) {
 	const assets = hotAssetsInput(proj);
 	if (assets) assetsNote(publishedAssets(assets.lockPlaceVersion, after), assets.branch, "  ");
 }

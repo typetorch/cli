@@ -37,14 +37,18 @@ export function noBackupToVouch(lockPlaceVersion: number): string {
 	return `no backup build is in the saved place to vouch for the hot-asset lock (v${lockPlaceVersion}): after this save new servers load every hot asset from its uploaded version instead of the place's copies`;
 }
 
-/** Whether new servers on the saved version keep adopting the place's hot-asset copies (see BackupAssets). */
-export function backupAssets(lockPlaceVersion: number, base: number, stamped: StampedAssets | undefined, saved: number | undefined): BackupAssets {
+/**
+ * Whether new servers on the saved version keep adopting the place's hot-asset copies (see BackupAssets). `stampFound`:
+ * false when the verify task read the saved version and its backup doesn't carry the stamp the save task wrote.
+ */
+export function backupAssets(lockPlaceVersion: number, base: number, stamped: StampedAssets | undefined, saved: number | undefined, stampFound = true): BackupAssets {
 	if (!stamped) return { kept: false, lockPlaceVersion, reason: noBackupToVouch(lockPlaceVersion) };
 	if (!stamped.holds) return { kept: false, lockPlaceVersion, reason: assetsMismatch(lockPlaceVersion, base) };
 	if (saved === undefined) return { kept: false, lockPlaceVersion, reason: "the saved place version isn't known, so whether new servers adopt the place's hot-asset copies isn't either" };
 	if (saved !== stamped.savedAs) {
 		return { kept: false, lockPlaceVersion, reason: `the save became v${saved}, not v${stamped.savedAs} (another save landed in between): new servers load every hot asset from its uploaded version` };
 	}
+	if (!stampFound) return { kept: false, lockPlaceVersion, reason: `the verify task found no HotAssetsSavedAs = ${saved} on v${saved}'s backup: new servers load every hot asset from its uploaded version` };
 	return { kept: true, lockPlaceVersion };
 }
 

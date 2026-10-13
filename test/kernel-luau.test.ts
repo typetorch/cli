@@ -559,6 +559,16 @@ describe.skipIf(!hasLune)("hot assets across kernel deploy and restore (fake Ope
 		expect(savedIdentity(cloud, 58).BackupHotAssetsSavedAs).toBeUndefined();
 	});
 
+	test("the verify task checks the stamp: a saved version without it is a verify problem and not kept", async () => {
+		// The same deploy without a lock writes an unstamped place; a save that "lost" the stamp leaves that one.
+		const plain = fakeCloud(place("game-installed.rbxl"));
+		expect((await quiet(() => luauDeploy(deployWithBackup(undefined), makeDeps(plain.oc)))).error).toBeUndefined();
+		const cloud = fakeCloud(place("game-installed.rbxl"), { replaceSaved: () => plain.places.get(58)! });
+		const { json, error } = await quiet(() => luauDeploy(deployWithBackup(57), makeDeps(cloud.oc)));
+		expect(error).toBeUndefined();
+		expect(json).toMatchObject({ placeVersionAfter: 58, verify: { ok: false, problems: [expect.stringContaining("HotAssetsSavedAs is missing, expected 58")] }, assets: { kept: false, reason: expect.stringContaining("found no HotAssetsSavedAs = 58") } });
+	});
+
 	test("kernel restore --version: a vouched version is republished still vouched; one without a backup can't be", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
 		expect((await quiet(() => luauDeploy(deployWithBackup(57), makeDeps(cloud.oc)))).error).toBeUndefined();
@@ -569,6 +579,24 @@ describe.skipIf(!hasLune)("hot assets across kernel deploy and restore (fake Ope
 		expect(savedIdentity(cloud, 59)).toMatchObject({ BackupHotAssetsPlaceVersion: "57", BackupHotAssetsSavedAs: "59" });
 		const bare = await quiet(() => luauRestore({ ...restore, version: 56 }, makeDeps(cloud.oc)));
 		expect(bare.json).toMatchObject({ fromVersion: 56, placeVersionAfter: 60, assets: { kept: false, reason: expect.stringContaining("no backup build") } });
+	});
+
+	test("kernel restore --version: a lock the version's backup doesn't vouch for clears the claim; a dry run saves nothing", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"));
+		expect((await quiet(() => luauDeploy(deployWithBackup(57), makeDeps(cloud.oc)))).error).toBeUndefined();
+		const restore = { universeId: 1, placeId: 2, where: "universe 1, place 2", identitySlot: IDENTITY, version: 58, dryRun: false, yes: true, timeoutSeconds: 300 };
+		const dry = await quiet(() => luauRestore({ ...restore, dryRun: true, assets: { lockPlaceVersion: 57, branch: "prod" } }, makeDeps(cloud.oc)));
+		expect(dry.json).toMatchObject({ dryRun: true, check: { assets: { holds: true, savedAs: 59 } } });
+		expect(cloud.tasks.at(-1)!.script).not.toContain("SavePlaceAsync");
+		const other = await quiet(() => luauRestore({ ...restore, assets: { lockPlaceVersion: 50, branch: "prod" } }, makeDeps(cloud.oc)));
+		expect(other.json).toMatchObject({ placeVersionAfter: 59, assets: { kept: false, reason: expect.stringContaining("is for place v50 and the place is v58") } });
+		expect(savedIdentity(cloud, 59).BackupHotAssetsPlaceVersion).toBeUndefined();
+		expect(savedIdentity(cloud, 59).BackupArtifactId).toBe("abc1234-kkkkkk");
+	});
+
+	test("the restore task script: the lock goes in only when given", () => {
+		expect(restoreTaskScript({ placeId: 2, placeVersion: 58, save: true, identitySlot: IDENTITY, assets: { lockPlaceVersion: 57, savedAs: 59 } })).toContain('["assets"] = { ["lockPlaceVersion"] = 57, ["savedAs"] = 59 }');
+		expect(restoreTaskScript({ placeId: 2, placeVersion: 58, save: true, identitySlot: IDENTITY })).not.toContain('["assets"]');
 	});
 });
 
