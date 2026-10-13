@@ -77,7 +77,8 @@ const COMMANDS: Record<string, Command> = {
   allowed), plus .typetorch/payload.json. Artifact id: <commit7>-<hash6>, or <commit7>-dirty-<hash6>.
   --branch   TypeTorch branch (default: typetorch.json "branches"[git branch], else the git branch, lowercased, / -> -)
   --channel  override the branch's channel (default: "channels"[branch], else prod for defaultBranch, else dev)
-  --clean    git clean -fdX out/ and include/ first (deploy and upload always do)`,
+  --clean    git clean -fdX out/ and include/ first, then restore the build cache (deploy and upload always do;
+             TYPETORCH_BUILD_CACHE=0: no cache)`,
 	},
 	upload: {
 		flags: uploadFlags,

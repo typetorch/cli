@@ -247,7 +247,7 @@ export interface ConfigRow {
 }
 
 /** Non-secret variables shown with their value when set. */
-const PLAIN_VARS = ["TYPETORCH_STATE_DIR", "TYPETORCH_PROPOSED_BY", "TYPETORCH_ROJO", "TYPETORCH_LUNE", "TYPETORCH_DEV_SERVER", CHILD_ENV_VAR, KEY_FILE_VAR, FALLBACK_KEY_FILE_VAR];
+const PLAIN_VARS = ["TYPETORCH_STATE_DIR", "TYPETORCH_PROPOSED_BY", "TYPETORCH_ROJO", "TYPETORCH_LUNE", "TYPETORCH_BUILD_CACHE", "TYPETORCH_DEV_SERVER", CHILD_ENV_VAR, KEY_FILE_VAR, FALLBACK_KEY_FILE_VAR];
 
 /** Every value the CLI reads, where it came from; secrets only as set / unset. */
 export function configRows(input: { proj?: Project; config: Settings; creds: BackendCredentials; read?: SettingsRead; configFlag?: string }): ConfigRow[] {

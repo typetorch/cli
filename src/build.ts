@@ -35,6 +35,7 @@ import { liveHeads, readLocalLog } from "./deployments.ts";
 import { stateDir } from "./state.ts";
 import { compatNote, PROTOCOL_ATTRIBUTE, protocolHash, protocolStatus, type ProtocolStatus } from "./protocol.ts";
 import { effectiveHealth, healthAttributes, type EffectiveHealth } from "./health.ts";
+import { buildCacheEnabled, cacheUnsupported, removeStrayBuildInfo, restoreBuildCache, saveBuildCache } from "./build-cache.ts";
 
 export const KERNEL_API = 1;
 export const BUILD_FILE = "src/shared/build.ts";
@@ -372,6 +373,8 @@ export interface BuildOptions {
 	channel?: Channel;
 	/** `git clean -fdX` out/ and include/ first (deploy and upload always do; `build --clean`). */
 	clean?: boolean;
+	/** With `clean`: restore the channel's build cache after the clean (default true; TYPETORCH_BUILD_CACHE=0 turns it off). */
+	cache?: boolean;
 	/**
 	 * The deploy message and the branch's previous head, for the Notes attribute. Called after rbxtsc (so a registry
 	 * read started with the build has usually finished). Default: no message, the previous head from the local log.
@@ -425,9 +428,19 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 	const assetsJson = assetsAttribute(assetsLock);
 
 	// 1. Clean state (S-M3): no stale or stray output, and no ignored file in a source dir, can reach a clean id.
+	// The build cache (build-cache.ts) then puts back the last checked out/ of this channel, so rbxtsc compiles only
+	// what changed since. Only after a clean: a plain `typetorch build` keeps out/ as it is.
+	const cache = options.clean && options.cache !== false && buildCacheEnabled() ? (cacheUnsupported(root, layout) ?? "on") : "off";
 	if (options.clean) {
 		const cleaned = await watch.stage("clean", () => cleanBuildOutputs(root, git, buildOutputDirs(root, layout)));
 		debug(`cleaned ${cleaned.join(", ") || "nothing"}`);
+		removeStrayBuildInfo(root, layout);
+		if (cache === "on") {
+			const restored = restoreBuildCache(root, layout, target.channel, sourceCandidates);
+			if (restored.restored) {
+				debug(`build cache (${target.channel}): restored ${restored.files} files${restored.pruned.length ? `, removed ${restored.pruned.length} without a source` : ""}`);
+			} else debug(`build cache (${target.channel}): full compile, ${restored.reason}`);
+		} else if (cache !== "off") debug(`build cache off: ${cache}`);
 	}
 	if (git.isRepo) {
 		const ignored = ignoredSourceFiles(root, projectJson, layout);
@@ -472,6 +485,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		}
 		if (unexplained.length > 0) debug(`outputs without a tracked source (dirty build): ${unexplained.slice(0, 10).join(", ")}`);
 	}
+	if (cache === "on") debug(`build cache (${target.channel}): saved ${saveBuildCache(root, layout, target.channel)} files`);
 
 	// 4. Notes: the message and what changed since the branch's previous deploy (the dev menu reads this attribute;
 	// asset descriptions get censored by Roblox's text filter).
