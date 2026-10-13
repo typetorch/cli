@@ -11,6 +11,7 @@
 --   tamperOnSetting            reading HttpService.HttpEnabled changes Workspace.Lobby.Step1 (an engine side effect)
 --   noEncoding                 no EncodingService mock (the script falls back to FNV)
 --   unstableBytes              SerializeInstancesAsync appends a counter (bytes differ on every read)
+--   statsNoise                 Stats gets a PerformanceStats child stamped with this run (differs in every task session)
 -- Writes {result, calls} as JSON to <out.json>.
 local roblox = require("@lune/roblox")
 local fs = require("@lune/fs")
@@ -23,6 +24,17 @@ local source = fs.readFile(args[1])
 local dm = roblox.deserializePlace(fs.readFile(args[2]))
 local options = serde.decode("json", fs.readFile(args[4]))
 local calls = { save = 0, deserialize = 0, serialize = 0, hash = 0 }
+if options.statsNoise then
+	local stats = dm:GetService("Stats")
+	local old = stats:FindFirstChild("PerformanceStats")
+	if old then
+		old:Destroy()
+	end
+	local perf = roblox.Instance.new("Folder")
+	perf.Name = "PerformanceStats"
+	perf:SetAttribute("Session", string.format("%.6f", os.clock()) .. "-" .. tostring(math.random(1, 1e9)))
+	perf.Parent = stats
+end
 
 local function hexToBuffer(hex)
 	local out = buffer.create(#hex // 2)
