@@ -28,6 +28,7 @@
  */
 import { createHash } from "node:crypto";
 import { isRecord } from "./json.ts";
+import { BACKUP_SLOT } from "./payloads.ts";
 import { readRbxm, type RbxmInstance } from "./rbxm.ts";
 import type { ServiceProp, SlotRef } from "./placepatch.ts";
 
@@ -214,6 +215,12 @@ export interface KernelTaskConfig {
 	identitySlot: SlotRef;
 	/** Identity attributes the new kernel must carry after the swap (verify: in the saved version). */
 	expect: Record<string, string>;
+	/**
+	 * Hot assets: the lockfile's placeVersion and the version this save becomes (the newest version + 1). With the backup
+	 * slot in `slots`, the new backup gets HotAssetsPlaceVersion / HotAssetsSavedAs when the place's copies match the
+	 * lockfile (step 4b; reported as `assets`).
+	 */
+	assets?: { lockPlaceVersion: number; savedAs: number };
 	/** mode "save": the check task's outside descriptor root; any other value aborts before the save. */
 	expectOutside?: string;
 	expectOutsideList?: string[];
@@ -273,8 +280,21 @@ end
 `;
 
 /** Shared helpers of both scripts: hashing, paths, attributes, the kernel identity. */
+/**
+ * Hot assets (framework AssetSync): attributes the backup slot (ServerStorage.TypeTorchBackup) carries when a save kept
+ * the place's hot-asset copies as the lockfile names them. `HotAssetsPlaceVersion`: the lockfile's placeVersion they
+ * match; `HotAssetsSavedAs`: the place version that save was to become. A server whose game.PlaceVersion is
+ * HotAssetsSavedAs adopts the place's copies for a manifest of HotAssetsPlaceVersion (framework assets/manifest.ts
+ * placeMatchesManifest); any later publish (Studio) has another version, so the claim never outlives that save.
+ */
+export const HOT_ASSETS_PLACE_VERSION = "HotAssetsPlaceVersion";
+export const HOT_ASSETS_SAVED_AS = "HotAssetsSavedAs";
+
 const HELPERS = String.raw`local clock = os.clock
 local LIST_CAP = 40
+local BACKUP_NAME = "${BACKUP_SLOT.name}"
+local HOT_ASSETS_PLACE_VERSION = "${HOT_ASSETS_PLACE_VERSION}"
+local HOT_ASSETS_SAVED_AS = "${HOT_ASSETS_SAVED_AS}"
 
 local function getService(name)
 	local ok, service = pcall(function()
@@ -422,6 +442,12 @@ local function kernelIdentity(identitySlot)
 			local value = backup:GetAttribute("BackupArtifactId")
 			if value ~= nil then
 				identity.BackupArtifactId = tostring(value)
+			end
+			for _, key in { HOT_ASSETS_PLACE_VERSION, HOT_ASSETS_SAVED_AS } do
+				local number = backup:GetAttribute(key)
+				if type(number) == "number" then
+					identity["Backup" .. key] = string.format("%d", number)
+				end
 			end
 		end
 	end
@@ -896,6 +922,21 @@ local function run()
 	inputRoot:Destroy()
 	result.slots = slotReports
 
+	-- 4b. Hot assets (framework AssetSync): a save changes the place version, and nothing outside the slots (step 5
+	-- aborts otherwise). When the place's hot-asset copies are the ones the lockfile names (the lock was made on this
+	-- version, or the old backup vouched for it), the new backup says so for the version this save becomes, so new
+	-- servers keep adopting the place's copies instead of loading every asset. Only with the backup slot in this patch.
+	local backupKey = "ServerStorage\0" .. BACKUP_NAME
+	if CONFIG.assets ~= nil and fresh[backupKey] ~= nil then
+		local lock = CONFIG.assets.lockPlaceVersion
+		local holds = lock == CONFIG.placeVersion
+			or (tonumber(result.oldKernel["Backup" .. HOT_ASSETS_PLACE_VERSION]) == lock and tonumber(result.oldKernel["Backup" .. HOT_ASSETS_SAVED_AS]) == CONFIG.placeVersion)
+		local backup = fresh[backupKey]
+		backup:SetAttribute(HOT_ASSETS_PLACE_VERSION, if holds then lock else nil)
+		backup:SetAttribute(HOT_ASSETS_SAVED_AS, if holds then CONFIG.assets.savedAs else nil)
+		result.assets = { holds = holds, lockPlaceVersion = lock, savedAs = if holds then CONFIG.assets.savedAs else nil }
+	end
+
 	local remapped, cleared = {}, {}
 	local nRemapped, nCleared = 0, 0
 	for _, ref in refs do
@@ -1084,6 +1125,8 @@ export interface KernelTaskResult {
 	refs: { remapped: string[]; cleared: string[]; nRemapped: number; nCleared: number };
 	outside: { services: number; subtrees: number; instances: number; unserializable: number; unreadable: number; unstable: number; root?: string; rootD?: string; dlist?: string[]; after?: string; afterD?: string; changed: string[]; nChanged: number };
 	hashMode?: string;
+	/** Step 4b (config `assets` with the backup slot): whether the new backup vouches for the lockfile's copies. */
+	assets?: { holds: boolean; lockPlaceVersion?: number; savedAs?: number };
 	inputBytes?: number;
 	/** Scripts whose Source the task couldn't read (their changes aren't listed). */
 	sourceUnreadable: number;
@@ -1143,6 +1186,9 @@ export function parseKernelTaskResult(results: unknown[]): KernelTaskResult {
 			nChanged: num(outside.nChanged),
 		},
 		hashMode: str(raw.hashMode),
+		...(isRecord(raw.assets)
+			? { assets: { holds: raw.assets.holds === true, lockPlaceVersion: typeof raw.assets.lockPlaceVersion === "number" ? raw.assets.lockPlaceVersion : undefined, savedAs: typeof raw.assets.savedAs === "number" ? raw.assets.savedAs : undefined } }
+			: {}),
 		inputBytes: typeof raw.inputBytes === "number" ? raw.inputBytes : undefined,
 		sourceUnreadable: num(raw.sourceUnreadable),
 		timings: isRecord(raw.timings) ? Object.fromEntries(Object.entries(raw.timings).map(([k, v]) => [k, num(v)])) : {},

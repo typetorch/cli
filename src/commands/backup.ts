@@ -11,6 +11,11 @@
  *   with no failure for `backup.healthyHours` (typetorch.json, default 3 h). It never blocks or fails the deploy: every
  *   reason not to (unpublished saves, Team Create, the setting off, N not proven, no kept payload, no place key, not a
  *   terminal) is one line, and the deploy's own result is unchanged. `"backup": { "refresh": "off" }` turns it off.
+ * - Hot assets (2026-10-13 incident): the save publishes a new place version, and new servers adopt the place's hot-asset
+ *   copies only for the version the lockfile names. With a lockfile, the save stamps the new backup with
+ *   HotAssetsPlaceVersion / HotAssetsSavedAs (kernelpatch-task step 4b) when the place's copies are the lockfile's (the
+ *   lock was made on the base version, or the old backup vouched for it), so new servers keep adopting them. When it
+ *   can't, the automatic refresh is skipped (one line, with the fix) and the manual one warns before and after.
  *
  * "Proven healthy": the fleet API has reports for N's seq, none failed or rolled back, no server running N is failed
  * or degraded, and N went out at least healthyHours ago (this machine's deployment log). No fleet API, no proof.
@@ -24,7 +29,8 @@ import { matchDeployment, type LiveHead } from "../deployments.ts";
 import { formatCounts, summarize, type FleetClient } from "../fleet.ts";
 import { interaction } from "../interact.ts";
 import { chooseBase } from "../kernelpatch.ts";
-import { explainSaveError, kernelTaskScript, parseKernelTaskResult, compareSlots, SLOTS_ROOT, type KernelTaskConfig, type SlotInventory } from "../kernelpatch-task.ts";
+import { ASSETS_LOCK_FILE, readAssetsLock } from "../assets.ts";
+import { explainSaveError, HOT_ASSETS_SAVED_AS, kernelTaskScript, parseKernelTaskResult, compareSlots, SLOTS_ROOT, type KernelTaskConfig, type KernelTaskResult, type SlotInventory } from "../kernelpatch-task.ts";
 import { findSavedVersion, LuauEngineError, runTask, sendInput, type LuauDeps } from "../kernel-luau.ts";
 import { bold, dim, emitJson, info, isJson, Stopwatch, warn } from "../log.ts";
 import { branchChannel, type Channel } from "../naming.ts";
@@ -88,8 +94,20 @@ export function lastBackupHere(stateDir: string, placeId: number): string | unde
 	return last;
 }
 
+/**
+ * Hot assets after a refresh: `kept` when new servers on the saved version still adopt the place's copies (the new
+ * backup vouches for the lockfile, and the save landed on the version it named). Otherwise they load every hot asset
+ * from its uploaded version until `typetorch assets sync --deploy <branch>`.
+ */
+export interface BackupAssets {
+	kept: boolean;
+	lockPlaceVersion: number;
+	/** Why not kept. */
+	reason?: string;
+}
+
 export type BackupOutcome =
-	| { status: "refreshed"; artifactId: string; placeVersionBefore: number; placeVersionAfter?: number; verified?: boolean; problems?: string[] }
+	| { status: "refreshed"; artifactId: string; placeVersionBefore: number; placeVersionAfter?: number; verified?: boolean; problems?: string[]; assets?: BackupAssets }
 	| { status: "skipped"; reason: string; already?: boolean }
 	| { status: "dry-run"; artifactId: string; placeVersion: number; current?: string }
 	| { status: "declined" };
@@ -105,6 +123,18 @@ export interface RefreshInput {
 	/** No y/N (auto refresh inside a deploy the owner approved, or --yes). */
 	yes: boolean;
 	timeoutSeconds: number;
+	/**
+	 * The hot-asset lockfile's placeVersion, when the project has one: the save stamps the new backup so new servers keep
+	 * adopting the place's copies (kernelpatch-task step 4b).
+	 */
+	assetsLock?: number;
+	/** Refuse (skip) when the place's copies can't be vouched for: the save would put new servers on the upload path. */
+	requireAssets?: boolean;
+}
+
+/** Why a refresh would put new servers on the hot-asset upload path, for the skip reason and the warning. */
+export function assetsMismatch(lockPlaceVersion: number, base: number): string {
+	return `the hot-asset lock (${ASSETS_LOCK_FILE}) is for place v${lockPlaceVersion} and the place is v${base}: after this save new servers would load every hot asset from its uploaded version instead of the place's copies. Run typetorch assets sync --deploy <branch> first`;
 }
 
 /**
@@ -128,17 +158,21 @@ export async function refreshBackup(input: RefreshInput, deps: LuauDeps): Promis
 			install: true,
 			identitySlot: IDENTITY_SLOT,
 			expect: { BackupArtifactId: build.artifactId },
+			...(input.assetsLock !== undefined ? { assets: { lockPlaceVersion: input.assetsLock, savedAs: base.newest + 1 } } : {}),
 		};
 		const check = parseKernelTaskResult((await runTask(deps, { universeId, placeId, version: base.version, script: kernelTaskScript(config), timeoutSeconds: input.timeoutSeconds, binaryInput: sent.path, what: "backup check task" })).results);
 		if (check.oldKernel.present !== "true") return { status: "skipped", reason: `place ${placeId} v${base.version} has no TypeTorch kernel: typetorch kernel deploy installs the kernel and its backup` };
 		if (check.oldKernel.BackupArtifactId === build.artifactId) return { status: "skipped", reason: `the place's backup is already ${build.artifactId}`, already: true };
 		const problems = [...check.problems, ...compareSlots(check.newSlots, input.cliSlots, check.hashMode)];
 		if (problems.length) return { status: "skipped", reason: `the check task found problems: ${problems.slice(0, 5).join("; ")}` };
+		const assetsHold = input.assetsLock === undefined || check.assets?.holds === true;
+		if (!assetsHold && input.requireAssets) return { status: "skipped", reason: assetsMismatch(input.assetsLock!, base.version) };
 		if (input.dryRun) return { status: "dry-run", artifactId: build.artifactId, placeVersion: base.version, current: check.oldKernel.BackupArtifactId };
 		if (!input.yes) {
 			if (!deps.interactive) throw new UsageError("refusing to save without --yes (no interactive terminal to ask)");
 			const from = check.oldKernel.BackupArtifactId ? ` (now ${check.oldKernel.BackupArtifactId})` : " (the place has none)";
-			if (!(await deps.confirm(`Make ${build.artifactId} (#${build.seq}) the backup build of place ${placeId}${from}? This saves the place (SavePlaceAsync)`))) return { status: "declined" };
+			const assetsWarning = assetsHold ? "" : `. WARNING: ${assetsMismatch(input.assetsLock!, base.version)}`;
+			if (!(await deps.confirm(`Make ${build.artifactId} (#${build.seq}) the backup build of place ${placeId}${from}? This saves and publishes the place (SavePlaceAsync)${assetsWarning}`))) return { status: "declined" };
 		}
 		const latest = await deps.oc.latestPlaceVersion(placeId);
 		if (latest !== base.newest) return { status: "skipped", reason: `the place changed since the check (v${base.newest} then, v${latest} now)` };
@@ -160,6 +194,7 @@ export async function refreshBackup(input: RefreshInput, deps: LuauDeps): Promis
 			try {
 				const v = parseKernelTaskResult((await runTask(deps, { universeId, placeId, version: saved.version, script: kernelTaskScript({ ...config, mode: "verify", placeVersion: saved.version }), timeoutSeconds: input.timeoutSeconds, what: "backup verify task" })).results);
 				if (v.identity.BackupArtifactId !== build.artifactId) verifyProblems.push(`the saved backup is ${v.identity.BackupArtifactId ?? "missing"}`);
+				if (save.assets?.holds && v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] !== String(save.assets.savedAs)) verifyProblems.push(`the saved backup's ${HOT_ASSETS_SAVED_AS} is ${v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] ?? "missing"}`);
 				if (save.outside.afterD && v.outside.rootD !== save.outside.afterD) verifyProblems.push("the content outside the backup slot differs from what the save task wrote");
 				verifyProblems.push(...v.problems);
 				verified = verifyProblems.length === 0;
@@ -168,12 +203,23 @@ export async function refreshBackup(input: RefreshInput, deps: LuauDeps): Promis
 				verified = false;
 			}
 		}
-		deps.record({ event: "backup-refreshed", ...record, placeVersionAfter: saved?.version ?? null, verified: verified ?? null });
-		return { status: "refreshed", artifactId: build.artifactId, placeVersionBefore: base.newest, placeVersionAfter: saved?.version, verified, ...(verifyProblems.length ? { problems: verifyProblems } : {}) };
+		const assets = input.assetsLock === undefined ? undefined : backupAssets(input.assetsLock, base.version, save.assets, saved?.version);
+		deps.record({ event: "backup-refreshed", ...record, placeVersionAfter: saved?.version ?? null, verified: verified ?? null, ...(assets ? { assets } : {}) });
+		return { status: "refreshed", artifactId: build.artifactId, placeVersionBefore: base.newest, placeVersionAfter: saved?.version, verified, ...(verifyProblems.length ? { problems: verifyProblems } : {}), ...(assets ? { assets } : {}) };
 	} catch (error) {
 		if (error instanceof UsageError) throw error;
 		return { status: "skipped", reason: (error as Error).message };
 	}
+}
+
+/** Whether new servers on the saved version keep adopting the place's hot-asset copies (see BackupAssets). */
+export function backupAssets(lockPlaceVersion: number, base: number, stamped: KernelTaskResult["assets"], saved: number | undefined): BackupAssets {
+	if (!stamped?.holds) return { kept: false, lockPlaceVersion, reason: assetsMismatch(lockPlaceVersion, base) };
+	if (saved === undefined) return { kept: false, lockPlaceVersion, reason: "the saved place version isn't known, so whether new servers adopt the place's hot-asset copies isn't either" };
+	if (saved !== stamped.savedAs) {
+		return { kept: false, lockPlaceVersion, reason: `the save became v${saved}, not v${stamped.savedAs} (another save landed in between): new servers load every hot asset from its uploaded version` };
+	}
+	return { kept: true, lockPlaceVersion };
 }
 
 /** The backup slot's .rbxm for a build: its kept payload stamped as the backup, under the slots root. */
@@ -218,6 +264,8 @@ export async function autoRefreshBackup(input: {
 		if (input.branchChannel !== "prod" || (input.action !== "deploy" && input.action !== "promote")) return undefined;
 		const settings = proj.config.backup ?? BACKUP_DEFAULTS;
 		if (settings.refresh === "off") return undefined;
+		// A hot-asset lock the refresh can't keep valid would put every new server on the upload path: refused below.
+		const assetsLock = readAssetsLock(proj.root)?.placeVersion;
 		// The backup is made from the default branch's head (payloads.ts backupHead): only its releases move it.
 		if (input.branch !== proj.config.defaultBranch && branchChannel(proj.config, proj.config.defaultBranch) === "prod") return undefined;
 		const skip = (reason: string): BackupOutcome => {
@@ -238,10 +286,13 @@ export async function autoRefreshBackup(input: {
 		if (!luau) return skip("no place key (OPENCLOUD_PLACE_KEY or the shared key)");
 		const slots = await (input.deps?.slots ?? ((b: BuildRef) => backupSlots(proj, b)))(build);
 		line(`refreshing to #${build.seq} ${build.artifactId} (${health.reason}); the deploy itself is done`);
-		const outcome = await refreshBackup({ universeId: proj.config.universeId, placeId: proj.config.placeId, build, slotsBytes: slots.bytes, cliSlots: slots.cliSlots, dryRun: false, yes: true, timeoutSeconds: 300 }, luau);
+		const outcome = await refreshBackup(
+			{ universeId: proj.config.universeId, placeId: proj.config.placeId, build, slotsBytes: slots.bytes, cliSlots: slots.cliSlots, dryRun: false, yes: true, timeoutSeconds: 300, assetsLock, requireAssets: true },
+			luau,
+		);
 		if (outcome.status === "refreshed") {
-			line(`${build.artifactId} is the backup build now (place v${outcome.placeVersionBefore} -> v${outcome.placeVersionAfter ?? "?"})${outcome.verified === false ? `; verify: ${outcome.problems?.join("; ")}` : ""}`);
-			assetsNote(proj);
+			line(bold(`${build.artifactId} is the backup build now: the place was published (v${outcome.placeVersionBefore} -> v${outcome.placeVersionAfter ?? "?"})`) + `${outcome.verified === false ? `; verify: ${outcome.problems?.join("; ")}` : ""}`);
+			assetsNote(outcome.assets, input.branch);
 			await announceBackup(input.deps && "marks" in input.deps ? input.deps.marks : markPosterFor(proj), build, outcome, "automatic");
 		} else if (outcome.status === "skipped") line(dim(`not refreshed: ${outcome.reason}`));
 		return outcome;
@@ -251,11 +302,17 @@ export async function autoRefreshBackup(input: {
 	}
 }
 
-/** A saved place has a new version: hot assets baked for the old one are loaded from the asset store until the next sync. */
-function assetsNote(proj: Project) {
-	if (existsSync(join(proj.root, "typetorch.assets.lock.json"))) {
-		info(dim("              the place has a new version: new servers load hot assets from their asset versions (not the place's copies) until the next typetorch assets sync"));
+/**
+ * After a refresh in a project with a hot-asset lock: whether new servers still adopt the place's copies. When they
+ * don't, a warning with the command that fixes it (the 2026-10-13 incident: a dim note here went unnoticed for two days).
+ */
+function assetsNote(assets: BackupAssets | undefined, branch: string) {
+	if (!assets) return;
+	if (assets.kept) {
+		info(`              hot assets: the new backup vouches for the lock's copies (v${assets.lockPlaceVersion}): new servers keep adopting the place's copies (framework 0.5.3+)`);
+		return;
 	}
+	warn(`hot assets: ${assets.reason ?? "new servers load every hot asset from its uploaded version"}. Fix: typetorch assets sync --deploy ${branch}`);
 }
 
 /** `typetorch backup refresh [--build <x>] [--dry-run] [--yes] [--force] [--timeout <s>]`. */
@@ -292,7 +349,17 @@ export async function backupCommand(args: ParsedArgs) {
 		throw error;
 	}
 	const outcome = await refreshBackup(
-		{ universeId: proj.config.universeId, placeId: proj.config.placeId, build, slotsBytes: slots.bytes, cliSlots: slots.cliSlots, dryRun: flagBool(args, "dry-run"), yes: flagBool(args, "yes"), timeoutSeconds: taskTimeout(args) },
+		{
+			universeId: proj.config.universeId,
+			placeId: proj.config.placeId,
+			build,
+			slotsBytes: slots.bytes,
+			cliSlots: slots.cliSlots,
+			dryRun: flagBool(args, "dry-run"),
+			yes: flagBool(args, "yes"),
+			timeoutSeconds: taskTimeout(args),
+			assetsLock: readAssetsLock(proj.root)?.placeVersion,
+		},
 		luauDeps(proj),
 	);
 	if (outcome.status === "refreshed") await announceBackup(markPosterFor(proj), build, outcome, "manual");
@@ -300,7 +367,7 @@ export async function backupCommand(args: ParsedArgs) {
 	if (outcome.status === "refreshed") {
 		info(bold(`${build.artifactId} is the backup build of place ${proj.config.placeId} now (v${outcome.placeVersionBefore} -> v${outcome.placeVersionAfter ?? "?"})`));
 		if (outcome.verified === false) warn(`the verify task: ${outcome.problems?.join("; ")}`);
-		assetsNote(proj);
+		assetsNote(outcome.assets, build.branch);
 	} else if (outcome.status === "dry-run") info(bold(`dry run: ${build.artifactId} would replace the place's backup ${outcome.current ?? "(none)"} on v${outcome.placeVersion}; nothing saved`));
 	else if (outcome.status === "declined") info("not saved");
 	else if (outcome.already) info(outcome.reason);
