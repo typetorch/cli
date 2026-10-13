@@ -46,7 +46,9 @@ import { rollbackCommand, rollbackFlags } from "./commands/rollback.ts";
 import { UPDATE_USAGE, updateCommandRun, updateFlags } from "./commands/update.ts";
 import { gameDirFor, redact, Settings, useSettings } from "./env.ts";
 import { closestCommand, renderHelp } from "./help.ts";
-import { red, setOutputMode, warn } from "./log.ts";
+import { interaction } from "./interact.ts";
+import { isJson, red, setOutputMode, warn } from "./log.ts";
+import { afterCommandUpdateCheck, updateCheckSkip } from "./updatecheck.ts";
 import { progress } from "./progress.ts";
 import { dirname, resolve } from "node:path";
 
@@ -463,6 +465,19 @@ function loadSettings(options: { config?: string; envFile?: string }) {
 	for (const line of loaded.warnings) warn(line);
 }
 
+/** After a command worked: the once-a-day update notice (updatecheck.ts). Never fails the command. */
+async function updateNotice(name: string) {
+	const ask = interaction();
+	if (updateCheckSkip({ command: name, interactive: ask.interactive, json: isJson(), env: process.env })) return;
+	const exitCode = process.exitCode;
+	await afterCommandUpdateCheck({
+		current: pkg.version,
+		interaction: ask,
+		update: (version) => updateCommandRun({ positionals: [version], flags: { yes: true } }),
+	});
+	process.exitCode = exitCode;
+}
+
 const HELP_WORDS = new Set(["help", "--help", "-h", "-H", "-?", "/?"]);
 
 async function main(argv: string[]): Promise<number> {
@@ -510,6 +525,7 @@ async function main(argv: string[]): Promise<number> {
 		// Settings stay in this object: nothing from an env file is copied into process.env (S-H2).
 		loadSettings({ config: flagString(args, "config"), envFile: flagString(args, "env-file") });
 		await command.run(args);
+		await updateNotice(name);
 		return typeof process.exitCode === "number" ? process.exitCode : 0;
 	} catch (error) {
 		const err = error as Error;
