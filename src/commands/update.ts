@@ -125,10 +125,10 @@ export function compareVersions(a: string, b: string): number {
 }
 
 /** The registry's `latest` version of the CLI. */
-export async function latestVersion(fetcher: typeof fetch = fetch): Promise<string> {
+export async function latestVersion(fetcher: typeof fetch = fetch, timeoutMs = 15_000): Promise<string> {
 	const response = await fetcher(REGISTRY, {
 		headers: { Accept: "application/vnd.npm.install-v1+json" },
-		signal: AbortSignal.timeout(15_000),
+		signal: AbortSignal.timeout(timeoutMs),
 	});
 	if (!response.ok) throw new Error(`the npm registry answered ${response.status} for ${CLI_PACKAGE}`);
 	const body = (await response.json()) as { "dist-tags"?: { latest?: unknown } };
