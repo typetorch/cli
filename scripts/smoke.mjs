@@ -173,8 +173,10 @@ if (process.argv.includes("--pack")) {
 			check("packed files: dist + README + LICENSE + package.json only", bad.length === 0, bad.join(", "));
 			const user = userInfo().username;
 			const home = homedir();
+			// A generic account (CI's "runner", a container's "root") is an ordinary word in the sources, not a leak.
+			const genericUser = /^(root|runner|user|admin|ubuntu|node)$/i.test(user);
 			const hard = [
-				{ what: "this machine's user name", re: new RegExp(`(^|[^a-z0-9])${user.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`, "i") },
+				...(genericUser ? [] : [{ what: "this machine's user name", re: new RegExp(`(^|[^a-z0-9])${user.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^a-z0-9]|$)`, "i") }]),
 				{ what: "the home folder", re: new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\\/g, "[\\\\/]+"), "i") },
 				{ what: "a Windows user folder", re: /[A-Za-z]:[\\/]+Users[\\/]+(?!<|\{|\$|%|\*|\.\.\.)[\w.-]+/ },
 				{ what: "a macOS/Linux user folder", re: /(?<![\w.])\/(?:Users|home)\/(?!<|\{|\$|\*|\.\.\.)[a-z][\w.-]+/ },

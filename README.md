@@ -762,7 +762,12 @@ processes, PATH lookup, Windows `.cmd` scripts (Node won't spawn them directly: 
 node; any other `.cmd` goes through cmd.exe with every argument quoted and escaped, and arguments with a double quote
 or a line break are refused), sleep and zstd live in `src/runtime.ts`, on Node's own modules. The build compiles with
 `types: ["node"]`, so a Bun global in `src/` doesn't compile. `prepublishOnly` runs the build, `bun test` and the
-pack smoke test; publishing is done by hand (`npm publish`, 2FA).
+pack smoke test. Releases go out from GitHub Actions (`.github/workflows/publish.yml`): bump and tag on main with
+`npm version <x.y.z> -m "release %s" && git push origin main --follow-tags`, and the tag's workflow checks that it
+matches package.json, publishes with provenance (a `-pre` version to the `next` dist-tag) and makes the GitHub release.
+npm auth is trusted publishing (this repo and `publish.yml` as a trusted publisher of @typetorch/cli on npmjs.com) or an
+`NPM_TOKEN` repository secret. `.github/workflows/ci.yml` runs the typecheck, `bun test` (with Lune and Rojo), the build
+and the pack smoke test on every push to main and every PR.
 
 `bun run compile` builds a single binary (`release/typetorch`).
 

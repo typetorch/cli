@@ -52,8 +52,11 @@ export interface KeyFileInfo {
 	createdAt: string;
 }
 
+/** The home folder as the environment says now (Node's homedir() does; Bun's keeps the value from startup). */
+const home = () => (process.platform === "win32" ? process.env.USERPROFILE : process.env.HOME) || homedir();
+
 export function defaultKeyFile(universeId: number, role: KeyRole): string {
-	return join(homedir(), ".config", "typetorch", "keys", role === "main" ? `${universeId}.key` : `${universeId}.fallback.key`);
+	return join(home(), ".config", "typetorch", "keys", role === "main" ? `${universeId}.key` : `${universeId}.fallback.key`);
 }
 
 /** A key-path variable from the real environment only (not from an env file, not from a .env Bun loaded). */
