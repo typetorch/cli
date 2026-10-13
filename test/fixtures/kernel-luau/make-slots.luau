@@ -6,6 +6,8 @@
 --   lune run make-slots.luau - <out.rbxm> backup <artifactId>
 --     only ServerStorage.TypeTorchBackup: a small prod payload (Model, Server/boot ModuleScript) stamped like
 --     payloads.ts backupRbxm (BackupArtifactId and the other Backup* attributes)
+--   lune run make-slots.luau <kernel.rbxl> <out.rbxm> backup <artifactId>
+--     the kernel slots and that backup (a kernel deploy that bakes the backup build)
 local roblox = require("@lune/roblox")
 local fs = require("@lune/fs")
 local process = require("@lune/process")
@@ -22,6 +24,17 @@ local function serviceFolder(name)
 	return folder
 end
 
+if process.args[1] ~= "-" then
+	local kernel = roblox.deserializePlace(fs.readFile(process.args[1]))
+	for _, slot in { { "ServerScriptService", "TypeTorchKernel" }, { "ReplicatedStorage", "TypeTorchKernelShared" }, { "ReplicatedFirst", "TypeTorchKernelClient" } } do
+		kernel:GetService(slot[1]):FindFirstChild(slot[2]):Clone().Parent = serviceFolder(slot[1])
+	end
+end
+if process.args[3] == "extra" then
+	local extra = roblox.Instance.new("Folder")
+	extra.Name = "NotASlot"
+	extra.Parent = serviceFolder("ServerScriptService")
+end
 if process.args[3] == "backup" then
 	local id = process.args[4]
 	local model = roblox.Instance.new("Model")
@@ -39,16 +52,6 @@ if process.args[3] == "backup" then
 	boot.Source = "return { boot = function() return function() end end } -- " .. id .. "\n"
 	boot.Parent = model:FindFirstChild("Server")
 	model.Parent = serviceFolder("ServerStorage")
-else
-	local kernel = roblox.deserializePlace(fs.readFile(process.args[1]))
-	for _, slot in { { "ServerScriptService", "TypeTorchKernel" }, { "ReplicatedStorage", "TypeTorchKernelShared" }, { "ReplicatedFirst", "TypeTorchKernelClient" } } do
-		kernel:GetService(slot[1]):FindFirstChild(slot[2]):Clone().Parent = serviceFolder(slot[1])
-	end
-	if process.args[3] == "extra" then
-		local extra = roblox.Instance.new("Folder")
-		extra.Name = "NotASlot"
-		extra.Parent = serviceFolder("ServerScriptService")
-	end
 end
 fs.writeFile(process.args[2], roblox.serializeModel({ root }))
 print("ok")

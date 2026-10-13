@@ -1,7 +1,8 @@
 # Incident 2026-10-13: the automatic backup refresh put every new server on the hot-asset upload path
 
 For TypeTorch beta testers and the agents working in their games. Read **Am I affected?** first; if you are, do
-**Fix it now** before your next prod release.
+**Fix it now** before your next prod release. The same day it **recurred through `typetorch kernel deploy`** with the
+first fix in place; see **Recurrence**.
 
 ## Summary
 
@@ -71,7 +72,36 @@ place publish, run the same sync.
   `failed`), so "all new servers load uploads" is visible in the events table.
 - **Both are needed:** an old framework ignores the stamp; an old CLI never writes it. Upgrade both, then run one
   `typetorch assets sync --deploy prod` so the lock matches the place.
-- **Not covered yet:** `typetorch kernel deploy` also publishes the place and doesn't stamp; run the sync after it.
+- **Not covered by that fix:** `typetorch kernel deploy` also publishes the place and didn't stamp. It recurred that
+  way the same day; see **Recurrence** for the follow-up fix.
+
+## Recurrence: `typetorch kernel deploy` (same day, with the fixed framework)
+
+**What happened.** The game ran the fixed framework (0.5.3) on prod and its lock matched the place's newest published
+version vN. Someone ran `typetorch kernel deploy --base published --yes`, which patched the kernel into vN, baked the
+backup build, and saved the place as vN+2 (another save, vN+1, sat in between). The new backup carried **no**
+`HotAssetsPlaceVersion` / `HotAssetsSavedAs`: only the backup refresh passed the lock to the save task (CLI 0.10.2), and
+`kernel deploy` never did, so the task skipped the stamp. New servers saw lock vN against place vN+2 with no vouch and
+took the upload path: the same broken client. Fixed in the game by `typetorch assets sync --deploy prod` (lock -> vN+2).
+
+**The follow-up fix (`typetorch/cli`, this PR).** Every CLI command that saves the place now handles the lock:
+
+| Command | Publishes the place | Now |
+| --- | --- | --- |
+| automatic backup refresh, `typetorch backup refresh` | yes (SavePlaceAsync) | stamps (first fix) |
+| `typetorch kernel deploy` (default luau engine) | yes (SavePlaceAsync) | stamps the backup it bakes, checks the stamp in the verify task, prints the outcome; warns before the y/N when it can't |
+| `typetorch kernel deploy --no-backup`, or no prod head to bake | yes | nothing to stamp: warns before the y/N and after, with the fix |
+| `typetorch kernel restore --version <n>` | yes (republishes vn as a new version) | stamps vn's backup for the new version when vn's copies are the lock's (the lock is vn, or vn's backup vouched for it) |
+| `typetorch kernel deploy --place-file` / `--replace-place`, `typetorch kernel restore <file>` | yes (place file upload) | can't stamp: warns after the publish with the fix |
+| Studio publish | yes | outside the CLI: run `typetorch assets sync --deploy prod` after it |
+
+The stamp rule is the same everywhere: the save's hot-asset copies are the lock's when the lock names the version the
+save starts from, or that version's backup vouched for the lock as that version. The claim names the version the save
+becomes (newest + 1), and the framework accepts it only on exactly that version.
+
+**What to do.** Upgrade the CLI to the release with this fix. Until then, after **any** `kernel deploy` or `kernel
+restore`, check `typetorch assets status --json` and run `typetorch assets sync --deploy prod` when
+`placeVersion != lockPlaceVersion`.
 
 ## For agents working in an affected game
 

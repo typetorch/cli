@@ -734,6 +734,10 @@ servers run all fail. It should be at most one deploy behind:
   servers on exactly that version keep adopting the place's copies; any later publish has another version, so the
   claim ends there. When the claim can't be made (the lock is for another version), the automatic refresh is skipped
   with the fix (`typetorch assets sync --deploy <branch>`), and `backup refresh` warns before the y/N and after.
+  `typetorch kernel deploy` (it bakes the backup build too) and `typetorch kernel restore --version <n>` stamp the same
+  way, warn before the y/N when they can't (a lock for another version; `--no-backup` or no prod head, so no backup to
+  stamp), and print the outcome after. A place file publish (`--place-file`, `--replace-place`, `kernel restore
+  <file>`) can't stamp: it warns after with the same fix.
 - **A build taken down by moderation:** `typetorch deploy --reupload <build>` uploads the exact bytes kept at upload
   (`<state dir>/payloads`) as a NEW asset (uploads.jsonl `reuploadOf` = the old asset id), waits for moderation and
   deploys it like any deploy (the cloud test, the approval policy: prod = your y/N or `typetorch approve`; a new seq,

@@ -41,6 +41,16 @@ export function backupSlotsFile(artifactId: string): string {
 	return out;
 }
 
+/** A kernel fixture's slots plus ServerStorage.TypeTorchBackup (a kernel deploy that bakes the backup build). */
+export function kernelBackupSlotsFile(kernel: string, artifactId: string): string {
+	const out = join(dir, `${kernel}-backup-${artifactId}.slots.rbxm`);
+	if (!existsSync(out)) {
+		const r = Bun.spawnSync([lune, "run", join(fixtures, "kernel-luau", "make-slots.luau"), join(dir, `${kernel}.rbxl`), out, "backup", artifactId], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+		if (r.exitCode !== 0) throw new Error(r.stderr.toString());
+	}
+	return out;
+}
+
 let runs = 0;
 export const nextRun = () => ++runs;
 

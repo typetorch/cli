@@ -58,7 +58,9 @@ import { branchChannel } from "../naming.ts";
 import { RbxmError } from "../rbxm.ts";
 import { KEY_FILE_FLAGS, openCloud, project, projectStateDir, noteRegistryFlags, readHistory, signingKeyPaths, type History } from "./common.ts";
 import { addBackupToProject, BACKUP_FILE, BACKUP_SLOT, BackupError, backupHead, backupRbxm, findKeptPayload, PAYLOADS_DIR, type BackupInfo } from "../payloads.ts";
-import { luauDeploy, luauRestore, type LuauDeps } from "../kernel-luau.ts";
+import { luauDeploy, luauRestore, type HotAssetsInput, type LuauDeps } from "../kernel-luau.ts";
+import { readAssetsLock } from "../assets.ts";
+import { assetsNote, publishedAssets } from "../hotassets-vouch.ts";
 import { readSlotsRbxm, settingValues, slotsProject, TASK_TIMEOUT_MAX } from "../kernelpatch-task.ts";
 import { announce, markPosterFor } from "../marks.ts";
 import { readSharedSeq, type SharedSeq } from "../seqstore.ts";
@@ -351,6 +353,21 @@ const PLACE_MAGIC = "<roblox!";
 function displayPath(root: string, path: string): string {
 	const rel = relative(root, path);
 	return (rel && !rel.startsWith("..") && !isAbsolute(rel) ? rel : path).replace(/\\/g, "/");
+}
+
+/**
+ * The hot-asset lockfile's placeVersion, for every command here that saves the place: the luau engine's save tasks stamp
+ * the backup so new servers keep adopting the place's copies; a place file publish can't, and says so (hotassets-vouch.ts).
+ */
+export function hotAssetsInput(proj: Project): HotAssetsInput | undefined {
+	const lockPlaceVersion = readAssetsLock(proj.root)?.placeVersion;
+	return lockPlaceVersion === undefined ? undefined : { lockPlaceVersion, branch: proj.config.defaultBranch };
+}
+
+/** After a place file publish: new servers on the new version load hot assets from their uploads unless the lock names it. */
+function fileAssetsNote(proj: Project, after: number | null) {
+	const assets = hotAssetsInput(proj);
+	if (assets) assetsNote(publishedAssets(assets.lockPlaceVersion, after), assets.branch, "  ");
 }
 
 /** Why `--engine splice|lune` without `--place-file` can't download the place, and what to do instead. */
@@ -652,6 +669,7 @@ async function luauFlow(args: ParsedArgs, prepared: PreparedKernel, timeoutSecon
 				loadstring: flagBool(args, "loadstring"),
 				by: gitInfo(proj.root).userName,
 			},
+			assets: hotAssetsInput(proj),
 		},
 		luauDepsKeeping(proj, done),
 	);
@@ -892,6 +910,7 @@ async function publishPatched(input: {
 	if (isJson()) return emitJson({ ...record, placeVersionAfter: after, timings });
 	info(`  publish  ${formatSeconds(timings.publish)}  place version ${input.base} -> ${after ?? "?"}`);
 	info(bold(`published kernel ${identity.version} (hash ${identity.hash.slice(0, 16)}) into ${where}; servers run it after they restart`));
+	fileAssetsNote(proj, after);
 	info(dim(`  recorded in ${join(stateDir, KERNEL_LOG)}`));
 }
 
@@ -970,6 +989,7 @@ async function replacePlaceFlow(args: ParsedArgs, prepared: PreparedKernel) {
 	if (isJson()) return emitJson({ ...summary, placeVersionBefore: before ?? null, placeVersionAfter: after, timings });
 	info(`  publish  ${formatSeconds(timings.publish)}  place version ${before ?? "?"} -> ${after ?? "?"}`);
 	info(bold(`published kernel ${identity.version} (hash ${identity.hash.slice(0, 16)}) to ${where}; servers run it after they restart`));
+	fileAssetsNote(proj, after);
 	info(dim(`  recorded in ${join(stateDir, KERNEL_LOG)}; revert from the place's version history in Creator Hub if needed`));
 }
 
@@ -1014,6 +1034,7 @@ async function kernelRestore(args: ParsedArgs) {
 				timeoutSeconds: taskTimeout(args),
 				// A version with the kernel and no backup, while the default branch has nothing: the same guard as a deploy.
 				guard: (identity) => (restoredKernel(identity) ? checkDefaultBranch(args, proj, { backup: identity.BackupArtifactId !== undefined }) : Promise.resolve()),
+				assets: hotAssetsInput(proj),
 			},
 			luauDepsKeeping(proj, done),
 		);
@@ -1089,4 +1110,5 @@ async function kernelRestore(args: ParsedArgs) {
 	if (isJson()) return emitJson({ ...record, placeVersionAfter: after });
 	info(`  publish  ${formatSeconds(watch.timings.publish)}  place version ${latest ?? "?"} -> ${after ?? "?"}`);
 	info(bold(`published ${basename(path)} to ${where}; servers run it after they restart`));
+	fileAssetsNote(proj, after);
 }

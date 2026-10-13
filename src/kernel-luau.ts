@@ -15,6 +15,11 @@
  *           2. summary, y/N; nobody published since
  *           3. SAVE task on /versions/{n}: only SavePlaceAsync, which republishes version n as the newest version
  *
+ * Hot assets: with a lockfile both save tasks stamp the backup in the saved place (HotAssetsPlaceVersion /
+ * HotAssetsSavedAs) when its hot-asset copies are the lockfile's, so new servers keep adopting them (hotassets-vouch.ts).
+ * Without that (the 2026-10-13 recurrence: a kernel deploy that didn't stamp), every new server loaded every hot asset
+ * from its uploaded version.
+ *
  * Scopes (the place key): universe.place.luau-execution-session:read + :write, asset:read. The place needs "Allow
  * place to be updated using Save Place API" (Creator Hub, per place) and no active Team Create session.
  */
@@ -25,6 +30,7 @@ import {
 	compareSlots,
 	explainSaveError,
 	explainTaskFailure,
+	HOT_ASSETS_SAVED_AS,
 	kernelTaskScript,
 	parseKernelTaskResult,
 	parseRestoreTaskResult,
@@ -37,6 +43,7 @@ import {
 	type SettingValue,
 	type SlotInventory,
 } from "./kernelpatch-task.ts";
+import { assetsMismatch, assetsNote, backupAssets, noBackupToVouch, type BackupAssets } from "./hotassets-vouch.ts";
 import { bold, dim, emitJson, formatBytes, formatSeconds, info, isJson, Stopwatch, warn } from "./log.ts";
 import { ApiError, TaskStillRunningError, type LuauTaskResult, type OpenCloud } from "./opencloud.ts";
 import type { SlotRef } from "./placepatch.ts";
@@ -115,6 +122,20 @@ export interface DeployInput {
 	reportDisplay: string;
 	/** Added to every kernel-deploys.jsonl record. */
 	logFields: Record<string, unknown>;
+	/** The hot-asset lockfile's placeVersion (the project has one) and the branch its fix command names. */
+	assets?: HotAssetsInput;
+}
+
+export interface HotAssetsInput {
+	lockPlaceVersion: number;
+	branch: string;
+}
+
+/** The warning before a save's y/N when new servers on the saved version would load every hot asset from its upload. */
+function assetsWarningBefore(assets: HotAssetsInput, base: number, stamped: { holds: boolean } | undefined): string | undefined {
+	if (stamped?.holds) return undefined;
+	const why = stamped ? assetsMismatch(assets.lockPlaceVersion, base).replace("<branch>", assets.branch) : `${noBackupToVouch(assets.lockPlaceVersion)}. Run typetorch assets sync --deploy ${assets.branch} after it`;
+	return `hot assets: ${why}`;
 }
 
 /** The summary printed before the y/N (and by --dry-run). */
@@ -242,6 +263,7 @@ export async function luauDeploy(input: DeployInput, deps: LuauDeps): Promise<vo
 		install: input.install,
 		identitySlot: input.identitySlot,
 		expect: { KernelVersion: input.kernel.version, KernelHash: input.kernel.hash },
+		...(input.assets ? { assets: { lockPlaceVersion: input.assets.lockPlaceVersion, savedAs: base.newest + 1 } } : {}),
 	};
 	const checkRun = await watch.stage("check", () => runTask(deps, { universeId, placeId, version: base.version, script: kernelTaskScript(config), timeoutSeconds: input.timeoutSeconds, binaryInput: sent.path, what: "check task" }));
 	const check = parseKernelTaskResult(checkRun.results);
@@ -254,6 +276,11 @@ export async function luauDeploy(input: DeployInput, deps: LuauDeps): Promise<vo
 		for (const line of deploySummaryLines({ where: input.where, base, check, kernel: input.kernel, slotsFile: input.slotsFile, slotsBytes: input.slotsBytes.length, seconds: watch.timings.check })) info(`  ${line}`);
 		info(dim(`  report   ${input.reportDisplay}`));
 		for (const line of check.warnings) warn(line);
+		if (input.assets) {
+			const assetsWarning = assetsWarningBefore(input.assets, base.version, check.assets);
+			if (assetsWarning) warn(assetsWarning);
+			else info(`  ${pad("assets")} the new backup vouches for the hot-asset lock (v${input.assets.lockPlaceVersion}) as v${base.newest + 1}: new servers keep adopting the place's copies`);
+		}
 		info("");
 	}
 	if (problems.length > 0) {
@@ -327,6 +354,7 @@ export async function luauDeploy(input: DeployInput, deps: LuauDeps): Promise<vo
 			const v = parseKernelTaskResult(verifyRun.results);
 			const vProblems = [...v.problems];
 			for (const [key, value] of Object.entries(config.expect)) if (v.identity[key] !== value) vProblems.push(`the saved kernel's ${key} is ${v.identity[key] ?? "missing"}, expected ${value}`);
+			if (save.assets?.holds && v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] !== String(save.assets.savedAs)) vProblems.push(`the saved backup's ${HOT_ASSETS_SAVED_AS} is ${v.identity[`Backup${HOT_ASSETS_SAVED_AS}`] ?? "missing"}, expected ${save.assets.savedAs}`);
 			vProblems.push(...compareSlots(v.newSlots, input.cliSlots, v.hashMode));
 			if (save.outside.afterD && v.outside.rootD && v.outside.rootD !== save.outside.afterD) vProblems.push(`the content outside the kernel in v${saved.version} differs from what the save task wrote (descriptor ${v.outside.rootD.slice(0, 12)} vs ${save.outside.afterD.slice(0, 12)})`);
 			verify = { ok: vProblems.length === 0, problems: vProblems, task: verifyRun.path };
@@ -335,7 +363,8 @@ export async function luauDeploy(input: DeployInput, deps: LuauDeps): Promise<vo
 		}
 	}
 	const timings = watch.total();
-	const done = { ...record, placeVersionAfter: saved?.version ?? null, publishedAfter: saved?.published ?? null, verify, task: saveRun.path, timings };
+	const assets = input.assets ? backupAssets(input.assets.lockPlaceVersion, base.version, save.assets, saved?.version) : undefined;
+	const done = { ...record, placeVersionAfter: saved?.version ?? null, publishedAfter: saved?.published ?? null, verify, task: saveRun.path, timings, ...(assets ? { assets } : {}) };
 	deps.record({ event: "kernel-published", ...done });
 	writeFileSync(input.reportPath, JSON.stringify({ ...report, save, saved, verify }, null, "\t"));
 	if (isJson()) return emitJson(done);
@@ -345,6 +374,7 @@ export async function luauDeploy(input: DeployInput, deps: LuauDeps): Promise<vo
 	if (verify && !verify.ok) warn(`the verify task on v${saved?.version} found problems:\n  - ${verify.problems.slice(0, 10).join("\n  - ")}\n  undo: typetorch kernel restore --version ${base.version}`);
 	else if (verify) info(`  verify   ${formatSeconds(timings.verify ?? 0)}  v${saved?.version}: kernel ${input.kernel.version}, slots and outside content as checked`);
 	info(bold(`published kernel ${input.kernel.version} (hash ${input.kernel.hash.slice(0, 16)}) into ${input.where}; servers run it after they restart`));
+	if (input.assets) assetsNote(assets, input.assets.branch, "  ");
 	info(dim(`  undo: typetorch kernel restore --version ${base.version}`));
 }
 
@@ -359,6 +389,8 @@ export interface RestoreInput {
 	timeoutSeconds: number;
 	/** Runs after the check, before the y/N (and in a dry run): throws to stop (kernel.ts guardDefaultBranch). */
 	guard?: (identity: Record<string, unknown>) => Promise<void>;
+	/** The hot-asset lockfile's placeVersion (the project has one) and the branch its fix command names. */
+	assets?: HotAssetsInput;
 }
 
 /** `typetorch kernel restore --version <n>`: republish version n through SavePlaceAsync in a task on it. */
@@ -376,7 +408,13 @@ export async function luauRestore(input: RestoreInput, deps: LuauDeps): Promise<
 	if (newest === undefined) throw new LuauEngineError("the place has no versions");
 	if (version > newest) throw new LuauEngineError(`place ${placeId} has no v${version} yet (newest: v${newest})`);
 	const listed = versions.find((v) => v.version === version);
-	const config = { placeId, placeVersion: version, save: false, identitySlot: input.identitySlot };
+	const config = {
+		placeId,
+		placeVersion: version,
+		save: false,
+		identitySlot: input.identitySlot,
+		...(input.assets ? { assets: { lockPlaceVersion: input.assets.lockPlaceVersion, savedAs: newest + 1 } } : {}),
+	};
 	const checkRun = await watch.stage("check", () => runTask(deps, { universeId, placeId, version, script: restoreTaskScript(config), timeoutSeconds: input.timeoutSeconds, what: "restore check task" }));
 	const check = parseRestoreTaskResult(checkRun.results);
 	if (check.problem) throw new LuauEngineError(check.problem);
@@ -387,6 +425,11 @@ export async function luauRestore(input: RestoreInput, deps: LuauDeps): Promise<
 	}
 	warn(`this publishes v${version} as the new live version of place ${placeId}: everything published after it (Studio work, other kernel deploys) leaves the live place (it stays in version history)${version < newest ? ` (v${version + 1}..v${newest})` : ""}`);
 	if (version === newest) warn(`v${version} is already the newest version: this only publishes it again`);
+	if (input.assets) {
+		const assetsWarning = assetsWarningBefore(input.assets, version, check.assets);
+		if (assetsWarning) warn(assetsWarning);
+		else if (!isJson()) info(`  assets   v${version}'s backup vouches for the hot-asset lock (v${input.assets.lockPlaceVersion}) as v${newest + 1}: new servers keep adopting the place's copies`);
+	}
 	if (input.guard) await input.guard(check.identity);
 	if (input.dryRun) {
 		if (isJson()) return emitJson({ dryRun: true, placeId, version, newest, check });
@@ -425,11 +468,13 @@ export async function luauRestore(input: RestoreInput, deps: LuauDeps): Promise<
 		throw new LuauEngineError(explained);
 	}
 	const saved = await watch.stage("find", () => findSavedVersion(deps, placeId, newest));
-	const done = { ...record, placeVersionAfter: saved?.version ?? null, publishedAfter: saved?.published ?? null, task: saveRun.path, timings: watch.total() };
+	const assets: BackupAssets | undefined = input.assets ? backupAssets(input.assets.lockPlaceVersion, version, save.assets, saved?.version) : undefined;
+	const done = { ...record, placeVersionAfter: saved?.version ?? null, publishedAfter: saved?.published ?? null, task: saveRun.path, timings: watch.total(), ...(assets ? { assets } : {}) };
 	deps.record({ event: "kernel-restored", ...done });
 	if (isJson()) return emitJson(done);
 	info(`  save     ${formatSeconds(watch.timings.save)}  place version ${newest} -> ${saved ? `${saved.version}${saved.published ? " (published)" : " (NOT marked published)"}` : "? (not in the version list yet)"}`);
 	info(bold(`published v${version} of place ${placeId} again; servers run it after they restart`));
+	if (input.assets) assetsNote(assets, input.assets.branch, "  ");
 }
 
 /** The place setting, for help texts and doctor. */
