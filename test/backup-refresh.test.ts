@@ -13,7 +13,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } f
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parseArgs } from "../src/args";
-import { autoRefreshBackup, lastBackupHere, provenHealthy, refreshBackup, type BuildRef } from "../src/commands/backup";
+import { autoRefreshBackup, backupAssets, lastBackupHere, provenHealthy, refreshBackup, type BuildRef } from "../src/commands/backup";
 import { deployCommand, deployFlags } from "../src/commands/deploy";
 import { loadProject, validateBackup } from "../src/config";
 import { appendUpload, readUploads } from "../src/deployments";
@@ -142,6 +142,35 @@ describe.skipIf(!hasLune)("backup refresh through the luau engine (fake Open Clo
 		expect(dry.tasks.map((t) => t.kind)).toEqual(["check"]);
 	});
 
+	// The saved place's backup attributes, as the verify task reads them.
+	const backupIdentity = (cloud: ReturnType<typeof fakeCloud>, version: number) => {
+		const kernel = { service: "ServerScriptService", name: "TypeTorchKernel" };
+		const script = kernelTaskScript({ mode: "verify", placeId: 2, placeVersion: version, slots: [kernel], settings: [], install: false, identitySlot: kernel, expect: {} });
+		return parseKernelTaskResult([harness(script, cloud.places.get(version)!, undefined, { placeVersion: version }).result]).identity;
+	};
+
+	test("hot assets: a lock made on the base version is vouched for in the saved version, and carried by the next refresh", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"));
+		const first = await refreshBackup(input("abc1234-aaaaaa", { assetsLock: 57 }), makeDeps(cloud.oc));
+		expect(first).toMatchObject({ status: "refreshed", placeVersionAfter: 58, verified: true, assets: { kept: true, lockPlaceVersion: 57 } });
+		expect(cloud.tasks[1].script).toContain('["assets"] = { ["lockPlaceVersion"] = 57, ["savedAs"] = 58 }');
+		expect(backupIdentity(cloud, 58)).toMatchObject({ BackupArtifactId: "abc1234-aaaaaa", BackupHotAssetsPlaceVersion: "57", BackupHotAssetsSavedAs: "58" });
+		// The lock still says 57 and the place is 58 now: the old backup's claim carries over (a chain of refreshes).
+		const second = await refreshBackup(input("abc1234-bbbbbb", { assetsLock: 57, requireAssets: true }), makeDeps(cloud.oc));
+		expect(second).toMatchObject({ status: "refreshed", placeVersionAfter: 59, assets: { kept: true } });
+		expect(backupIdentity(cloud, 59)).toMatchObject({ BackupArtifactId: "abc1234-bbbbbb", BackupHotAssetsPlaceVersion: "57", BackupHotAssetsSavedAs: "59" });
+	});
+
+	test("hot assets: a lock for another version is refused when required (auto), else saved with a warning and no claim", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"));
+		const refused = await refreshBackup(input("abc1234-aaaaaa", { assetsLock: 50, requireAssets: true }), makeDeps(cloud.oc));
+		expect(refused).toMatchObject({ status: "skipped", reason: expect.stringContaining("the hot-asset lock (typetorch.assets.lock.json) is for place v50 and the place is v57") });
+		expect(cloud.tasks.map((t) => t.kind)).toEqual(["check"]);
+		const saved = await refreshBackup(input("abc1234-aaaaaa", { assetsLock: 50 }), makeDeps(cloud.oc));
+		expect(saved).toMatchObject({ status: "refreshed", placeVersionAfter: 58, verified: true, assets: { kept: false, reason: expect.stringContaining("typetorch assets sync --deploy") } });
+		expect(backupIdentity(cloud, 58).BackupHotAssetsPlaceVersion).toBeUndefined();
+	});
+
 	test("the manual y/N: a 'no' saves nothing", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
 		const d = makeDeps(cloud.oc, { confirm: async () => false });
@@ -152,8 +181,9 @@ describe.skipIf(!hasLune)("backup refresh through the luau engine (fake Open Clo
 
 describe("the automatic refresh after a prod release", () => {
 	const previous = { artifactId: "abc1234-aaaaaa", assetId: 111, seq: 7, deployedAt: new Date(NOW - 5 * HOUR).toISOString() };
-	const run = async (patch: Partial<Parameters<typeof autoRefreshBackup>[0]>, config: Record<string, unknown> = {}) => {
+	const run = async (patch: Partial<Parameters<typeof autoRefreshBackup>[0]>, config: Record<string, unknown> = {}, lockPlaceVersion?: number) => {
 		const root = gameRoot(config);
+		if (lockPlaceVersion !== undefined) writeFileSync(join(root, "typetorch.assets.lock.json"), JSON.stringify({ v: 1, placeVersion: lockPlaceVersion, assets: {} }));
 		const proj = loadProject(join(root, "typetorch.json"));
 		const result = await quiet(() => autoRefreshBackup({ proj, action: "deploy", branch: "prod", branchChannel: "prod", previous, interactive: true, deps: { fleet: fleet([{}]), now: NOW }, ...patch }));
 		return { ...result, root };
@@ -184,6 +214,25 @@ describe("the automatic refresh after a prod release", () => {
 		expect(error).toBeUndefined();
 		expect(value).toMatchObject({ status: "refreshed", artifactId: "abc1234-aaaaaa", placeVersionAfter: 58 });
 	});
+
+	test.skipIf(!hasLune)("a hot-asset lock: kept valid (the new backup vouches for it), or the refresh is skipped with the fix", async () => {
+		const bytes = new Uint8Array(readFileSync(backupSlotsFile("abc1234-aaaaaa")));
+		const slots = async () => ({ bytes, cliSlots: readSlotsRbxm(bytes, [BACKUP_SLOT], BACKUP_SLOT).slots });
+		const kept = fakeCloud(place("game-installed.rbxl"));
+		const ok = await run({ deps: { fleet: fleet([{}]), now: NOW, luau: makeDeps(kept.oc), slots } }, {}, 57);
+		expect(ok.value).toMatchObject({ status: "refreshed", placeVersionAfter: 58, assets: { kept: true, lockPlaceVersion: 57 } });
+		const stale = fakeCloud(place("game-installed.rbxl"));
+		const skipped = await run({ deps: { fleet: fleet([{}]), now: NOW, luau: makeDeps(stale.oc), slots } }, {}, 50);
+		expect(skipped.value).toMatchObject({ status: "skipped", reason: expect.stringContaining("Run typetorch assets sync --deploy <branch> first") });
+		expect(stale.tasks.map((t) => t.kind)).toEqual(["check"]);
+	});
+});
+
+test("hot assets after a refresh: kept only when the save landed on the version the backup names", () => {
+	expect(backupAssets(57, 57, { holds: true, lockPlaceVersion: 57, savedAs: 58 }, 58)).toEqual({ kept: true, lockPlaceVersion: 57 });
+	expect(backupAssets(57, 57, { holds: true, lockPlaceVersion: 57, savedAs: 58 }, 59)).toMatchObject({ kept: false, reason: expect.stringContaining("the save became v59, not v58") });
+	expect(backupAssets(57, 57, { holds: true, lockPlaceVersion: 57, savedAs: 58 }, undefined)).toMatchObject({ kept: false });
+	expect(backupAssets(50, 57, { holds: false }, 58)).toMatchObject({ kept: false, reason: expect.stringContaining("is for place v50 and the place is v57") });
 });
 
 // deploy --reupload --------------------------------------------------------------------------------------------------------

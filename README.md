@@ -726,8 +726,14 @@ servers run all fail. It should be at most one deploy behind:
   one line (`backup      not refreshed: ...`). A rollback never moves the backup.
 - **Now:** `typetorch backup refresh [--build <x>]` (default: the prod head; y/N or `--yes`; `--dry-run`; an unproven
   build needs `--force`).
-- `doctor` shows the place's backup build and its age. Each save is a new place version: a project with hot assets
-  then loads them from their asset versions on new servers until the next `typetorch assets sync`.
+- `doctor` shows the place's backup build and its age.
+- **Hot assets:** each save publishes a new place version, and new servers adopt the place's hot-asset copies only for
+  the version `typetorch.assets.lock.json` names. With a lockfile, the save stamps the new backup with
+  `HotAssetsPlaceVersion` (the lock's version) and `HotAssetsSavedAs` (the version the save becomes) when the place's
+  copies are the lock's: the lock was made on the base version, or the old backup vouched for it. Framework 0.5.3+
+  servers on exactly that version keep adopting the place's copies; any later publish has another version, so the
+  claim ends there. When the claim can't be made (the lock is for another version), the automatic refresh is skipped
+  with the fix (`typetorch assets sync --deploy <branch>`), and `backup refresh` warns before the y/N and after.
 - **A build taken down by moderation:** `typetorch deploy --reupload <build>` uploads the exact bytes kept at upload
   (`<state dir>/payloads`) as a NEW asset (uploads.jsonl `reuploadOf` = the old asset id), waits for moderation and
   deploys it like any deploy (the cloud test, the approval policy: prod = your y/N or `typetorch approve`; a new seq,
