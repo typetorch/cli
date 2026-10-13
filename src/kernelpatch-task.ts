@@ -242,6 +242,12 @@ export interface RestoreTaskConfig {
 	placeVersion: number;
 	save: boolean;
 	identitySlot: SlotRef;
+	/**
+	 * Hot assets: the lockfile's placeVersion and the version the republish becomes (the newest version + 1). The
+	 * version's backup (when it has one) gets HotAssetsPlaceVersion / HotAssetsSavedAs when its copies match the lockfile,
+	 * the same claim as kernel task step 4b (reported as `assets`).
+	 */
+	assets?: { lockPlaceVersion: number; savedAs: number };
 }
 
 /** The restore task: reports the version's kernel and size; with `save` it then only calls SavePlaceAsync. */
@@ -1080,6 +1086,18 @@ result.instances = instances
 if type(result.placeVersion) == "number" and result.placeVersion ~= 0 and result.placeVersion ~= CONFIG.placeVersion then
 	result.problem = "this task runs on place version " .. result.placeVersion .. ", the restore asked for v" .. CONFIG.placeVersion
 else
+-- Hot assets: the republished version keeps this version's hot-asset copies, so its backup can vouch for them under
+-- the version the republish becomes (kernel task step 4b has the same rule).
+local storage = findService("ServerStorage")
+local backup = if CONFIG.assets ~= nil and storage then storage:FindFirstChild(BACKUP_NAME) else nil
+if backup ~= nil then
+	local lock = CONFIG.assets.lockPlaceVersion
+	local holds = lock == CONFIG.placeVersion
+		or (tonumber(result.identity["Backup" .. HOT_ASSETS_PLACE_VERSION]) == lock and tonumber(result.identity["Backup" .. HOT_ASSETS_SAVED_AS]) == CONFIG.placeVersion)
+	backup:SetAttribute(HOT_ASSETS_PLACE_VERSION, if holds then lock else nil)
+	backup:SetAttribute(HOT_ASSETS_SAVED_AS, if holds then CONFIG.assets.savedAs else nil)
+	result.assets = { holds = holds, lockPlaceVersion = lock, savedAs = if holds then CONFIG.assets.savedAs else nil }
+end
 __SAVE__end
 result.ok = result.problem == nil and (not CONFIG.save or result.saved == true)
 result.timings.total = clock() - started
@@ -1187,13 +1205,19 @@ export function parseKernelTaskResult(results: unknown[]): KernelTaskResult {
 		},
 		hashMode: str(raw.hashMode),
 		...(isRecord(raw.assets)
-			? { assets: { holds: raw.assets.holds === true, lockPlaceVersion: typeof raw.assets.lockPlaceVersion === "number" ? raw.assets.lockPlaceVersion : undefined, savedAs: typeof raw.assets.savedAs === "number" ? raw.assets.savedAs : undefined } }
+			? { assets: parseAssets(raw.assets) }
 			: {}),
 		inputBytes: typeof raw.inputBytes === "number" ? raw.inputBytes : undefined,
 		sourceUnreadable: num(raw.sourceUnreadable),
 		timings: isRecord(raw.timings) ? Object.fromEntries(Object.entries(raw.timings).map(([k, v]) => [k, num(v)])) : {},
 	};
 }
+
+const parseAssets = (raw: Record<string, unknown>) => ({
+	holds: raw.holds === true,
+	lockPlaceVersion: typeof raw.lockPlaceVersion === "number" ? raw.lockPlaceVersion : undefined,
+	savedAs: typeof raw.savedAs === "number" ? raw.savedAs : undefined,
+});
 
 export interface RestoreTaskResult {
 	ok: boolean;
@@ -1206,6 +1230,8 @@ export interface RestoreTaskResult {
 	services: number;
 	instances: number;
 	timings: Record<string, number>;
+	/** Config `assets` and the version has a backup: whether it vouches for the lockfile's copies. */
+	assets?: { holds: boolean; lockPlaceVersion?: number; savedAs?: number };
 }
 
 export function parseRestoreTaskResult(results: unknown[]): RestoreTaskResult {
@@ -1221,6 +1247,7 @@ export function parseRestoreTaskResult(results: unknown[]): RestoreTaskResult {
 		services: num(raw.services),
 		instances: num(raw.instances),
 		timings: isRecord(raw.timings) ? Object.fromEntries(Object.entries(raw.timings).map(([k, v]) => [k, num(v)])) : {},
+		...(isRecord(raw.assets) ? { assets: parseAssets(raw.assets) } : {}),
 	};
 }
 

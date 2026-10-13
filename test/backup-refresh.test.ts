@@ -171,6 +171,14 @@ describe.skipIf(!hasLune)("backup refresh through the luau engine (fake Open Clo
 		expect(backupIdentity(cloud, 58).BackupHotAssetsPlaceVersion).toBeUndefined();
 	});
 
+	test("hot assets: the verify task checks the stamp; a saved version without it is not kept", async () => {
+		const plain = fakeCloud(place("game-installed.rbxl"));
+		expect(await refreshBackup(input("abc1234-aaaaaa"), makeDeps(plain.oc))).toMatchObject({ status: "refreshed", placeVersionAfter: 58 });
+		const cloud = fakeCloud(place("game-installed.rbxl"), { replaceSaved: () => plain.places.get(58)! });
+		const outcome = await refreshBackup(input("abc1234-aaaaaa", { assetsLock: 57 }), makeDeps(cloud.oc));
+		expect(outcome).toMatchObject({ status: "refreshed", verified: false, problems: [expect.stringContaining("HotAssetsSavedAs is missing")], assets: { kept: false, reason: expect.stringContaining("found no HotAssetsSavedAs = 58") } });
+	});
+
 	test("the manual y/N: a 'no' saves nothing", async () => {
 		const cloud = fakeCloud(place("game-installed.rbxl"));
 		const d = makeDeps(cloud.oc, { confirm: async () => false });

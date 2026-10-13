@@ -35,7 +35,7 @@ import {
 	type SlotInventory,
 } from "../src/kernelpatch-task";
 import { setOutputMode } from "../src/log";
-import { dir, fakeCloud, harness, hasLune, lune, makeDeps, nextRun, place, quiet, slotsFile } from "./fixtures/kernel-luau/lune-cloud";
+import { dir, fakeCloud, harness, hasLune, kernelBackupSlotsFile, lune, makeDeps, nextRun, place, quiet, slotsFile } from "./fixtures/kernel-luau/lune-cloud";
 import { OpenCloud, setLuauRetryDelay } from "../src/opencloud";
 import { writeRbxm } from "../src/rbxm";
 import { DOWNLOAD_SCOPE_HINT, taskTimeout } from "../src/commands/kernel";
@@ -495,6 +495,108 @@ describe.skipIf(!hasLune)("kernel deploy --engine luau (fake Open Cloud, tasks i
 		const ok = await quiet(() => luauDeploy(deployInput({ dryRun: true, baseFlag: "published" }), makeDeps(cloud.oc)));
 		expect(ok.error).toBeUndefined();
 		expect(ok.json).toMatchObject({ base: { version: 57, skipped: [58] } });
+	});
+});
+
+// Hot assets (the 2026-10-13 recurrence: a kernel deploy published the place without the backup's vouch, so new servers
+// loaded every hot asset from its upload). The deploy bakes the backup build, so its save stamps it like a backup refresh.
+const BACKUP_REF = { service: "ServerStorage", name: "TypeTorchBackup" };
+
+function deployWithBackup(lockPlaceVersion: number | undefined, patch: Partial<DeployInput> = {}): DeployInput {
+	const slotsBytes = new Uint8Array(readFileSync(kernelBackupSlotsFile("kernel-v2", "abc1234-kkkkkk")));
+	const slots = [...SLOTS, BACKUP_REF];
+	return deployInput({ slots, slotsBytes, cliSlots: readSlotsRbxm(slotsBytes, slots, IDENTITY).slots, yes: true, ...(lockPlaceVersion !== undefined ? { assets: { lockPlaceVersion, branch: "prod" } } : {}), ...patch });
+}
+
+/** The saved place's kernel and backup attributes, as a verify task reads them. */
+function savedIdentity(cloud: ReturnType<typeof fakeCloud>, version: number): Record<string, string> {
+	const script = kernelTaskScript({ mode: "verify", placeId: 2, placeVersion: version, slots: [IDENTITY], settings: [], install: false, identitySlot: IDENTITY, expect: {} });
+	return parseKernelTaskResult([harness(script, cloud.places.get(version)!, undefined, { placeVersion: version }).result]).identity;
+}
+
+describe.skipIf(!hasLune)("hot assets across kernel deploy and restore (fake Open Cloud, tasks in Lune)", () => {
+	test("kernel deploy with a lock made on the base: the new backup vouches for it as the saved version; verified", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"));
+		const d = makeDeps(cloud.oc);
+		const { json, error } = await quiet(() => luauDeploy(deployWithBackup(57), d));
+		expect(error).toBeUndefined();
+		expect(cloud.tasks[1].script).toContain('["assets"] = { ["lockPlaceVersion"] = 57, ["savedAs"] = 58 }');
+		expect(json).toMatchObject({ placeVersionAfter: 58, verify: { ok: true, problems: [] }, assets: { kept: true, lockPlaceVersion: 57 } });
+		expect(d.records.at(-1)).toMatchObject({ event: "kernel-published", assets: { kept: true } });
+		expect(savedIdentity(cloud, 58)).toMatchObject({ KernelVersion: "1.1.0", BackupArtifactId: "abc1234-kkkkkk", BackupHotAssetsPlaceVersion: "57", BackupHotAssetsSavedAs: "58" });
+	});
+
+	test("the recurrence: --base published under an unpublished save, lock on the published base: vouched as newest + 1", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"));
+		cloud.versions.unshift({ version: 58, published: false, hasPublishedField: false });
+		cloud.places.set(58, cloud.places.get(57)!);
+		const { json, error } = await quiet(() => luauDeploy(deployWithBackup(57, { baseFlag: "published" }), makeDeps(cloud.oc)));
+		expect(error).toBeUndefined();
+		expect(json).toMatchObject({ placeVersionAfter: 59, verify: { ok: true }, assets: { kept: true } });
+		expect(savedIdentity(cloud, 59)).toMatchObject({ BackupHotAssetsPlaceVersion: "57", BackupHotAssetsSavedAs: "59" });
+	});
+
+	test("a lock for another version: saved with the fix named, and no claim in the saved backup", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"));
+		const { json, error } = await quiet(() => luauDeploy(deployWithBackup(50), makeDeps(cloud.oc)));
+		expect(error).toBeUndefined();
+		expect(json).toMatchObject({ placeVersionAfter: 58, verify: { ok: true }, assets: { kept: false, reason: expect.stringContaining("is for place v50 and the place is v57") } });
+		expect(savedIdentity(cloud, 58).BackupHotAssetsPlaceVersion).toBeUndefined();
+	});
+
+	test("no backup baked (--no-backup): nothing can vouch, and the outcome says so", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"));
+		const { json, error } = await quiet(() => luauDeploy(deployInput({ yes: true, assets: { lockPlaceVersion: 57, branch: "prod" } }), makeDeps(cloud.oc)));
+		expect(error).toBeUndefined();
+		expect(json).toMatchObject({ placeVersionAfter: 58, assets: { kept: false, reason: expect.stringContaining("no backup build is in the saved place") } });
+	});
+
+	test("without a lock: no assets config, no outcome", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"));
+		const { json } = await quiet(() => luauDeploy(deployWithBackup(undefined), makeDeps(cloud.oc)));
+		expect(cloud.tasks[1].script).not.toContain('["assets"]');
+		expect(json.assets).toBeUndefined();
+		expect(savedIdentity(cloud, 58).BackupHotAssetsSavedAs).toBeUndefined();
+	});
+
+	test("the verify task checks the stamp: a saved version without it is a verify problem and not kept", async () => {
+		// The same deploy without a lock writes an unstamped place; a save that "lost" the stamp leaves that one.
+		const plain = fakeCloud(place("game-installed.rbxl"));
+		expect((await quiet(() => luauDeploy(deployWithBackup(undefined), makeDeps(plain.oc)))).error).toBeUndefined();
+		const cloud = fakeCloud(place("game-installed.rbxl"), { replaceSaved: () => plain.places.get(58)! });
+		const { json, error } = await quiet(() => luauDeploy(deployWithBackup(57), makeDeps(cloud.oc)));
+		expect(error).toBeUndefined();
+		expect(json).toMatchObject({ placeVersionAfter: 58, verify: { ok: false, problems: [expect.stringContaining("HotAssetsSavedAs is missing, expected 58")] }, assets: { kept: false, reason: expect.stringContaining("found no HotAssetsSavedAs = 58") } });
+	});
+
+	test("kernel restore --version: a vouched version is republished still vouched; one without a backup can't be", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"));
+		expect((await quiet(() => luauDeploy(deployWithBackup(57), makeDeps(cloud.oc)))).error).toBeUndefined();
+		const restore = { universeId: 1, placeId: 2, where: "universe 1, place 2", identitySlot: IDENTITY, dryRun: false, yes: true, timeoutSeconds: 300, assets: { lockPlaceVersion: 57, branch: "prod" } };
+		const vouched = await quiet(() => luauRestore({ ...restore, version: 58 }, makeDeps(cloud.oc)));
+		expect(vouched.error).toBeUndefined();
+		expect(vouched.json).toMatchObject({ fromVersion: 58, placeVersionAfter: 59, assets: { kept: true, lockPlaceVersion: 57 } });
+		expect(savedIdentity(cloud, 59)).toMatchObject({ BackupHotAssetsPlaceVersion: "57", BackupHotAssetsSavedAs: "59" });
+		const bare = await quiet(() => luauRestore({ ...restore, version: 56 }, makeDeps(cloud.oc)));
+		expect(bare.json).toMatchObject({ fromVersion: 56, placeVersionAfter: 60, assets: { kept: false, reason: expect.stringContaining("no backup build") } });
+	});
+
+	test("kernel restore --version: a lock the version's backup doesn't vouch for clears the claim; a dry run saves nothing", async () => {
+		const cloud = fakeCloud(place("game-installed.rbxl"));
+		expect((await quiet(() => luauDeploy(deployWithBackup(57), makeDeps(cloud.oc)))).error).toBeUndefined();
+		const restore = { universeId: 1, placeId: 2, where: "universe 1, place 2", identitySlot: IDENTITY, version: 58, dryRun: false, yes: true, timeoutSeconds: 300 };
+		const dry = await quiet(() => luauRestore({ ...restore, dryRun: true, assets: { lockPlaceVersion: 57, branch: "prod" } }, makeDeps(cloud.oc)));
+		expect(dry.json).toMatchObject({ dryRun: true, check: { assets: { holds: true, savedAs: 59 } } });
+		expect(cloud.tasks.at(-1)!.script).not.toContain("SavePlaceAsync");
+		const other = await quiet(() => luauRestore({ ...restore, assets: { lockPlaceVersion: 50, branch: "prod" } }, makeDeps(cloud.oc)));
+		expect(other.json).toMatchObject({ placeVersionAfter: 59, assets: { kept: false, reason: expect.stringContaining("is for place v50 and the place is v58") } });
+		expect(savedIdentity(cloud, 59).BackupHotAssetsPlaceVersion).toBeUndefined();
+		expect(savedIdentity(cloud, 59).BackupArtifactId).toBe("abc1234-kkkkkk");
+	});
+
+	test("the restore task script: the lock goes in only when given", () => {
+		expect(restoreTaskScript({ placeId: 2, placeVersion: 58, save: true, identitySlot: IDENTITY, assets: { lockPlaceVersion: 57, savedAs: 59 } })).toContain('["assets"] = { ["lockPlaceVersion"] = 57, ["savedAs"] = 59 }');
+		expect(restoreTaskScript({ placeId: 2, placeVersion: 58, save: true, identitySlot: IDENTITY })).not.toContain('["assets"]');
 	});
 });
 

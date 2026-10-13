@@ -41,6 +41,16 @@ export function backupSlotsFile(artifactId: string): string {
 	return out;
 }
 
+/** A kernel fixture's slots plus ServerStorage.TypeTorchBackup (a kernel deploy that bakes the backup build). */
+export function kernelBackupSlotsFile(kernel: string, artifactId: string): string {
+	const out = join(dir, `${kernel}-backup-${artifactId}.slots.rbxm`);
+	if (!existsSync(out)) {
+		const r = Bun.spawnSync([lune, "run", join(fixtures, "kernel-luau", "make-slots.luau"), join(dir, `${kernel}.rbxl`), out, "backup", artifactId], { cwd: dir, stdout: "pipe", stderr: "pipe" });
+		if (r.exitCode !== 0) throw new Error(r.stderr.toString());
+	}
+	return out;
+}
+
 let runs = 0;
 export const nextRun = () => ++runs;
 
@@ -73,6 +83,8 @@ export interface FakeOptions extends HarnessOptions {
 	raceTo?: number;
 	/** The save task answers FAILED with this error instead of running. */
 	failSave?: { code: string; message: string };
+	/** The place file a save leaves as the new version instead of the one the task wrote (a save that lost something). */
+	replaceSaved?: (saved: string) => string;
 }
 
 export type TaskKind = "check" | "save" | "verify" | "restore-check" | "restore-save";
@@ -127,7 +139,7 @@ export function fakeCloud(basePlace: string, options: FakeOptions = {}) {
 			if (run.result?.saved && run.saved) {
 				const next = newest() + 1;
 				versions.push({ version: next, published: true, hasPublishedField: true });
-				places.set(next, run.saved);
+				places.set(next, options.replaceSaved ? options.replaceSaved(run.saved) : run.saved);
 			}
 			if (kind === "check" && options.raceTo) versions.push({ version: options.raceTo, published: true, hasPublishedField: true });
 			return { state: "COMPLETE", results: [run.result], path };
