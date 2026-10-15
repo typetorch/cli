@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sourceCandidates } from "../src/build";
-import { BUILD_CACHE_DIR, buildCacheEnabled, cacheUnsupported, removeStrayBuildInfo, restoreBuildCache, saveBuildCache } from "../src/build-cache";
+import { BUILD_CACHE_DIR, buildCacheEnabled, cacheUnsupported, removeStrayBuildInfo, restoreBuildCache, saveBuildCache, withFullInvalidation } from "../src/build-cache";
 import { Settings, useSettings } from "../src/env";
 
 afterEach(() => useSettings(undefined));
@@ -107,5 +107,13 @@ describe("build cache", () => {
 		expect(buildCacheEnabled()).toBe(false);
 		useSettings(new Settings({ startDir: tmpdir(), env: {} }));
 		expect(buildCacheEnabled()).toBe(true);
+	});
+
+	test("CLI builds recompile every transitive importer, even when the tsconfig says direct only", () => {
+		const config = { compilerOptions: { incremental: true, assumeChangesOnlyAffectDirectDependencies: true, plugins: [{ transform: "x" }] } };
+		expect(withFullInvalidation(config)).toEqual({ compilerOptions: { incremental: true, assumeChangesOnlyAffectDirectDependencies: false, plugins: [{ transform: "x" }] } });
+		expect(config.compilerOptions.assumeChangesOnlyAffectDirectDependencies).toBe(true);
+		expect(withFullInvalidation({ compilerOptions: { incremental: true } })).toBeUndefined();
+		expect(withFullInvalidation(undefined)).toBeUndefined();
 	});
 });
