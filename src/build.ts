@@ -35,7 +35,7 @@ import { liveHeads, readLocalLog } from "./deployments.ts";
 import { stateDir } from "./state.ts";
 import { compatNote, PROTOCOL_ATTRIBUTE, protocolHash, protocolStatus, type ProtocolStatus } from "./protocol.ts";
 import { effectiveHealth, healthAttributes, type EffectiveHealth } from "./health.ts";
-import { buildCacheEnabled, cacheUnsupported, removeStrayBuildInfo, restoreBuildCache, saveBuildCache } from "./build-cache.ts";
+import { buildCacheEnabled, cacheUnsupported, removeStrayBuildInfo, restoreBuildCache, saveBuildCache, withFullInvalidation } from "./build-cache.ts";
 
 export const KERNEL_API = 1;
 export const BUILD_FILE = "src/shared/build.ts";
@@ -206,7 +206,7 @@ function checkCompiledBuildFile(layout: TsLayout, root: string, commit: string) 
 
 /**
  * The rbxtsc command: the repo's `build` script when it has one, else the local roblox-ts binary. With `tsconfig`
- * (prod builds), `-p <tsconfig>` is appended; a build script that doesn't end with rbxtsc can't take it, so rbxtsc
+ * (the generated PROD_TSCONFIG), `-p <tsconfig>` is appended; a build script that doesn't end with rbxtsc can't take it, so rbxtsc
  * then runs directly (with a warning).
  */
 export function compileCommand(root: string, tsconfig?: string): string[] {
@@ -217,7 +217,7 @@ export function compileCommand(root: string, tsconfig?: string): string[] {
 	const extra = tsconfig ? ["-p", tsconfig] : [];
 	if (typeof scripts.build === "string") {
 		if (!tsconfig || scriptEndsWithRbxtsc(scripts.build)) return ["bun", "run", "build", ...extra];
-		warn(`the "build" script doesn't end with rbxtsc, so it can't take -p ${tsconfig}; running rbxtsc directly for this prod build (the script's other steps are skipped)`);
+		warn(`the "build" script doesn't end with rbxtsc, so it can't take -p ${tsconfig}; running rbxtsc directly for this build (the script's other steps are skipped)`);
 	}
 	if (!existsSync(join(root, "node_modules", "roblox-ts"))) {
 		throw new BuildError("roblox-ts is not installed here (no node_modules/roblox-ts): run `bun install`");
@@ -464,14 +464,18 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		TYPETORCH_CHANNEL: target.channel,
 		TYPETORCH_DEBUG_MACROS: debugMacros ? "1" : "0",
 	};
+	// The generated tsconfig (PROD_TSCONFIG): prod's strip transformer, and on every channel every transitive importer
+	// of a changed file recompiled (withFullInvalidation), so an incremental or cached build matches a full one.
 	const prodConfig = join(root, PROD_TSCONFIG);
+	const baseConfig = debugMacros ? readTsconfig(root) : prodTsconfig(readTsconfig(root));
+	const generatedConfig = withFullInvalidation(baseConfig) ?? (debugMacros ? undefined : baseConfig);
 	if (!debugMacros) {
 		mkdirSync(join(root, OUT_DIR), { recursive: true });
 		writeFileSync(join(root, STRIP_TRANSFORMER_FILE), STRIP_TRANSFORMER_SOURCE);
-		writeFileSync(prodConfig, JSON.stringify(prodTsconfig(readTsconfig(root)), null, "\t"));
 	}
+	if (generatedConfig) writeFileSync(prodConfig, JSON.stringify(generatedConfig, null, "\t"));
 	try {
-		await watch.stage("rbxtsc", () => run(compileCommand(root, debugMacros ? undefined : PROD_TSCONFIG), root, compileEnv));
+		await watch.stage("rbxtsc", () => run(compileCommand(root, generatedConfig ? PROD_TSCONFIG : undefined), root, compileEnv));
 	} finally {
 		rmSync(prodConfig, { force: true });
 	}
