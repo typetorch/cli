@@ -10,10 +10,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { join, relative } from "node:path";
 import { rojoBinary } from "../build.ts";
+import { readAssetsLock } from "../assets.ts";
 import { loadProject } from "../config.ts";
+import { branchChannel } from "../naming.ts";
 import { removeServeFile, writeServeFile } from "./client.ts";
 import { CompileTracker, stripAnsi } from "./compile.ts";
 import { API_VERSION, ROJO_DEFAULT_PORT, type Hello } from "./protocol.ts";
+import { JobRunner } from "./jobs.ts";
 import { ControlServer } from "./server.ts";
 import { Supervisor } from "./supervisor.ts";
 
@@ -36,6 +39,12 @@ export interface ServeOptions {
 	/** Every log line (human output or JSON lines). */
 	print: (line: { source: string; level: "info" | "warn" | "error"; text: string }) => void;
 	logFile?: string;
+	/** serve's --env-file, passed on to the jobs (hot asset sync and deploy). */
+	envFile?: string;
+	/** The branch the plugin's "Sync + deploy" button deploys to (default "dev"; never a prod-channel branch). */
+	devBranch?: string;
+	/** The jobs' command line (tests). */
+	jobCommand?: (args: string[]) => string[];
 }
 
 export interface RunningServe {
@@ -69,6 +78,19 @@ export async function freePort(from: number, tries = 20): Promise<number> {
 
 export function defaultProjectFile(root: string): string {
 	return existsSync(join(root, "studio.project.json")) ? "studio.project.json" : "default.project.json";
+}
+
+/** What the plugin's Hot assets card shows from the lockfile (the place itself is read in Studio). */
+export function assetsSummary(root: string, devBranch: string) {
+	let lock;
+	try {
+		lock = readAssetsLock(root);
+	} catch (error) {
+		return { lockfile: false, error: (error as Error).message, devBranch, assets: {} };
+	}
+	const assets: Record<string, { className: string; path: string }> = {};
+	for (const [key, entry] of Object.entries(lock?.assets ?? {})) assets[key] = { className: entry.className, path: entry.path };
+	return { lockfile: Boolean(lock), placeVersion: lock?.placeVersion, devBranch, assets };
 }
 
 export async function startServe(options: ServeOptions): Promise<RunningServe> {
@@ -105,11 +127,22 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 		pid: process.pid,
 		startedAt,
 	});
+	const baseArgs = [...(options.config ? ["--config", options.config] : []), ...(options.envFile ? ["--env-file", options.envFile] : [])];
+	const jobs = new JobRunner({
+		root,
+		devBranch: options.devBranch ?? "dev",
+		isProd: (branch) => branchChannel(project.config, branch) === "prod",
+		baseArgs,
+		log: (level, text) => log("assets", level, text),
+		command: options.jobCommand,
+	});
 	const control = new ControlServer({
 		hello,
 		status: () => ({ hello: hello(), children: supervisor.status(), compile: compile.snapshot() }),
 		stop: () => void stop(),
 		restart: (child) => supervisor.restart(child),
+		jobs,
+		assets: () => assetsSummary(root, options.devBranch ?? "dev"),
 	});
 	function log(source: string, level: "info" | "warn" | "error", text: string) {
 		control.serveLogs.push(source, level, text);

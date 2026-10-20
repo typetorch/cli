@@ -26,9 +26,10 @@ export const serveFlags = {
 	studio: "boolean",
 	follow: "boolean",
 	limit: "string",
+	"dev-branch": "string",
 } as const;
 
-export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <script,...>] [--json]
+export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <script,...>] [--dev-branch <b>] [--json]
 typetorch serve status [--json]
 typetorch serve stop
 typetorch serve restart <watch|rojo|<script>>
@@ -45,6 +46,7 @@ typetorch serve logs [--studio] [--since <seq>] [--limit <n>] [--follow] [--json
   --project    project file for Rojo (default studio.project.json, else default.project.json)
   --port       Rojo's port
   --no-watch   don't run rbxtsc -w (your editor or agent compiles)
+  --dev-branch the branch the plugin's "Sync + deploy" button deploys hot assets to (default dev; never prod-channel)
   --json       foreground: one JSON line per log line; subcommands: one JSON document
   status       children, attached Studios (edit / playtest), sync state, last compile result and its errors
   logs         serve's log (children); --studio: Studio's Output as the plugin forwards it; --follow keeps printing
@@ -150,6 +152,8 @@ async function foreground(args: ParsedArgs) {
 		watch: !flagBool(args, "no-watch"),
 		extra: extraScripts(args),
 		logFile: process.env.TYPETORCH_SERVE_LOG,
+		envFile: flagString(args, "env-file"),
+		devBranch: flagString(args, "dev-branch"),
 		print: (line) => (json ? console.log(JSON.stringify({ at: new Date().toISOString(), ...line })) : printLine(line)),
 	});
 	if (!json) info(`${bold("typetorch serve")} running: ${cyan(`control 127.0.0.1:${serve.port}`)}, Rojo ${serve.rojoPort}. Ctrl+C stops.`);

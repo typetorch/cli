@@ -237,6 +237,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch serve status` / `stop` / `restart <child>` / `logs [--studio] [--follow]` | the running server's children, attached Studios, sync state and compile errors / stop it / restart one child / its log |
 | `typetorch studio status` / `reconnect [--anyway]` / `play [--run]` / `stop` / `logs [--follow]` | drives the Studio the plugin attached: its sync state / resync from scratch / start / end a playtest / Studio's Output |
 | `typetorch studio install-plugin` | builds the TypeTorch Studio plugin into Studio's plugins folder |
+| `typetorch assets types [--out <file>]` | writes `src/shared/assets.gen.ts`: the hot asset keys with their classes and a `HotAssetKey` type (sync refreshes it once it exists) |
 | `typetorch mcp` | an MCP server on stdio with `serve` and `studio` as tools, for agents |
 | `typetorch migrate --from flamework [--dry-run] [--net compat\|native] [--report <file>] [--allow-dirty]` | the mechanical part of moving a Flamework 1.x game (see "Migrating from Flamework"); local only, no keys |
 | `typetorch update [<version>] [--check] [--yes]` | updates this CLI to the newest `@typetorch/cli` on npm (or `<version>`) the way it was installed: in the game's `package.json` with its package manager (bun, pnpm, yarn or npm, from the lockfile; a devDependency stays one), or globally (`npm i -g`, `bun add -g`, pnpm, yarn). Asks y/N first (`--yes` skips; without a terminal it prints the command). npx needs nothing (`npx @typetorch/cli@latest`); a git checkout gets the `git pull` to run. `--check` only shows the versions and the command. After any other command at a terminal, the CLI checks npm at most once a day (1.5 s timeout, cached in `~/.typetorch/update-check.json`) and, when a newer version is out, asks once whether to update now; after a no it reminds once a day. Never in CI, `--json` or non-interactive runs; `TYPETORCH_UPDATE_CHECK=off` turns it off |
@@ -515,6 +516,13 @@ build's channel in brackets when it differs.
   payload a moment after each change, so a save reaches the playtest without Stop + Play (server and client code, like
   Reload). It follows the edit session's rules (the matching experience, or a server accepted with Connect anyway;
   auto-connect on) and can be turned off in the panel ("Live playtest").
+- **Hot assets without the CLI.** The panel's Hot assets card marks the selected instance (`TypeTorchAsset` = a key
+  suggested from its name) or unmarks it, lists what the place marks against the lockfile, and flags what a sync would
+  refuse (bad or duplicate keys, scripts inside, nesting) before anything runs. **Check**, **Sync** and **Sync + deploy
+  to dev** run `typetorch assets status`, `assets sync` and `assets sync --deploy <dev branch>` inside `serve` (its
+  env file and keys; progress in `serve logs`). The dev branch is `dev` (`serve --dev-branch <b>`); a prod-channel
+  branch is refused, and the deploy follows the approval policy like any other (a proposal when it needs approval).
+  Sync reads the published place, so publish first.
 - **An agent can always get Studio back.** The plugin long-polls the control API for commands whatever its sync is
   doing (down, backing off, waiting for a click, paused), so a broken sync doesn't cut the agent off:
   `typetorch studio reconnect` turns auto-connect on, resyncs from scratch and waits to report whether it connected

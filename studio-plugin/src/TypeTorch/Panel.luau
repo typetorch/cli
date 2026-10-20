@@ -19,6 +19,7 @@ local PHASES = {
 }
 
 local MAX_ERRORS = 8
+local MAX_ASSET_LINES = 12
 
 local function ago(t: number?): string
 	if not t then
@@ -91,6 +92,51 @@ function Panel.new(plugin: Plugin, actions, version: string)
 		actions.setLivePlaytest(not self.livePlaytest)
 	end)
 
+	-- Hot assets card
+	local assetsCard = Widgets.card(scroll)
+	Widgets.line(assetsCard, "Hot assets", 15, COLORS.text, Enum.Font.BuilderSansBold)
+	Widgets.line(
+		assetsCard,
+		"Mark a model or UI template, publish the place, then Sync: running servers pick up new versions without a restart.",
+		14,
+		COLORS.dim
+	)
+	self.assetsSummary = Widgets.line(assetsCard, "", 14, COLORS.dim)
+	self.assetLines = {}
+	for i = 1, MAX_ASSET_LINES do
+		local label = Widgets.line(assetsCard, "", 14, COLORS.text, Enum.Font.RobotoMono)
+		label.Visible = false
+		self.assetLines[i] = label
+	end
+	self.keyBox = Widgets.textBox(assetsCard, "key for the selection, e.g. ui/shop")
+	local markButtons = Widgets.buttonRow(assetsCard)
+	Widgets.button(markButtons, "Mark selection", function()
+		actions.markSelection(self.keyBox.Text)
+	end)
+	Widgets.button(markButtons, "Unmark", function()
+		actions.unmarkSelection()
+	end)
+	local syncButtons = Widgets.buttonRow(assetsCard)
+	Widgets.button(syncButtons, "Check", function()
+		actions.runJob("assets-status")
+	end)
+	Widgets.button(syncButtons, "Sync", function()
+		actions.runJob("assets-sync")
+	end)
+	self.deployButton = Widgets.button(syncButtons, "Sync + deploy to dev", function()
+		actions.runJob("assets-deploy-dev")
+	end, COLORS.accent)
+	self.deployButton.TextColor3 = COLORS.dark
+	self.assetsMessage = Widgets.line(assetsCard, "", 14, COLORS.dim)
+	self.jobLine = Widgets.line(assetsCard, "", 14, COLORS.dim)
+	game:GetService("Selection").SelectionChanged:Connect(function()
+		local selected = game:GetService("Selection"):Get()
+		if #selected == 1 and selected[1].Parent ~= game then
+			local current = selected[1]:GetAttribute("TypeTorchAsset")
+			self.keyBox.Text = if type(current) == "string" then current else actions.suggestKey(selected[1])
+		end
+	end)
+
 	-- Compile card
 	local compileCard = Widgets.card(scroll)
 	Widgets.line(compileCard, "Compile", 15, COLORS.text, Enum.Font.BuilderSansBold)
@@ -133,6 +179,8 @@ function Panel:render(state)
 	self.livePlaytest = state.plugin == nil or state.plugin:GetSetting("TypeTorch_livePlaytest") ~= false
 	self.liveButton.Text = if self.livePlaytest then "Live playtest: on" else "Live playtest: off"
 
+	self:renderAssets(state)
+
 	local status = state.status
 	if status and status.compile then
 		local compile = status.compile
@@ -167,6 +215,67 @@ function Panel:render(state)
 		end
 		self.children.Text = if server then "" else "Start it in the game folder: bun run typetorch serve"
 	end
+end
+
+function Panel:renderAssets(state)
+	local assets = state.assets
+	local lock = assets.lock
+	local inLock = if lock and lock.assets then lock.assets else {}
+	local lockCount = 0
+	for _ in inLock do
+		lockCount += 1
+	end
+	local problems = 0
+	for _, entry in assets.marked do
+		if #entry.problems > 0 then
+			problems += 1
+		end
+	end
+	if not assets.scanned then
+		self.assetsSummary.Text = "Open this panel to scan the place"
+	else
+		self.assetsSummary.Text = `{#assets.marked} marked in this place, {lockCount} in the lockfile`
+			.. if problems > 0 then `, {problems} with problems` else ""
+	end
+	self.assetsSummary.TextColor3 = if problems > 0 then COLORS.bad else COLORS.dim
+	-- Problems first, then assets the lockfile doesn't know yet, then the rest.
+	local rows = {}
+	for _, entry in assets.marked do
+		if #entry.problems > 0 then
+			table.insert(rows, { `{entry.key}: {entry.problems[1]}`, COLORS.bad })
+		end
+	end
+	local present = {}
+	for _, entry in assets.marked do
+		present[entry.key] = true
+		if #entry.problems == 0 and not inLock[entry.key] then
+			table.insert(rows, { `{entry.key}  {entry.className}  not synced yet`, COLORS.warn })
+		end
+	end
+	for key in inLock do
+		if not present[key] and assets.scanned then
+			table.insert(rows, { `{key}  removed from the place (sync drops it)`, COLORS.dim })
+		end
+	end
+	for _, entry in assets.marked do
+		if #entry.problems == 0 and inLock[entry.key] then
+			table.insert(rows, { `{entry.key}  {entry.className}`, COLORS.text })
+		end
+	end
+	for i, label in self.assetLines do
+		local row = rows[i]
+		label.Visible = row ~= nil
+		if row then
+			label.Text = if i == MAX_ASSET_LINES and #rows > MAX_ASSET_LINES then `and {#rows - i + 1} more` else row[1]
+			label.TextColor3 = row[2]
+		end
+	end
+	self.deployButton.Text = `Sync + deploy to {if lock and lock.devBranch then lock.devBranch else "dev"}`
+	self.assetsMessage.Text = assets.message
+	self.assetsMessage.Visible = assets.message ~= ""
+	self.jobLine.Text = assets.jobText
+	self.jobLine.Visible = assets.jobText ~= ""
+	self.jobLine.TextColor3 = if assets.job and assets.job.state == "failed" then COLORS.bad else COLORS.dim
 end
 
 return Panel

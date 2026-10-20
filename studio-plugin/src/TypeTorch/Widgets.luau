@@ -122,6 +122,24 @@ function Widgets.line(parent: Instance, text: string, size: number?, color: Colo
 	return label
 end
 
+-- A full-width one-line text input.
+function Widgets.textBox(parent: Instance, placeholder: string): TextBox
+	local box = Widgets.style(make("TextBox", { ClearTextOnFocus = false }), "", 15, COLORS.text, Enum.Font.RobotoMono)
+	box.PlaceholderText = placeholder
+	box.PlaceholderColor3 = COLORS.dim
+	box.BackgroundColor3 = COLORS.window
+	box.TextWrapped = false
+	box.ClipsDescendants = true
+	box.Size = UDim2.new(1, 0, 0, Widgets.BUTTON_HEIGHT)
+	box.AutomaticSize = Enum.AutomaticSize.None
+	box.LayoutOrder = nextOrder(parent)
+	Widgets.corner(box, 6)
+	Widgets.pad(box, 0, 10)
+	make("UIStroke", { Color = COLORS.stroke, Thickness = 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, box)
+	box.Parent = parent
+	return box
+end
+
 -- A rounded card with a vertical list inside.
 function Widgets.card(parent: Instance): Frame
 	local frame = make("Frame", {

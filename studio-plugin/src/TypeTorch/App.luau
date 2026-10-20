@@ -19,12 +19,13 @@ local ServeSession = require(Rojo.Plugin.ServeSession)
 local Log = require(Rojo.Packages.Log)
 
 local Agent = require(script.Parent.Agent)
+local Assets = require(script.Parent.Assets)
 local Control = require(script.Parent.Control)
 local Panel = require(script.Parent.Panel)
 
 local App = {}
 
-local VERSION = "0.3.0"
+local VERSION = "0.4.0"
 local PROBE_SECONDS = 2
 local HEARTBEAT_SECONDS = 5
 local STATUS_SECONDS = 3
@@ -57,6 +58,8 @@ local state = {
 	patches = 0,
 	backoff = 1,
 	status = nil, -- the last GET /tt/status (compile state, children)
+	-- The Hot assets card: what the place marks (scanned here), what the lockfile knows (GET /tt/assets), the last job.
+	assets = { marked = {}, scanned = false, lock = nil, message = "", job = nil, jobText = "" },
 	wake = nil :: thread?,
 }
 
@@ -286,15 +289,93 @@ local function loop()
 end
 
 -- Reads serve's status (compile errors, children) while the panel is open.
+local ASSET_SCAN_EVERY = 3 -- status ticks
+
+local function refreshAssets()
+	state.assets.marked = Assets.scan()
+	state.assets.scanned = true
+	if state.server then
+		local ok, lock = Control.request(state.server.port, "GET", "/tt/assets")
+		state.assets.lock = if ok then lock else nil
+	end
+end
+
 local function statusLoop()
+	local ticks = 0
 	while state.plugin do
-		if panel and panel:isOpen() and state.server then
-			local ok, status = Control.request(state.server.port, "GET", "/tt/status")
-			state.status = if ok then status else nil
+		if panel and panel:isOpen() then
+			if state.server then
+				local ok, status = Control.request(state.server.port, "GET", "/tt/status")
+				state.status = if ok then status else nil
+			end
+			if ticks % ASSET_SCAN_EVERY == 0 then
+				refreshAssets()
+			end
+			ticks += 1
 			render()
 		end
 		task.wait(STATUS_SECONDS)
 	end
+end
+
+local function assetsMessage(text: string)
+	state.assets.message = text
+	refreshAssets()
+	render()
+end
+
+function App.markSelection(key: string)
+	local _, message = Assets.markSelection(key)
+	assetsMessage(message)
+end
+
+function App.unmarkSelection()
+	local _, message = Assets.unmarkSelection()
+	assetsMessage(message)
+end
+
+-- Runs a hot asset job in typetorch serve and follows it until it ends.
+function App.runJob(kind: string)
+	local server = state.server
+	if not server then
+		assetsMessage("Start typetorch serve first")
+		return
+	end
+	if state.assets.job and state.assets.job.state == "running" then
+		return
+	end
+	for _, entry in Assets.scan() do
+		if #entry.problems > 0 then
+			assetsMessage(`Fix the problems first ({entry.key}: {entry.problems[1]})`)
+			return
+		end
+	end
+	state.assets.message = if kind == "assets-status"
+		then ""
+		else "Sync reads the PUBLISHED place: publish your changes first (File > Publish to Roblox)."
+	local ok, job = Control.request(server.port, "POST", "/tt/jobs", { kind = kind })
+	if not ok then
+		state.assets.job = nil
+		state.assets.jobText = `Couldn't start: {job}`
+		render()
+		return
+	end
+	state.assets.job = job
+	task.spawn(function()
+		while state.plugin and job.state == "running" do
+			state.assets.jobText = Assets.describeJob(job)
+			render()
+			task.wait(1)
+			local polled, latest = Control.request(server.port, "GET", `/tt/jobs?id={job.id}`)
+			if polled then
+				job = latest
+				state.assets.job = job
+			end
+		end
+		state.assets.jobText = Assets.describeJob(job)
+		refreshAssets()
+		render()
+	end)
 end
 
 -- Drops the connection and starts over (a full resync).
@@ -522,6 +603,10 @@ function App.start(plugin: Plugin)
 		setAutoConnect = App.setAutoConnect,
 		confirm = App.confirm,
 		setLivePlaytest = App.setLivePlaytest,
+		markSelection = App.markSelection,
+		unmarkSelection = App.unmarkSelection,
+		runJob = App.runJob,
+		suggestKey = Assets.suggestKey,
 	}, VERSION)
 	render()
 	task.spawn(loop)

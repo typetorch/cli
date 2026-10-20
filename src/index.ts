@@ -393,6 +393,7 @@ typetorch keys resign [--key-file <path>] [--fallback-key-file <path>]
 		usage: `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n>] [--moderation-timeout <s>]
 typetorch assets status [--place-version <n>]
 typetorch assets list
+typetorch assets types [--out <file>]
 
   Hot assets (TypeTorch plans/13): instances in the place with the attribute TypeTorchAsset = "<key>" (lowercase
   a-z 0-9 / - _, at most 64 characters, unique, no scripts inside, not inside another hot asset).
@@ -410,6 +411,8 @@ typetorch assets list
                      committed first, so --deploy refuses it when the sync changes the lockfile.
   status  export + diff, nothing uploaded or written
   list    the lockfile
+  types   writes src/shared/assets.gen.ts (or --out): HOT_ASSETS (key -> class) and the HotAssetKey type, from the
+          lockfile; sync refreshes it once it exists
   Scopes (the assets key): asset:read, asset:write, universe.place.luau-execution-session:read and :write.`,
 	},
 	serve: {
