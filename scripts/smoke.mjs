@@ -168,9 +168,16 @@ if (process.argv.includes("--pack")) {
 		check("npm pack", packed.status === 0 && Boolean(info?.filename), info ? `${info.filename}, ${info.files.length} files, ${info.size} bytes` : packed.stderr.trim().slice(-300));
 		if (info) {
 			const files = info.files.map((f) => f.path.replace(/\\/g, "/"));
-			const allowed = (p) => p === "package.json" || p === "README.md" || p === "LICENSE" || /^dist\/[\w./-]+\.(js|d\.ts)$/.test(p);
+			// studio-plugin/: the TypeTorch Studio plugin's sources, built by `typetorch studio install-plugin`.
+			const allowed = (p) =>
+				p === "package.json" ||
+				p === "README.md" ||
+				p === "LICENSE" ||
+				/^dist\/[\w./-]+\.(js|d\.ts)$/.test(p) ||
+				/^studio-plugin\/[\w./-]+\.(luau|lua|json|md|txt)$/.test(p) ||
+				/^studio-plugin\/vendor\/rojo\/Packages\/\w+\/LICENSE$/.test(p);
 			const bad = files.filter((p) => !allowed(p) || /(^|\/)(test|tests|fixtures?|test-fixture|\.typetorch|node_modules)(\/|$)|\.env|\.key$|CHANGELOG/i.test(p));
-			check("packed files: dist + README + LICENSE + package.json only", bad.length === 0, bad.join(", "));
+			check("packed files: dist + studio-plugin + README + LICENSE + package.json only", bad.length === 0, bad.join(", "));
 			const user = userInfo().username;
 			const home = homedir();
 			// A generic account (CI's "runner", a container's "root") is an ordinary word in the sources, not a leak.

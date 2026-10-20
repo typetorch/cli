@@ -1,0 +1,24 @@
+{
+	"name": "TypeTorchSync",
+	"tree": {
+		"$className": "Folder",
+		"Main": {
+			"$path": "src/Main.server.luau"
+		},
+		"TypeTorch": {
+			"$path": "src/TypeTorch"
+		},
+		"Rojo": {
+			"$className": "Folder",
+			"Plugin": {
+				"$path": "vendor/rojo/Plugin"
+			},
+			"Packages": {
+				"$path": "vendor/rojo/Packages"
+			},
+			"Version": {
+				"$path": "vendor/rojo/Version.txt"
+			}
+		}
+	}
+}

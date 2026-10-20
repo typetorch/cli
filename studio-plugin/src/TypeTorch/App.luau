@@ -1,0 +1,293 @@
+--!nonstrict
+-- The plugin's controller. In edit mode it finds `typetorch serve` by itself (Control.discover every 2 s), attaches to
+-- the server whose universeId matches this place, runs Rojo's ServeSession against that server's Rojo, and reconnects
+-- on its own whenever the connection drops: nobody clicks Connect. A place that doesn't match (another experience, or
+-- an unpublished file) is never synced without a click on "Connect anyway".
+
+local HttpService = game:GetService("HttpService")
+local RunService = game:GetService("RunService")
+
+local Root = script.Parent.Parent
+local Rojo = Root.Rojo
+local ApiContext = require(Rojo.Plugin.ApiContext)
+local ServeSession = require(Rojo.Plugin.ServeSession)
+local Log = require(Rojo.Packages.Log)
+
+local Control = require(script.Parent.Control)
+local Panel = require(script.Parent.Panel)
+
+local App = {}
+
+local VERSION = "0.1.0"
+local PROBE_SECONDS = 2
+local HEARTBEAT_SECONDS = 5
+local STATUS_SECONDS = 3
+local MAX_BACKOFF = 5
+
+type Server = { port: number, hello: Control.Hello }
+
+local state = {
+	id = HttpService:GenerateGUID(false),
+	mode = "edit",
+	plugin = nil :: Plugin?,
+	autoConnect = true,
+	-- "waiting" (no serve found), "confirm" (found, needs a click), "connecting", "connected", "disconnected", "paused"
+	phase = "waiting",
+	detail = "",
+	server = nil :: Server?,
+	candidates = {} :: { Server },
+	confirmed = {} :: { [number]: boolean }, -- pid -> clicked "Connect anyway"
+	session = nil,
+	lastSyncAt = nil :: number?,
+	patches = 0,
+	backoff = 1,
+	status = nil, -- the last GET /tt/status (compile state, children)
+	wake = nil :: thread?,
+}
+
+local panel
+
+local function settingKey(): string
+	return `TypeTorch_autoConnect_{if game.PlaceId ~= 0 then tostring(game.PlaceId) else "local"}`
+end
+
+local function render()
+	if panel then
+		panel:render(state)
+	end
+end
+
+local function setPhase(phase: string, detail: string?)
+	state.phase = phase
+	state.detail = detail or ""
+	render()
+end
+
+-- Tells serve what this plugin is doing (also its heartbeat). Failures are fine: serve may be gone.
+local function report()
+	local server = state.server
+	if not server then
+		return
+	end
+	local status = if state.phase == "connected"
+		then "connected"
+		elseif state.phase == "connecting" then "connecting"
+		elseif state.phase == "paused" then "paused"
+		else "disconnected"
+	local ok = Control.request(server.port, "POST", "/tt/plugin/state", { id = state.id, status = status, detail = state.detail })
+	if not ok then
+		-- Unknown id after a serve restart: register again.
+		Control.request(server.port, "POST", "/tt/plugin/hello", App.helloBody())
+	end
+end
+
+function App.helloBody()
+	return {
+		id = state.id,
+		mode = state.mode,
+		placeId = game.PlaceId,
+		gameId = game.GameId,
+		placeName = game.Name,
+		pluginVersion = VERSION,
+	}
+end
+
+-- Which server to attach to: the one for this experience; an unpublished place only when exactly one runs.
+local function choose(found: { Server }): (Server?, boolean)
+	for _, server in found do
+		if game.GameId ~= 0 and server.hello.universeId == game.GameId then
+			return server, true
+		end
+	end
+	if #found == 1 then
+		return found[1], false
+	end
+	return nil, false
+end
+
+local function stopSession()
+	local session = state.session
+	state.session = nil
+	if session then
+		pcall(session.stop, session)
+	end
+end
+
+-- Wakes the main loop early (a click, a reconnect request).
+local function wake()
+	local thread = state.wake
+	if thread and coroutine.status(thread) == "suspended" then
+		state.wake = nil
+		task.spawn(thread)
+	end
+end
+
+local function waitOrWake(seconds: number)
+	state.wake = coroutine.running()
+	local timer = task.delay(seconds, function()
+		wake()
+	end)
+	coroutine.yield()
+	pcall(task.cancel, timer)
+end
+
+-- Starts Rojo's sync against `server`. Returns when the session is connected or failed.
+local function connect(server: Server)
+	state.server = server
+	setPhase("connecting", `{server.hello.project} on port {server.hello.rojoPort}`)
+	Control.request(server.port, "POST", "/tt/plugin/hello", App.helloBody())
+	local api = ApiContext.new(`http://{Control.HOST}:{server.hello.rojoPort}`)
+	local session = ServeSession.new({ apiContext = api, twoWaySync = false })
+	state.session = session
+	local settled = false
+	session:onStatusChanged(function(status, detail)
+		if state.session ~= session then
+			return
+		end
+		if status == ServeSession.Status.Connected then
+			state.backoff = 1
+			state.lastSyncAt = os.time()
+			setPhase("connected", `{server.hello.project} ({server.hello.projectFile})`)
+		elseif status == ServeSession.Status.Disconnected then
+			state.session = nil
+			setPhase("disconnected", if detail then tostring(detail) else "connection closed")
+		end
+		if status ~= ServeSession.Status.Connecting then
+			settled = true
+			report()
+			wake()
+		end
+	end)
+	session:hookPostcommit(function()
+		state.lastSyncAt = os.time()
+		state.patches += 1
+		render()
+	end)
+	session:start()
+	while not settled and state.session == session do
+		waitOrWake(1)
+	end
+end
+
+local function loop()
+	local lastHeartbeat = 0
+	while state.plugin do
+		if state.session then
+			-- Connected: heartbeat; notice a restarted serve (new pid) and reattach to it.
+			if os.clock() - lastHeartbeat >= HEARTBEAT_SECONDS then
+				lastHeartbeat = os.clock()
+				local server = state.server
+				local ok, hello = Control.request(server.port, "GET", "/tt/hello")
+				if ok and hello.pid ~= server.hello.pid then
+					stopSession()
+					setPhase("disconnected", "typetorch serve restarted")
+				else
+					report()
+				end
+			end
+			waitOrWake(1)
+		elseif not state.autoConnect then
+			setPhase("paused", "Auto-connect is off")
+			waitOrWake(PROBE_SECONDS)
+		else
+			local found = Control.discover()
+			state.candidates = found
+			local server, matches = choose(found)
+			if not server then
+				state.server = nil
+				if #found == 0 then
+					setPhase("waiting", "Run `bun run typetorch serve` in the game folder")
+				else
+					setPhase("waiting", `{#found} servers run, none for this experience ({game.GameId})`)
+				end
+				waitOrWake(PROBE_SECONDS)
+			elseif not matches and not state.confirmed[server.hello.pid] then
+				state.server = server
+				setPhase(
+					"confirm",
+					if game.GameId == 0
+						then `This place isn't published. Sync {server.hello.project} into it?`
+						else `{server.hello.project} is for experience {server.hello.universeId}, this place is {game.GameId}`
+				)
+				waitOrWake(PROBE_SECONDS)
+			elseif server.hello.rojoPort == 0 then
+				state.server = server
+				setPhase("connecting", "Rojo is starting")
+				waitOrWake(1)
+			else
+				connect(server)
+				if not state.session then
+					-- Failed or dropped: retry with a short backoff, re-probing in case serve moved.
+					waitOrWake(state.backoff)
+					state.backoff = math.min(state.backoff * 2, MAX_BACKOFF)
+				end
+			end
+		end
+	end
+end
+
+-- Reads serve's status (compile errors, children) while the panel is open.
+local function statusLoop()
+	while state.plugin do
+		if panel and panel:isOpen() and state.server then
+			local ok, status = Control.request(state.server.port, "GET", "/tt/status")
+			state.status = if ok then status else nil
+			render()
+		end
+		task.wait(STATUS_SECONDS)
+	end
+end
+
+-- Drops the connection and starts over (a full resync).
+function App.reconnect()
+	stopSession()
+	state.backoff = 1
+	setPhase("disconnected", "reconnecting")
+	wake()
+end
+
+function App.setAutoConnect(on: boolean)
+	state.autoConnect = on
+	if state.plugin then
+		state.plugin:SetSetting(settingKey(), on)
+	end
+	if not on then
+		stopSession()
+	end
+	wake()
+end
+
+function App.confirm()
+	if state.server then
+		state.confirmed[state.server.hello.pid] = true
+	end
+	wake()
+end
+
+function App.start(plugin: Plugin)
+	if not RunService:IsEdit() then
+		-- Playtests: the edit session keeps syncing; playtest support comes with live reload.
+		return
+	end
+	state.plugin = plugin
+	local saved = plugin:GetSetting(settingKey())
+	state.autoConnect = if saved == nil then true else saved == true
+	Log.setLogLevelThunk(function()
+		return Log.Level.Warning
+	end)
+	panel = Panel.new(plugin, {
+		reconnect = App.reconnect,
+		setAutoConnect = App.setAutoConnect,
+		confirm = App.confirm,
+	}, VERSION)
+	plugin.Unloading:Connect(function()
+		state.plugin = nil
+		stopSession()
+		wake()
+	end)
+	render()
+	task.spawn(loop)
+	task.spawn(statusLoop)
+end
+
+return App
