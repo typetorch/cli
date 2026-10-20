@@ -5,7 +5,8 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CompileTracker } from "../src/serve/compile";
 import { call, ServeClientError } from "../src/serve/client";
-import type { Hello } from "../src/serve/protocol";
+import { handleMessage, TOOLS } from "../src/commands/mcp";
+import { RECONNECT_LUAU, type CommandResult, type Hello, type StudioCommand } from "../src/serve/protocol";
 import { ControlServer } from "../src/serve/server";
 import { Supervisor } from "../src/serve/supervisor";
 
@@ -99,6 +100,106 @@ describe("ControlServer", () => {
 		await call(port, "POST", "/tt/stop");
 		await Bun.sleep(100);
 		expect(stopped).toBe(1);
+	});
+});
+
+describe("agent commands", () => {
+	const server = new ControlServer({
+		hello,
+		status: () => ({ hello: hello(), children: [], compile: { state: "idle", errors: [] } }),
+		stop: () => {},
+		restart: async () => false,
+	});
+	let port = 0;
+	afterAll(() => server.close());
+	const poll = (id: string, wait = 2) => call<{ commands: StudioCommand[] }>(port, "GET", `/tt/plugin/poll?id=${id}&wait=${wait}`);
+	const register = (id: string, mode: string) => call(port, "POST", "/tt/plugin/hello", { id, mode, placeId: 2, gameId: 1, placeName: "Cecot" });
+
+	test("with no Studio attached, says how to unstick the plugin", async () => {
+		port = await server.listen([45890, 45891, 45892]);
+		const error = (await call(port, "POST", "/tt/command", { kind: "reconnect" }).catch((e) => e)) as ServeClientError;
+		expect(error).toBeInstanceOf(ServeClientError);
+		expect(error.status).toBe(409);
+		expect(error.message).toContain(RECONNECT_LUAU);
+		await expect(call(port, "POST", "/tt/command", { kind: "format-disk" })).rejects.toThrow("kind: one of");
+	});
+
+	test("a command reaches the polling plugin and its result comes back", async () => {
+		await register("edit1", "edit");
+		const polled = poll("edit1");
+		await Bun.sleep(50);
+		const sent = call<CommandResult>(port, "POST", "/tt/command", { kind: "reconnect", args: { anyway: true } });
+		const { commands } = await polled;
+		expect(commands).toHaveLength(1);
+		expect(commands[0]).toMatchObject({ kind: "reconnect", args: { anyway: true } });
+		await call(port, "POST", "/tt/plugin/result", { id: "edit1", command: commands[0].id, ok: true, result: { phase: "connected" } });
+		expect(await sent).toEqual({ ok: true, studio: { id: "edit1", mode: "edit", placeName: "Cecot" }, result: { phase: "connected" } });
+	});
+
+	test("a command sent before the poll waits for it; stop goes to the playtest server", async () => {
+		await register("server1", "server");
+		const sent = call<CommandResult>(port, "POST", "/tt/command", { kind: "stop" });
+		await Bun.sleep(50);
+		expect((await poll("edit1", 0)).commands).toEqual([]);
+		const { commands } = await poll("server1", 0);
+		expect(commands.map((c) => c.kind)).toEqual(["stop"]);
+		await call(port, "POST", "/tt/plugin/result", { id: "server1", command: commands[0].id, ok: false, error: "no test" });
+		expect(await sent).toMatchObject({ ok: false, studio: { mode: "server" }, error: "no test" });
+	});
+
+	test("a plugin can't answer someone else's command, and a silent plugin times out", async () => {
+		const sent = call<CommandResult>(port, "POST", "/tt/command", { kind: "ping", target: "edit1", timeoutMs: 1000 });
+		const { commands } = await poll("edit1", 0.5);
+		expect(await call<unknown>(port, "POST", "/tt/plugin/result", { id: "server1", command: commands[0].id, ok: true })).toEqual({ ok: true, late: true });
+		expect(await sent).toMatchObject({ ok: false, error: expect.stringContaining("didn't answer") });
+	});
+
+	test("commands aren't handed to a poll whose caller hung up", async () => {
+		const gone = new AbortController();
+		const hung = fetch(`http://127.0.0.1:${port}/tt/plugin/poll?id=edit1&wait=5`, { headers: { "x-typetorch": "1" }, signal: gone.signal }).catch(() => undefined);
+		await Bun.sleep(50);
+		gone.abort();
+		await hung;
+		await Bun.sleep(50);
+		const sent = call<CommandResult>(port, "POST", "/tt/command", { kind: "ping", target: "edit", timeoutMs: 3000 });
+		await Bun.sleep(50);
+		const { commands } = await poll("edit1", 0);
+		expect(commands.map((c) => c.kind)).toEqual(["ping"]);
+		await call(port, "POST", "/tt/plugin/result", { id: "edit1", command: commands[0].id, ok: true, result: {} });
+		expect((await sent).ok).toBe(true);
+	});
+
+	test("unknown targets and unregistered pollers are refused", async () => {
+		await expect(call(port, "POST", "/tt/command", { kind: "ping", target: "nobody" })).rejects.toThrow("no attached Studio");
+		await expect(poll("stranger", 0)).rejects.toThrow("unknown plugin id");
+	});
+});
+
+describe("typetorch mcp", () => {
+	const ask = (method: string, params?: Record<string, unknown>, root = process.cwd()) =>
+		handleMessage({ jsonrpc: "2.0", id: 1, method, params }, root, "9.9.9") as Promise<{ result?: any; error?: any }>;
+
+	test("initializes and lists the serve and studio tools", async () => {
+		const init = await ask("initialize", { protocolVersion: "2025-06-18" });
+		expect(init.result).toMatchObject({ protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "typetorch", version: "9.9.9" } });
+		const list = await ask("tools/list");
+		expect(list.result.tools.map((t: { name: string }) => t.name)).toEqual(TOOLS.map((t) => t.name));
+		expect(list.result.tools.every((t: Record<string, unknown>) => !("run" in t) && (t.inputSchema as { type: string }).type === "object")).toBe(true);
+	});
+
+	test("tool errors come back as isError results; unknown methods as JSON-RPC errors", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "tt-mcp-"));
+		try {
+			const called = await ask("tools/call", { name: "studio_reconnect", arguments: {} }, dir);
+			expect(called.result.isError).toBe(true);
+			expect(called.result.content[0].text).toContain("isn't running");
+			expect(JSON.parse((await ask("tools/call", { name: "serve_status" }, dir)).result.content[0].text)).toEqual({ running: false });
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+		expect((await ask("tools/call", { name: "nope" })).error.code).toBe(-32602);
+		expect((await ask("resources/list")).error.code).toBe(-32601);
+		expect(await handleMessage({ jsonrpc: "2.0", method: "notifications/initialized" }, undefined, "1")).toBeUndefined();
 	});
 });
 

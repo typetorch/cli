@@ -7,6 +7,9 @@ Install it with `typetorch studio install-plugin` (builds this folder with Rojo 
 - `src/Main.server.luau`: the plugin script.
 - `src/TypeTorch/App.luau`: finds the server (`GET /tt/hello` on 34880-34887), picks the one whose universeId matches
   the place, runs Rojo's sync, reconnects, reports to the server.
+- `src/TypeTorch/Agent.luau`: in every DataModel (edit, playtest server and client): runs the commands an agent sends
+  through `typetorch studio` / `typetorch mcp` (long poll on `/tt/plugin/poll`), forwards Studio's Output, and in edit
+  mode reconnects when the `TypeTorchReconnect` attribute is set on ServerStorage.
 - `src/TypeTorch/Panel.luau`, `Widgets.luau`: the dock widget, in the TypeTorch dev menu's look.
 - `src/TypeTorch/Control.luau`: the control API client (cli `src/serve/protocol.ts` is the contract).
 - `vendor/rojo/`: Rojo's plugin core, unchanged except where marked.

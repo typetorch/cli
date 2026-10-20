@@ -3,13 +3,40 @@
  * report their sync state and Studio's Output here; the CLI's subcommands read status and logs and stop the server.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { CONTROL_PORTS, HEADER, type Hello, type LogLine, type ServeStatus, type StudioInfo } from "./protocol.ts";
+import { randomUUID } from "node:crypto";
+import {
+	COMMAND_KINDS,
+	CONTROL_PORTS,
+	HEADER,
+	RECONNECT_LUAU,
+	type CommandKind,
+	type CommandResult,
+	type Hello,
+	type LogLine,
+	type ServeStatus,
+	type StudioCommand,
+	type StudioInfo,
+} from "./protocol.ts";
 
 /** Lines kept per source group (serve's own children, Studio). */
 const RING_SIZE = 2000;
 const MAX_BODY = 256 * 1024;
 /** A plugin that hasn't been heard from for this long is dropped from the list. */
 export const STUDIO_TIMEOUT_MS = 30_000;
+/** How long `GET /tt/plugin/poll` holds an empty answer (well under Roblox's HTTP timeout and STUDIO_TIMEOUT_MS). */
+export const POLL_HOLD_MS = 15_000;
+/** `POST /tt/command`'s default and largest wait for the plugin's answer. */
+export const COMMAND_TIMEOUT_MS = 20_000;
+const COMMAND_TIMEOUT_MAX_MS = 120_000;
+
+/** Why a command found no plugin to run it, and the ways out (an agent reads this). */
+export function noStudioMessage(mode: string): string {
+	return [
+		`no ${mode} Studio is attached to typetorch serve.`,
+		"Open the place in Studio with the TypeTorch plugin (`typetorch studio install-plugin`) and allow its HTTP requests to localhost.",
+		`If Studio is open and the plugin is stuck, run this in Studio's command bar or with the Roblox Studio MCP's execute_luau: ${RECONNECT_LUAU}`,
+	].join(" ");
+}
 
 export class LogRing {
 	private lines: LogLine[] = [];
@@ -68,6 +95,10 @@ export class ControlServer {
 	readonly serveLogs = new LogRing();
 	readonly studioLogs = new LogRing();
 	private readonly studios = new Map<string, StudioInfo>();
+	/** Commands waiting for each plugin's next poll, and the poll waiting for them. */
+	private readonly queues = new Map<string, { commands: StudioCommand[]; waiter?: () => void }>();
+	/** Commands sent and waiting for their result. */
+	private readonly pending = new Map<string, { studio: string; done: (result: CommandResult) => void }>();
 	private server?: Server;
 	port = 0;
 
@@ -92,20 +123,94 @@ export class ControlServer {
 	}
 
 	close(): Promise<void> {
-		return new Promise((done) => (this.server ? this.server.close(() => done()) : done()));
+		for (const queue of this.queues.values()) queue.waiter?.();
+		return new Promise((done) => {
+			if (!this.server) return done();
+			this.server.close(() => done());
+			this.server.closeAllConnections?.();
+		});
 	}
 
 	/** The plugins heard from recently, newest first. */
 	studioList(): StudioInfo[] {
 		const now = Date.now();
 		for (const [id, studio] of this.studios) {
-			if (now - Date.parse(studio.lastSeen) > STUDIO_TIMEOUT_MS) this.studios.delete(id);
+			if (now - Date.parse(studio.lastSeen) <= STUDIO_TIMEOUT_MS) continue;
+			this.studios.delete(id);
+			this.queues.get(id)?.waiter?.();
+			this.queues.delete(id);
 		}
 		return [...this.studios.values()].sort((a, b) => b.lastSeen.localeCompare(a.lastSeen)).map((s) => ({ ...s, sync: { ...s.sync } }));
 	}
 
 	status(): ServeStatus {
 		return { ...this.handlers.status(), studios: this.studioList() };
+	}
+
+	/**
+	 * Sends a command to a plugin and waits for its answer. `target`: a plugin id, or a mode (edit, server, client);
+	 * default: `stop` goes to a playtest server when one is attached, everything else to the edit DataModel.
+	 */
+	async command(kind: CommandKind, args: Record<string, unknown> = {}, target?: string, timeoutMs = COMMAND_TIMEOUT_MS): Promise<CommandResult> {
+		const studios = this.studioList();
+		let studio: StudioInfo | undefined;
+		if (target && !MODES.has(target)) {
+			studio = studios.find((s) => s.id === target);
+			if (!studio) throw new HttpError(404, `no attached Studio with id ${target}`);
+		} else {
+			const modes = target ? [target] : kind === "stop" ? ["server", "edit"] : ["edit"];
+			for (const mode of modes) studio ??= studios.find((s) => s.mode === mode);
+			if (!studio) throw new HttpError(409, noStudioMessage(modes.join(" or ")));
+		}
+		const command: StudioCommand = { id: randomUUID(), kind, args };
+		const queue = this.queueFor(studio.id);
+		const info = { id: studio.id, mode: studio.mode, placeName: studio.placeName };
+		return new Promise<CommandResult>((resolve) => {
+			const timer = setTimeout(() => {
+				this.pending.delete(command.id);
+				const at = queue.commands.indexOf(command);
+				if (at !== -1) queue.commands.splice(at, 1);
+				resolve({ ok: false, studio: info, error: `Studio (${studio.mode}) didn't answer within ${Math.round(timeoutMs / 1000)} s` });
+			}, timeoutMs);
+			this.pending.set(command.id, {
+				studio: studio.id,
+				done: (result) => {
+					clearTimeout(timer);
+					this.pending.delete(command.id);
+					resolve(result);
+				},
+			});
+			queue.commands.push(command);
+			queue.waiter?.();
+		});
+	}
+
+	private queueFor(id: string) {
+		let queue = this.queues.get(id);
+		if (!queue) this.queues.set(id, (queue = { commands: [] }));
+		return queue;
+	}
+
+	/** Answers a plugin's poll with its queued commands, holding the request up to `holdMs` while there are none. */
+	private async poll(id: string, holdMs: number, gone?: AbortSignal): Promise<{ commands: StudioCommand[] }> {
+		const queue = this.queueFor(id);
+		if (queue.commands.length === 0 && holdMs > 0) {
+			queue.waiter?.(); // one poll per plugin: an older one answers empty
+			await new Promise<void>((done) => {
+				const timer = setTimeout(finish, holdMs);
+				gone?.addEventListener("abort", finish);
+				function finish() {
+					clearTimeout(timer);
+					gone?.removeEventListener("abort", finish);
+					if (queue.waiter === finish) queue.waiter = undefined;
+					done();
+				}
+				queue.waiter = finish;
+			});
+		}
+		if (gone?.aborted) return { commands: [] }; // keep them for the next poll
+		if (this.studios.has(id)) this.touch(id);
+		return { commands: queue.commands.splice(0) };
 	}
 
 	/** Marks a plugin as alive (any request from it). */
@@ -121,7 +226,9 @@ export class ControlServer {
 			this.checkRequest(req);
 			const url = new URL(req.url ?? "/", "http://127.0.0.1");
 			const body = req.method === "POST" ? await readJson(req) : undefined;
-			const result = await this.route(req.method ?? "GET", url, body as Record<string, unknown> | undefined);
+			const gone = new AbortController();
+			res.on("close", () => gone.abort());
+			const result = await this.route(req.method ?? "GET", url, body as Record<string, unknown> | undefined, gone.signal);
 			send(res, 200, result);
 		} catch (error) {
 			if (error instanceof HttpError) send(res, error.status, { error: error.message });
@@ -138,7 +245,8 @@ export class ControlServer {
 		if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) throw new HttpError(403, "bad Host");
 	}
 
-	protected async route(method: string, url: URL, body: Record<string, unknown> | undefined): Promise<unknown> {
+	/** `gone`: the caller hung up (a long poll must not hand its commands to a closed connection). */
+	protected async route(method: string, url: URL, body: Record<string, unknown> | undefined, gone?: AbortSignal): Promise<unknown> {
 		const key = `${method} ${url.pathname}`;
 		switch (key) {
 			case "GET /tt/hello":
@@ -156,6 +264,35 @@ export class ControlServer {
 			case "POST /tt/restart": {
 				const child = str(body?.child, "child", 40);
 				if (!(await this.handlers.restart(child))) throw new HttpError(404, `no child named ${child}`);
+				return { ok: true };
+			}
+			case "POST /tt/command": {
+				const kind = str(body?.kind, "kind", 20);
+				if (!(COMMAND_KINDS as readonly string[]).includes(kind)) throw new HttpError(400, `kind: one of ${COMMAND_KINDS.join(", ")}`);
+				const args = body?.args;
+				if (args !== undefined && (args === null || typeof args !== "object" || Array.isArray(args))) throw new HttpError(400, "args: expected an object");
+				const target = body?.target === undefined ? undefined : str(body.target, "target", 64);
+				const timeout = body?.timeoutMs === undefined ? COMMAND_TIMEOUT_MS : num(body.timeoutMs, "timeoutMs");
+				return this.command(kind as CommandKind, (args as Record<string, unknown>) ?? {}, target, Math.min(Math.max(timeout, 1000), COMMAND_TIMEOUT_MAX_MS));
+			}
+			case "GET /tt/plugin/poll": {
+				const id = str(url.searchParams.get("id") ?? undefined, "id", 64);
+				this.touch(id);
+				const hold = Number(url.searchParams.get("wait") ?? POLL_HOLD_MS / 1000);
+				return this.poll(id, Math.min(Math.max(Number.isFinite(hold) ? hold * 1000 : 0, 0), POLL_HOLD_MS), gone);
+			}
+			case "POST /tt/plugin/result": {
+				const studio = this.touch(str(body?.id, "id", 64));
+				const entry = this.pending.get(str(body?.command, "command", 64));
+				// Late (timed out) or someone else's: nothing waits for it.
+				if (!entry || entry.studio !== studio.id) return { ok: true, late: true };
+				const result = body?.result;
+				entry.done({
+					ok: body?.ok === true,
+					studio: { id: studio.id, mode: studio.mode, placeName: studio.placeName },
+					result: result && typeof result === "object" && !Array.isArray(result) ? (result as Record<string, unknown>) : undefined,
+					error: typeof body?.error === "string" ? body.error.slice(0, 2000) : undefined,
+				});
 				return { ok: true };
 			}
 			case "POST /tt/plugin/hello":
