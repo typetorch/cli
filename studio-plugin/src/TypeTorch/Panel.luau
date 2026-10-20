@@ -82,6 +82,15 @@ function Panel.new(plugin: Plugin, actions, version: string)
 	end, COLORS.accent)
 	self.confirmButton.TextColor3 = COLORS.dark
 
+	-- Playtest card
+	local playCard = Widgets.card(scroll)
+	Widgets.line(playCard, "Playtest", 15, COLORS.text, Enum.Font.BuilderSansBold)
+	Widgets.line(playCard, "Live playtest: code changes reach a running playtest without Stop + Play (kernel 0.5.4+).", 14, COLORS.dim)
+	local playButtons = Widgets.buttonRow(playCard)
+	self.liveButton = Widgets.button(playButtons, "Live playtest: on", function()
+		actions.setLivePlaytest(not self.livePlaytest)
+	end)
+
 	-- Compile card
 	local compileCard = Widgets.card(scroll)
 	Widgets.line(compileCard, "Compile", 15, COLORS.text, Enum.Font.BuilderSansBold)
@@ -121,6 +130,8 @@ function Panel:render(state)
 	self.autoConnect = state.autoConnect
 	self.autoButton.Text = if state.autoConnect then "Auto-connect: on" else "Auto-connect: off"
 	self.confirmButton.Visible = state.phase == "confirm"
+	self.livePlaytest = state.plugin == nil or state.plugin:GetSetting("TypeTorch_livePlaytest") ~= false
+	self.liveButton.Text = if self.livePlaytest then "Live playtest: on" else "Live playtest: off"
 
 	local status = state.status
 	if status and status.compile then

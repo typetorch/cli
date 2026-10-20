@@ -510,6 +510,11 @@ build's channel in brackets when it differs.
   and this one at a time.
 - **Agents.** `typetorch serve --detach` starts it in the background (log: `.typetorch/serve.log`) and returns once it
   answers; every subcommand takes `--json`. In the foreground, `--json` prints one JSON line per log line.
+- **Live playtest.** In a playtest the plugin also runs in the server DataModel, syncs Rojo into the running game and
+  sets `LiveReload` on `ServerStorage.TypeTorchDev` while that sync is up; the kernel (0.5.4+) then remounts the local
+  payload a moment after each change, so a save reaches the playtest without Stop + Play (server and client code, like
+  Reload). It follows the edit session's rules (the matching experience, or a server accepted with Connect anyway;
+  auto-connect on) and can be turned off in the panel ("Live playtest").
 - **An agent can always get Studio back.** The plugin long-polls the control API for commands whatever its sync is
   doing (down, backing off, waiting for a click, paused), so a broken sync doesn't cut the agent off:
   `typetorch studio reconnect` turns auto-connect on, resyncs from scratch and waits to report whether it connected

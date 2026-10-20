@@ -6,7 +6,8 @@ Install it with `typetorch studio install-plugin` (builds this folder with Rojo 
 
 - `src/Main.server.luau`: the plugin script.
 - `src/TypeTorch/App.luau`: finds the server (`GET /tt/hello` on 34880-34887), picks the one whose universeId matches
-  the place, runs Rojo's sync, reconnects, reports to the server.
+  the place, runs Rojo's sync, reconnects, reports to the server. In a playtest's server it syncs into the running game
+  and sets `ServerStorage.TypeTorchDev`'s `LiveReload` attribute, which makes the kernel (0.5.4+) reload on changes.
 - `src/TypeTorch/Agent.luau`: in every DataModel (edit, playtest server and client): runs the commands an agent sends
   through `typetorch studio` / `typetorch mcp` (long poll on `/tt/plugin/poll`), forwards Studio's Output, and in edit
   mode reconnects when the `TypeTorchReconnect` attribute is set on ServerStorage.

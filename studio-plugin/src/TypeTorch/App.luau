@@ -4,10 +4,13 @@
 -- on its own whenever the connection drops: nobody clicks Connect. A place that doesn't match (another experience, or
 -- an unpublished file) is never synced without a click on "Connect anyway".
 -- In every mode it also listens for an agent's commands and forwards Studio's Output (Agent.luau). In a playtest's
--- server and client DataModels that is all it does: the edit session keeps syncing.
+-- server it also syncs Rojo into the running game ("Live playtest", on by default) and sets LiveReload on
+-- ServerStorage.TypeTorchDev while that sync is up, so the kernel (0.5.4+) remounts the local payload on each change:
+-- code changes reach the playtest without Stop + Play.
 
 local HttpService = game:GetService("HttpService")
 local RunService = game:GetService("RunService")
+local ServerStorage = game:GetService("ServerStorage")
 
 local Root = script.Parent.Parent
 local Rojo = Root.Rojo
@@ -21,7 +24,7 @@ local Panel = require(script.Parent.Panel)
 
 local App = {}
 
-local VERSION = "0.2.0"
+local VERSION = "0.3.0"
 local PROBE_SECONDS = 2
 local HEARTBEAT_SECONDS = 5
 local STATUS_SECONDS = 3
@@ -30,6 +33,9 @@ local MAX_BACKOFF = 5
 local IDLE_PROBES = 15
 local IDLE_PROBE_SECONDS = 5
 local AGENT_RECONNECT_WAIT = 10
+-- After the playtest sync connects, wait this long before turning LiveReload on: Rojo's first sync isn't a change.
+local LIVE_RELOAD_DELAY = 1
+local LIVE_SETTING = "TypeTorch_livePlaytest"
 
 type Server = { port: number, hello: Control.Hello }
 
@@ -58,6 +64,37 @@ local panel
 
 local function settingKey(): string
 	return `TypeTorch_autoConnect_{if game.PlaceId ~= 0 then tostring(game.PlaceId) else "local"}`
+end
+
+-- The serve pid the user (or an agent) accepted for this place with "Connect anyway"; read by the playtest.
+local function confirmedKey(): string
+	return `TypeTorch_confirmedPid_{if game.PlaceId ~= 0 then tostring(game.PlaceId) else "local"}`
+end
+
+local function livePlaytest(): boolean
+	local saved = state.plugin and state.plugin:GetSetting(LIVE_SETTING)
+	return saved ~= false
+end
+
+local liveGeneration = 0
+
+-- The kernel watches ServerStorage.TypeTorchDev's LiveReload attribute (playtest server only).
+local function setLiveReload(on: boolean)
+	liveGeneration += 1
+	local generation = liveGeneration
+	local dev = ServerStorage:FindFirstChild("TypeTorchDev")
+	if not dev then
+		return
+	end
+	if not on then
+		dev:SetAttribute("LiveReload", nil)
+		return
+	end
+	task.delay(LIVE_RELOAD_DELAY, function()
+		if generation == liveGeneration and dev.Parent then
+			dev:SetAttribute("LiveReload", true)
+		end
+	end)
 end
 
 local function render()
@@ -161,6 +198,9 @@ local function connect(server: Server)
 		elseif status == ServeSession.Status.Disconnected then
 			state.session = nil
 			setPhase("disconnected", if detail then tostring(detail) else "connection closed")
+		end
+		if state.mode == "server" then
+			setLiveReload(status == ServeSession.Status.Connected)
 		end
 		if status ~= ServeSession.Status.Connecting then
 			settled = true
@@ -279,14 +319,27 @@ end
 function App.confirm()
 	if state.server then
 		state.confirmed[state.server.hello.pid] = true
+		if state.plugin then
+			state.plugin:SetSetting(confirmedKey(), state.server.hello.pid)
+		end
 	end
 	wake()
+end
+
+function App.setLivePlaytest(on: boolean)
+	if state.plugin then
+		state.plugin:SetSetting(LIVE_SETTING, on)
+	end
+	render()
 end
 
 -- An agent's "reconnect": auto-connect on, resync from scratch, and wait (a while) to say how it went.
 local function agentReconnect(args)
 	if args.anyway then
 		state.anyway = true
+		if state.server then
+			App.confirm()
+		end
 	end
 	if not state.autoConnect then
 		App.setAutoConnect(true)
@@ -371,7 +424,12 @@ end
 local function startAgent()
 	local handlers = {
 		ping = function()
-			return true, { mode = state.mode, phase = state.phase, detail = state.detail }
+			return true, {
+				mode = state.mode,
+				phase = state.phase,
+				detail = state.detail,
+				livePlaytest = livePlaytest(),
+			}
 		end,
 		stop = agentStop,
 	}
@@ -398,18 +456,42 @@ local function startAgent()
 	})
 end
 
--- A playtest's server or client DataModel: no sync, only the agent's commands and the Output.
+-- Whether the playtest may sync from `server`: the same rule as the edit session (its experience, or the serve the
+-- user accepted with "Connect anyway"), and only while the edit session's auto-connect is on.
+local function playtestMaySync(server: Server, matches: boolean): boolean
+	if not livePlaytest() or state.plugin:GetSetting(settingKey()) == false then
+		return false
+	end
+	return matches or state.plugin:GetSetting(confirmedKey()) == server.hello.pid
+end
+
+-- A playtest's server or client DataModel: the agent's commands and the Output; on the server, the live sync too.
 local function playtestLoop()
 	while state.plugin do
 		local found = Control.discover()
-		local server = choose(found)
+		local server, matches = choose(found)
 		if server and (not state.server or state.server.hello.pid ~= server.hello.pid) then
+			stopSession() -- serve restarted: start over
 			state.server = server
 			Control.request(server.port, "POST", "/tt/plugin/hello", App.helloBody())
 		elseif not server then
+			stopSession()
 			state.server = nil
 		end
 		if state.server then
+			local current = state.server
+			if
+				state.mode == "server"
+				and not state.session
+				and current.hello.rojoPort ~= 0
+				and playtestMaySync(current, matches)
+			then
+				connect(current)
+			elseif state.mode == "server" and state.session and not livePlaytest() then
+				stopSession()
+				setLiveReload(false)
+				setPhase("idle", "Live playtest is off")
+			end
 			report()
 		end
 		task.wait(HEARTBEAT_SECONDS)
@@ -439,6 +521,7 @@ function App.start(plugin: Plugin)
 		reconnect = App.reconnect,
 		setAutoConnect = App.setAutoConnect,
 		confirm = App.confirm,
+		setLivePlaytest = App.setLivePlaytest,
 	}, VERSION)
 	render()
 	task.spawn(loop)
