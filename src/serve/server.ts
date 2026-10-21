@@ -99,6 +99,7 @@ const REMOTE_ROUTES = new Set([
 	"GET /tt/claude/prompt",
 	"POST /tt/claude/deploy",
 	"POST /tt/claude/cancel",
+	"POST /tt/claude/v1",
 	"GET /tt/claude/chat",
 	"POST /tt/claude/chat",
 ]);
@@ -422,7 +423,13 @@ export class ControlServer {
 			case "POST /tt/claude/prompt": {
 				const prompt = str(body?.prompt, "prompt", 20_000);
 				const conversationId = body?.conversationId === undefined ? undefined : str(body.conversationId, "conversationId", 64);
-				return this.claude().prompt(this.claudeUser(remote, body?.user), prompt, conversationId);
+				const mode = body?.mode === undefined ? undefined : str(body.mode, "mode", 10);
+				if (mode !== undefined && mode !== "live" && mode !== "code") throw new HttpError(400, "mode: live or code");
+				const attachments = body?.attachments === undefined ? undefined : Array.isArray(body.attachments) && body.attachments.length <= 8 ? (body.attachments as unknown[]).map((id) => str(id, "attachments[]", 64)) : undefined;
+				if (body?.attachments !== undefined && attachments === undefined) throw new HttpError(400, "attachments: a list of attachment ids");
+				const context = body?.context === undefined ? undefined : typeof body.context === "object" && body.context !== null && !Array.isArray(body.context) ? (body.context as Record<string, unknown>) : undefined;
+				if (body?.context !== undefined && context === undefined) throw new HttpError(400, "context: an object");
+				return this.claude().prompt(this.claudeUser(remote, body?.user), prompt, conversationId, { mode, toolbox: body?.toolbox === true, attachments, context });
 			}
 			case "GET /tt/claude/prompt": {
 				const id = str(url.searchParams.get("id") ?? undefined, "id", 64);
@@ -436,6 +443,11 @@ export class ControlServer {
 			}
 			case "POST /tt/claude/cancel":
 				return this.claude().cancel(this.claudeUser(remote, body?.user), str(body?.id, "id", 64));
+			case "POST /tt/claude/v1": {
+				const method = str(body?.method, "method", 4);
+				if (method !== "GET" && method !== "POST") throw new HttpError(400, "method: GET or POST");
+				return this.claude().passthrough(this.claudeUser(remote, body?.user), method, str(body?.path, "path", 200), body?.body);
+			}
 			case "GET /tt/claude/chat":
 				return this.claude().chat(this.claudeUser(remote, url.searchParams.get("user")));
 			case "POST /tt/claude/chat": {

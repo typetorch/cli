@@ -67,6 +67,22 @@ function pidAlive(pid: number): boolean {
 	}
 }
 
+export interface PromptOptions {
+	mode?: "live" | "code";
+	toolbox?: boolean;
+	attachments?: string[];
+	context?: Record<string, unknown>;
+}
+
+const ID = "[A-Za-z0-9_-]{1,64}";
+/** remote-claude routes the Studio window may reach through serve (see passthrough). */
+const PASSTHROUGH: ["GET" | "POST", RegExp][] = [
+	["GET", new RegExp(`^/v1/conversations(/${ID})?$`)],
+	["POST", /^\/v1\/attachments(\/capture|\/asset)?$/],
+	["GET", new RegExp(`^/v1/images/${ID}(\\?chunk=\\d{1,4})?$`)],
+	["POST", /^\/v1\/logs$/],
+];
+
 /** Prompts kept per chat (older ones drop off the plugin's transcript). */
 const MAX_CHAT_PROMPTS = 100;
 
@@ -191,9 +207,13 @@ export class ClaudeBridge {
 		}
 	}
 
-	/** A Code-mode prompt; `conversationId` continues a conversation. */
-	async prompt(user: number, prompt: string, conversationId?: string) {
-		const started = await this.request(user, "POST", "/v1/prompts", { prompt, mode: "code", ...(conversationId ? { conversationId } : {}) });
+	/**
+	 * A prompt: Code mode unless the request says "live" (a running playtest answers the game tools, as job "" on this
+	 * PC), plus the in-game tab's options as remote-claude takes them (toolbox, attachments, context). `conversationId`
+	 * continues a conversation. remote-claude validates the fields.
+	 */
+	async prompt(user: number, prompt: string, conversationId?: string, options: PromptOptions = {}) {
+		const started = await this.request(user, "POST", "/v1/prompts", { prompt, mode: options.mode ?? "code", ...(conversationId ? { conversationId } : {}), ...(options.toolbox ? { toolbox: true } : {}), ...(options.attachments?.length ? { attachments: options.attachments } : {}), ...(options.context ? { context: options.context } : {}) });
 		const id = (started as { id?: unknown } | undefined)?.id;
 		if (typeof id === "string") {
 			// what was asked, so another copy of the plugin can show the user's bubble (remote-claude's polls don't carry it)
@@ -203,6 +223,15 @@ export class ClaudeBridge {
 			this.texts.set(user, texts);
 		}
 		return started;
+	}
+
+	/**
+	 * The rest of remote-claude's API the in-game Claude tab uses (recent chats, screenshots, Claude's images, log
+	 * uploads), for the same user; only these paths, never the game-server ones (/v1/game/*) or /v1/token.
+	 */
+	passthrough(user: number, method: "GET" | "POST", path: string, body?: unknown) {
+		if (!PASSTHROUGH.some(([m, pattern]) => m === method && pattern.test(path))) throw new ClaudeError(403, `not allowed: ${method} ${path}`);
+		return this.request(user, method, path, body);
 	}
 
 	/** The prompt's state and its events from `since`. */

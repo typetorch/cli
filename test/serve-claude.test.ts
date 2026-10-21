@@ -52,6 +52,8 @@ function fakeRemoteClaude() {
 		}
 		const poll = /^\/v1\/prompts\/(\w+)\?since=(\d+)$/.exec(req.url ?? "");
 		if (req.method === "GET" && poll) return reply(200, { id: poll[1], state: "done", events: [{ i: Number(poll[2]), kind: "assistant_text", text: `hi ${user}` }], next: Number(poll[2]) + 1 });
+		if (req.method === "GET" && req.url === "/v1/conversations") return reply(200, { conversations: [{ id: "c1", user }] });
+		if (req.method === "POST" && req.url === "/v1/attachments/capture") return reply(200, { id: "a1", width: 4, height: 2, got: body });
 		if (req.method === "POST" && /^\/v1\/prompts\/\w+\/deploy$/.test(req.url ?? "")) return reply(body.decision === "deploy" ? 200 : 400, { ok: true });
 		reply(404);
 	});
@@ -146,6 +148,21 @@ describe("serve --claude", () => {
 		writeFileSync(join(root, CLAUDE_SESSION_FILE), JSON.stringify({ v: 1, sid: "f".repeat(32), branch: "dev", port, url: null, pid: process.pid }));
 		expect(await call<unknown>(controlPort, "GET", "/tt/claude/chat?user=7")).toEqual({ prompts: [] });
 		writeSession(port);
+	});
+
+	test("Live mode, Toolbox, screenshots and context reach remote-claude as the in-game tab sends them", async () => {
+		syncCode();
+		await call(controlPort, "POST", "/tt/claude/prompt", { user: 7, prompt: "spin the door", mode: "live", toolbox: true, attachments: ["a1"], context: { path: "Workspace.Door" } });
+		expect(fake.state.prompts.at(-1)).toEqual({ user: 7, body: { prompt: "spin the door", mode: "live", toolbox: true, attachments: ["a1"], context: { path: "Workspace.Door" } } });
+		await expect(call(controlPort, "POST", "/tt/claude/prompt", { user: 7, prompt: "x", mode: "god" })).rejects.toThrow("mode");
+	});
+
+	test("the rest of the tab's API passes through for that user, game-server and token routes don't", async () => {
+		syncCode();
+		expect(await call<unknown>(controlPort, "POST", "/tt/claude/v1", { user: 7, method: "GET", path: "/v1/conversations" })).toEqual({ conversations: [{ id: "c1", user: 7 }] });
+		expect(await call<unknown>(controlPort, "POST", "/tt/claude/v1", { user: 7, method: "POST", path: "/v1/attachments/capture", body: { captureTime: 1 } })).toEqual({ id: "a1", width: 4, height: 2, got: { captureTime: 1 } });
+		for (const [method, path] of [["GET", "/v1/game/pending"], ["POST", "/v1/token"], ["POST", "/v1/conversations"], ["GET", "/v1/conversations/../token"]])
+			await expect(call(controlPort, "POST", "/tt/claude/v1", { user: 7, method, path })).rejects.toThrow("not allowed");
 	});
 
 	test("concurrent requests share one token exchange (refresh tokens rotate)", async () => {
