@@ -233,6 +233,12 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch assets status` / `typetorch assets list` | export + diff without uploading / the lockfile |
 | `typetorch remote-claude --users <ids> [...]` | runs `typetorch-dev-server remote-claude` ([`@typetorch/dev-server`](https://github.com/typetorch/dev-server)) with the same arguments in this terminal, and exits with its code: devs prompt Claude Code on this machine from the in-game DEV > Claude tab (dev-channel branches only). Found in `TYPETORCH_DEV_SERVER` (an entry), `node_modules/@typetorch/dev-server` in the game repo or a parent, next to this CLI (`npm i -g @typetorch/dev-server`; with npx: `npx -p @typetorch/cli -p @typetorch/dev-server typetorch remote-claude ...`), or a sibling `../dev-server` checkout; else a clear error. It gets the real environment (the dev-server reads the key, `--env-file` / `TYPETORCH_ENV_FILE` and `.env` itself) |
 | `typetorch dev --users <ids> [...]` | the same as `typetorch remote-claude` |
+| `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <scripts>]` | the Studio dev loop in one process: rbxtsc -w, `rojo serve`, extra package.json scripts, and the control API the TypeTorch Studio plugin attaches to by itself; see "Studio: typetorch serve" |
+| `typetorch serve status` / `stop` / `restart <child>` / `logs [--studio] [--follow]` | the running server's children, attached Studios, sync state and compile errors / stop it / restart one child / its log |
+| `typetorch studio status` / `reconnect [--anyway]` / `play [--run]` / `stop` / `logs [--follow]` | drives the Studio the plugin attached: its sync state / resync from scratch / start / end a playtest / Studio's Output |
+| `typetorch studio install-plugin` | builds the TypeTorch Studio plugin into Studio's plugins folder |
+| `typetorch assets types [--out <file>]` | writes `src/shared/assets.gen.ts`: the hot asset keys with their classes and a `HotAssetKey` type (sync refreshes it once it exists) |
+| `typetorch mcp` | an MCP server on stdio with `serve` and `studio` as tools, for agents |
 | `typetorch migrate --from flamework [--dry-run] [--net compat\|native] [--report <file>] [--allow-dirty]` | the mechanical part of moving a Flamework 1.x game (see "Migrating from Flamework"); local only, no keys |
 | `typetorch update [<version>] [--check] [--yes]` | updates this CLI to the newest `@typetorch/cli` on npm (or `<version>`) the way it was installed: in the game's `package.json` with its package manager (bun, pnpm, yarn or npm, from the lockfile; a devDependency stays one), or globally (`npm i -g`, `bun add -g`, pnpm, yarn). Asks y/N first (`--yes` skips; without a terminal it prints the command). npx needs nothing (`npx @typetorch/cli@latest`); a git checkout gets the `git pull` to run. `--check` only shows the versions and the command. After any other command at a terminal, the CLI checks npm at most once a day (1.5 s timeout, cached in `~/.typetorch/update-check.json`) and, when a newer version is out, asks once whether to update now; after a no it reminds once a day. Never in CI, `--json` or non-interactive runs; `TYPETORCH_UPDATE_CHECK=off` turns it off |
 | `typetorch doctor [--show-ok]` | prints the **Config** section (every value the CLI reads and where it came from: typetorch.json, the game repo's `.env`, the environment, the settings record; secrets only as set / unset), then checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the health window per channel and the auto-rollback threshold, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), the backend (typetorch.json `backend.url` with your keys: url, `/healthz`, the game key's and the admin token's roles; the record's own backend section; a stale tunnel or a wrong key is a FAIL with the fix), the backend's owner list against the signed record, **live servers** (FAIL when the published place has the kernel, the default branch has no verified head in the DataStore heads or the kernel's BootstrapHeads, and the place has no backup build: kernel 0.3.6+ then moves every player out after 15 s and kicks after 3 bounces; the fix names the git branch mapped to the default branch and `kernel restore --version <n>`), **old game build** (warn when a roblox-ts build such as `ServerScriptService.TS` or `ReplicatedStorage.rbxts_include` runs next to the kernel), and probes each key's scopes with harmless calls. Only problems and info lines print; `--show-ok` lists the passed checks too (`--json` always has every check) |
@@ -478,6 +484,58 @@ servers take only a previous head whose signature verifies); `typetorch rollback
 branch back. Records written before have no `prev` (the kernel falls back to the deployment history).
 `typetorch deployments` shows each row's branch channel (prod: the default branch or one configured prod), with the
 build's channel in brackets when it differs.
+
+### Studio: typetorch serve
+
+`typetorch serve` replaces the terminals of the Studio loop (`bun run watch`, `bun run studio`, and anything else with
+`--with <script>`; `--live` = `--with live`) with one process, and adds a control API the **TypeTorch Studio plugin**
+([typetorch/studio-plugin](https://github.com/typetorch/studio-plugin): `bun add -d @typetorch/studio-plugin`, then
+`typetorch studio install-plugin`) attaches to by itself.
+
+- **Children.** `watch` runs the game's `watch` script (else `bun run rbxtsc -w`); `rojo` runs `rojo serve
+  studio.project.json` (else `default.project.json`; `--project`) on Rojo's default port 34872 or the next free one, so
+  the stock Rojo plugin still works; each `--with` script runs as `bun run <script>`. A child that exits is restarted
+  with backoff (0.5 s doubling to 10 s; reset after 30 s up). Ctrl+C or `typetorch serve stop` stops them all (the
+  whole process tree on Windows). Children get the CLI's minimal environment, no keys.
+- **Compile state.** The `rbxtsc -w` output is parsed: `serve status` (and the plugin's panel) shows "2 errors" with
+  file, line and message, so an agent doesn't scrape a terminal.
+- **Control API.** `127.0.0.1`, the first free port of 34880-34887. Every request needs `X-TypeTorch: 1`, a loopback
+  `Host` and no `Origin`; no CORS, so a browser page can't call it. `.typetorch/serve.json` (git-ignored with
+  `.typetorch/`) records the port and pid; `serve status`, `stop`, `restart` and `logs` find the server through it and
+  check its `/tt/hello` (same pid) before sending anything.
+- **The plugin attaches by itself.** In edit mode it probes 34880-34887 every 2 s, takes the server whose
+  `typetorch.json` `universeId` equals the place's `game.GameId`, and runs Rojo's own sync (Rojo 7.7.0-rc.1's
+  ServeSession, vendored) against that server's Rojo. A dropped connection or a restarted `serve` is reconnected with a
+  full resync, backing off to 5 s. A place that doesn't match (another experience, or an unpublished file) is only
+  synced after a click on **Connect anyway**. Auto-connect can be turned off per place. Its panel (the dev menu's look)
+  shows the sync state, the server, the last sync and the compile errors. Connect only one of the stock Rojo plugin
+  and this one at a time.
+- **Agents.** `typetorch serve --detach` starts it in the background (log: `.typetorch/serve.log`) and returns once it
+  answers; every subcommand takes `--json`. In the foreground, `--json` prints one JSON line per log line.
+- **Live playtest.** In a playtest the plugin also runs in the server DataModel, syncs Rojo into the running game and
+  sets `LiveReload` on `ServerStorage.TypeTorchDev` while that sync is up; the kernel (0.5.4+) then remounts the local
+  payload a moment after each change, so a save reaches the playtest without Stop + Play (server and client code, like
+  Reload). It follows the edit session's rules (the matching experience, or a server accepted with Connect anyway;
+  auto-connect on) and can be turned off in the panel ("Live playtest").
+- **Hot assets without the CLI.** The panel's Hot assets card marks the selected instance (`TypeTorchAsset` = a key
+  suggested from its name) or unmarks it, lists what the place marks against the lockfile, and flags what a sync would
+  refuse (bad or duplicate keys, scripts inside, nesting) before anything runs. **Check**, **Sync** and **Sync + deploy
+  to dev** run `typetorch assets status`, `assets sync` and `assets sync --deploy <dev branch>` inside `serve` (its
+  env file and keys; progress in `serve logs`). The dev branch is `dev` (`serve --dev-branch <b>`); a prod-channel
+  branch is refused, and the deploy follows the approval policy like any other (a proposal when it needs approval).
+  Sync reads the published place, so publish first.
+- **An agent can always get Studio back.** The plugin long-polls the control API for commands whatever its sync is
+  doing (down, backing off, waiting for a click, paused), so a broken sync doesn't cut the agent off:
+  `typetorch studio reconnect` turns auto-connect on, resyncs from scratch and waits to report whether it connected
+  (`--anyway` also accepts a place of another experience or an unpublished one); `studio play [--run]` and `studio
+  stop` start and end a playtest (StudioTestService; the plugin also runs in the playtest's server and client); `studio
+  logs` is Studio's Output, edit and playtest, as the plugin forwards it. When no Studio is attached at all, the error
+  says why and gives the last resort: setting `ServerStorage`'s `TypeTorchReconnect` attribute (Studio's command bar,
+  or the Roblox Studio MCP's `execute_luau`) makes the plugin reconnect:
+  `game:GetService("ServerStorage"):SetAttribute("TypeTorchReconnect", os.time())`.
+- **MCP.** `typetorch mcp` serves the same as tools over stdio (`serve_status`, `serve_start`, `serve_stop`,
+  `serve_logs`, `studio_logs`, `studio_reconnect`, `studio_play`, `studio_stop`). Claude Code, from the game repo:
+  `claude mcp add typetorch -- bunx typetorch mcp`.
 
 ### Hot assets
 

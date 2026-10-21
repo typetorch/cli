@@ -7,6 +7,7 @@ export const HELP_GROUPS: [title: string, commands: string[]][] = [
 	["Approvals", ["approve", "proposals", "reject"]],
 	["Live servers", ["servers", "report", "alerts", "deployments", "branch", "pin", "experiment"]],
 	["Setup", ["init", "doctor", "keys", "settings", "access", "backend", "kernel", "backup", "assets"]],
+	["Studio", ["serve", "studio", "mcp"]],
 	["Tools", ["dev", "migrate", "update"]],
 ];
 

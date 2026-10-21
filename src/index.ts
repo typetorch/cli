@@ -43,6 +43,8 @@ import { pinCommand, pinFlags } from "./commands/pin.ts";
 import { promoteCommand, promoteFlags } from "./commands/promote.ts";
 import { REMOTE_CLAUDE_USAGE, remoteClaudeCommand } from "./commands/remote-claude.ts";
 import { rollbackCommand, rollbackFlags } from "./commands/rollback.ts";
+import { MCP_USAGE, mcpServe } from "./commands/mcp.ts";
+import { SERVE_USAGE, serveCommand, serveFlags, STUDIO_USAGE, studioCommand, studioFlags } from "./commands/serve.ts";
 import { UPDATE_USAGE, updateCommandRun, updateFlags } from "./commands/update.ts";
 import { gameDirFor, redact, Settings, useSettings } from "./env.ts";
 import { closestCommand, renderHelp } from "./help.ts";
@@ -391,6 +393,7 @@ typetorch keys resign [--key-file <path>] [--fallback-key-file <path>]
 		usage: `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n>] [--moderation-timeout <s>]
 typetorch assets status [--place-version <n>]
 typetorch assets list
+typetorch assets types [--out <file>]
 
   Hot assets (TypeTorch plans/13): instances in the place with the attribute TypeTorchAsset = "<key>" (lowercase
   a-z 0-9 / - _, at most 64 characters, unique, no scripts inside, not inside another hot asset).
@@ -408,7 +411,34 @@ typetorch assets list
                      committed first, so --deploy refuses it when the sync changes the lockfile.
   status  export + diff, nothing uploaded or written
   list    the lockfile
+  types   writes src/shared/assets.gen.ts (or --out): HOT_ASSETS (key -> class) and the HotAssetKey type, from the
+          lockfile; sync refreshes it once it exists
   Scopes (the assets key): asset:read, asset:write, universe.place.luau-execution-session:read and :write.`,
+	},
+	serve: {
+		flags: serveFlags,
+		run: serveCommand,
+		summary: "the Studio dev loop: watch + Rojo + plugin control, one process",
+		usage: SERVE_USAGE,
+	},
+	studio: {
+		flags: studioFlags,
+		run: studioCommand,
+		summary: "drive the attached Studio: reconnect, play, stop, logs; install the plugin",
+		usage: STUDIO_USAGE,
+	},
+	mcp: {
+		flags: {},
+		run: async () => {},
+		raw: (argv) => {
+			if (argv.length) {
+				console.error(argv.some((a) => HELP_WORDS.has(a)) ? MCP_USAGE : `typetorch mcp takes no arguments\n${MCP_USAGE}`);
+				return Promise.resolve(argv.some((a) => HELP_WORDS.has(a)) ? 0 : 2);
+			}
+			return mcpServe(pkg.version);
+		},
+		summary: "an MCP server (stdio) with serve and studio as tools, for agents",
+		usage: MCP_USAGE,
 	},
 	"remote-claude": {
 		flags: {},
