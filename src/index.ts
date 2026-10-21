@@ -392,6 +392,7 @@ typetorch keys resign [--key-file <path>] [--fallback-key-file <path>]
 		summary: "sync hot assets from the place",
 		usage: `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n>] [--moderation-timeout <s>]
 typetorch assets status [--place-version <n>]
+typetorch assets sync|status --studio-export <file>
 typetorch assets list
 typetorch assets types [--out <file>]
 
@@ -406,6 +407,8 @@ typetorch assets types [--out <file>]
           5. writes typetorch.assets.lock.json (commit it); \`typetorch deploy\` stamps its asset map on the payload as
              the Assets attribute
   --dry-run          stop after the diff (= assets status)
+  --studio-export <file>  step 1 from the Studio plugin's export of the open place (what its Hot assets buttons use,
+                     through \`typetorch serve\`): no publish needed. Changed entries record place version 0
   --deploy <branch>  then deploy that branch (same approval policy; --message, --propose, --proposed-by,
                      --no-registry and the key file flags are passed on). A prod-channel branch needs the lockfile
                      committed first, so --deploy refuses it when the sync changes the lockfile.

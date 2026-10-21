@@ -7,6 +7,9 @@
  *                                         write the lockfile; --deploy then runs `typetorch deploy --branch <branch>`
  *                                         (same approval policy). --dry-run stops after the diff.
  *   status                                export + diff only (= sync --dry-run)
+ *   --studio-export <file>                export from this file instead (the Studio plugin's export of the open place,
+ *                                         written by `typetorch serve`): no publish needed; the lockfile records place
+ *                                         version 0 when entries change (servers load every key)
  *   list                                  the lockfile
  *
  * Everything uses the assets key: asset:read + asset:write (uploads; asset:read also on the place for its version
@@ -28,6 +31,8 @@ import {
 	latestPublishedVersion,
 	nextLock,
 	parseExport,
+	parseStudioExport,
+	STUDIO_PLACE_VERSION,
 	parseResolve,
 	readAssetLog,
 	readAssetsLock,
@@ -56,6 +61,7 @@ export const assetsFlags = {
 	"dry-run": "boolean",
 	deploy: "string",
 	"place-version": "string",
+	"studio-export": "string",
 	"moderation-timeout": "string",
 	out: "string",
 	// passed on to the deploy (--deploy)
@@ -89,7 +95,7 @@ function explainRefusal(error: unknown, what: string, scopes: string): never {
 export interface PlaceExport {
 	placeVersion: number;
 	/** How the version was chosen. */
-	base: "latest published" | "--place-version";
+	base: "latest published" | "--place-version" | "studio";
 	/** Saved versions newer than the published one (not exported). */
 	newerSaves: number;
 	result: ExportResult;
@@ -138,6 +144,19 @@ export async function exportPlace(oc: OpenCloud, proj: Project, versionFlag?: st
 		warn(`the export task ran on place version ${placeVersion} but game.PlaceVersion says ${result.reportedPlaceVersion}`);
 	}
 	return { placeVersion, base, newerSaves, result, binaryBytes: binary?.length ?? 0, taskPath: run.path };
+}
+
+/** Step 1 from the Studio plugin's export of the open place (--studio-export). */
+export function exportStudio(proj: Project, file: string): PlaceExport {
+	let raw: unknown;
+	try {
+		raw = JSON.parse(readFileSync(file, "utf8"));
+	} catch (error) {
+		throw new UsageError(`--studio-export ${file}: ${(error as Error).message}`);
+	}
+	const result = parseStudioExport(raw, proj.config.placeId);
+	const binaryBytes = typeof (raw as { binary?: unknown }).binary === "string" ? Buffer.byteLength((raw as { binary: string }).binary, "base64") : 0;
+	return { placeVersion: STUDIO_PLACE_VERSION, base: "studio", newerSaves: 0, result, binaryBytes };
 }
 
 interface Outcome {
@@ -217,16 +236,23 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 		if (problem) throw new UsageError(`--deploy: ${problem}`);
 	}
 	const moderationTimeout = flagInt(args, "moderation-timeout", 600);
-	const oc = deps.assets ?? openCloud("assets")!;
+	const studioExport = flagString(args, "studio-export");
+	// A check of the plugin's export runs locally: no key needed until something is uploaded.
+	const oc = deps.assets ?? openCloud("assets", studioExport !== undefined && dryRun) ?? (undefined as unknown as OpenCloud);
 	const lock = readAssetsLock(proj.root);
 	const watch = new Stopwatch();
 
-	const placed = await watch.stage("export", () => exportPlace(oc, proj, flagString(args, "place-version")));
+	if (studioExport !== undefined && flagString(args, "place-version") !== undefined) throw new UsageError("--studio-export and --place-version can't be combined");
+	const placed = await watch.stage("export", async () => (studioExport !== undefined ? exportStudio(proj, studioExport) : exportPlace(oc, proj, flagString(args, "place-version"))));
 	const changes = diffAssets(lock, placed.result.assets);
 	const counts = countChanges(changes);
 	const pending = changes.filter((c) => c.status === "added" || c.status === "updated");
 	const saves = placed.newerSaves ? `; ${placed.newerSaves} newer unpublished save(s) not included` : "";
-	info(`place      ${placeId} v${placed.placeVersion} (${placed.base}${saves}), exported in ${formatSeconds(watch.timings.export)}`);
+	info(
+		placed.base === "studio"
+			? `place      ${placeId} as open in Studio, exported by the plugin`
+			: `place      ${placeId} v${placed.placeVersion} (${placed.base}${saves}), exported in ${formatSeconds(watch.timings.export)}`,
+	);
 	info(`lockfile   ${describeLock(lock)}`);
 	info(`assets     ${placed.result.assets.length} in the place: ${counts.added} added, ${counts.updated} updated, ${counts.removed} removed, ${counts.unchanged} unchanged`);
 	printChanges(changes);
@@ -246,7 +272,9 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 	// runtime adopts the place's own copies only on servers of exactly that version). An empty place and no lockfile:
 	// nothing to write.
 	const entriesChange = pending.length > 0 || counts.removed > 0 || changes.some((c) => c.moved);
-	const lockChanges = entriesChange || (lock ? lock.placeVersion !== placed.placeVersion : placed.result.assets.length > 0);
+	// From Studio, unchanged entries still match the lockfile's place version; changed ones match none (0).
+	const lockPlaceVersion = placed.base === "studio" && !entriesChange && lock ? lock.placeVersion : placed.placeVersion;
+	const lockChanges = entriesChange || (lock ? lock.placeVersion !== lockPlaceVersion : placed.result.assets.length > 0);
 	if (dryRun) {
 		if (isJson()) return emitJson({ ...base, mode, dryRun: true, upToDate: !lockChanges, changes: changes.map((c) => changeJson(c)) });
 		info(
@@ -330,7 +358,7 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 				await watch.stage("resolve", async () => {
 					let run;
 					try {
-						run = await oc.runLuau(universeId, placeId, resolveScript(items), 300, { version: placed.placeVersion });
+						run = await oc.runLuau(universeId, placeId, resolveScript(items), 300, placed.base === "studio" ? {} : { version: placed.placeVersion });
 					} catch (error) {
 						explainRefusal(error, "creating the Luau Execution resolve task", LUAU_SCOPES);
 					}
@@ -356,7 +384,7 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 			const failed = [...outcomes].filter(([, o]) => o.error).map(([key]) => key);
 			const uploaded = new Map<string, { id: number; ver: number; n: number }>();
 			for (const [key, outcome] of outcomes) if (outcome.upload && outcome.ver !== undefined && !outcome.error) uploaded.set(key, { id: outcome.upload.assetId, ver: outcome.ver, n: outcome.upload.n });
-			const next = nextLock({ placeVersion: placed.placeVersion, changes, uploaded });
+			const next = nextLock({ placeVersion: lockPlaceVersion, changes, uploaded });
 			const written = failed.length === 0 && lockChanges && formatAssetsLock(next) !== (lock ? formatAssetsLock(lock) : undefined);
 			if (written) {
 				writeAssetsLock(proj.root, next);
@@ -385,7 +413,7 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 			failed.length
 				? bold(`${ASSETS_LOCK_FILE} NOT written: ${failed.length} asset(s) failed (its place version must match every entry). Fix them and sync again; approved uploads are reused`)
 				: written
-					? bold(`wrote ${ASSETS_LOCK_FILE} (place v${next!.placeVersion}): ${counts.added} added, ${counts.updated} updated, ${counts.removed} removed, ${counts.unchanged} unchanged`)
+					? bold(`wrote ${ASSETS_LOCK_FILE} (${next!.placeVersion === STUDIO_PLACE_VERSION ? "from Studio" : `place v${next!.placeVersion}`}): ${counts.added} added, ${counts.updated} updated, ${counts.removed} removed, ${counts.unchanged} unchanged`)
 					: dim(next ? `up to date: ${ASSETS_LOCK_FILE} unchanged` : `no hot assets in the place: no ${ASSETS_LOCK_FILE} written`),
 		);
 		info(dim(`  ${Object.entries(watch.total()).map(([stage, s]) => `${stage} ${formatSeconds(s)}`).join(", ")}`));

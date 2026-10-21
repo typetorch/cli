@@ -274,7 +274,7 @@ describe("lockfile", () => {
 		expect(formatAssetsLock({ v: 1, placeVersion: 3, assets: {} })).toBe(`{\n\t"v": 1,\n\t"placeVersion": 3,\n\t"assets": {}\n}\n`);
 	});
 	test("invalid lockfiles are refused with every problem", () => {
-		const { errors } = validateAssetsLock({ v: 2, placeVersion: 0, assets: { "Bad Key": { id: 1, ver: 2, n: 3, hash: "abc", realm: "client", path: "", className: "Folder" } } });
+		const { errors } = validateAssetsLock({ v: 2, placeVersion: -1, assets: { "Bad Key": { id: 1, ver: 2, n: 3, hash: "abc", realm: "client", path: "", className: "Folder" } } });
 		expect(errors.join("\n")).toContain('"v" must be 1');
 		expect(errors.join("\n")).toContain("placeVersion");
 		expect(errors.join("\n")).toContain('key "Bad Key"');
@@ -434,6 +434,36 @@ describe("diff, versions and the next lockfile", () => {
 });
 
 // The command, against a fake Open Cloud ------------------------------------------------------------------------------
+
+describe("typetorch assets sync --studio-export", () => {
+	function studioFile(root: string, assets: FakeAsset[], placeId: unknown = "2") {
+		const { meta, binary } = fakeExport(assets);
+		const file = join(root, "studio-export.json");
+		writeFileSync(file, JSON.stringify({ ...meta, placeId, binary: Buffer.from(binary).toString("base64") }));
+		return file;
+	}
+	test("uploads from the plugin's export without a place export, records place version 0, resolves on the latest version", async () => {
+		const root = gameProject(lockOf({ "ui/shop": { id: 700, hash: "111111111111" } }, 57));
+		const { scripts, calls } = mockCloud({ exportAssets: [] });
+		const json = await run(root, ["sync", "--studio-export", studioFile(root, [SHOP])]);
+		expect(scripts.map((s) => s.kind)).toEqual(["resolve"]);
+		expect(calls.some((c) => c.method === "POST" && c.path === "/cloud/v2/universes/42/places/2/luau-execution-session-tasks")).toBe(true);
+		expect(json).toMatchObject({ base: "studio", placeVersion: 0, counts: { updated: 1 } });
+		expect(readAssetsLock(root)!.placeVersion).toBe(0);
+		expect(readAssetsLock(root)!.assets["ui/shop"]).toMatchObject({ id: 700, hash: hashOf(SHOP) });
+	});
+	test("nothing changed: the lockfile keeps its place version", async () => {
+		const root = gameProject(lockOf({ "ui/shop": { id: 700, hash: hashOf(SHOP), path: "ReplicatedStorage/Assets/UI", className: "ScreenGui" } }, 57));
+		mockCloud();
+		const json = await run(root, ["status", "--studio-export", studioFile(root, [SHOP])]);
+		expect(json).toMatchObject({ base: "studio", upToDate: true });
+	});
+	test("an export from another place is refused", async () => {
+		const root = gameProject();
+		mockCloud();
+		await expect(run(root, ["status", "--studio-export", studioFile(root, [SHOP], "999")])).rejects.toThrow(/place 999/);
+	});
+});
 
 describe("typetorch assets sync", () => {
 	test("first sync: creates (placeholder, then PATCH) each new asset, resolves versions, writes the lockfile", async () => {

@@ -2,9 +2,14 @@
  * Jobs `typetorch serve` runs for the Studio plugin's buttons, so nobody types a CLI command: hot asset checks, syncs
  * and a sync with a deploy to a dev branch. Each job is this CLI run again in the game repo with --json (same
  * runtime, entry point and env file), its stderr in serve's log, its JSON answer kept as the result. One at a time.
+ *
+ * With `studioExport` (the plugin's export of the open place) the job reads the hot assets from it instead of the
+ * published place (`--studio-export`), so nobody has to publish first.
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { HttpError } from "./server.ts";
 
 export const JOB_KINDS = ["assets-status", "assets-sync", "assets-deploy-dev"] as const;
@@ -24,6 +29,8 @@ export interface Job {
 }
 
 const TAIL_LINES = 40;
+/** Where a job's Studio export is written (in the game repo; .typetorch/ is git-ignored). */
+export const STUDIO_EXPORT_FILE = join(".typetorch", "studio-export.json");
 const KEEP_JOBS = 20;
 
 export interface JobRunnerOptions {
@@ -67,7 +74,7 @@ export class JobRunner {
 		return [...this.jobs];
 	}
 
-	start(kind: JobKind): Job {
+	start(kind: JobKind, studioExport?: Record<string, unknown>): Job {
 		const busy = this.running;
 		if (busy) throw new HttpError(409, `a ${busy.kind} job is still running`);
 		if (kind === "assets-deploy-dev" && this.options.isProd(this.options.devBranch)) {
@@ -77,6 +84,12 @@ export class JobRunner {
 		this.jobs.push(job);
 		if (this.jobs.length > KEEP_JOBS) this.jobs.splice(0, this.jobs.length - KEEP_JOBS);
 		const args = [...jobArgs(kind, this.options.devBranch), ...this.options.baseArgs];
+		if (studioExport) {
+			const file = join(this.options.root, STUDIO_EXPORT_FILE);
+			mkdirSync(join(this.options.root, ".typetorch"), { recursive: true });
+			writeFileSync(file, JSON.stringify(studioExport));
+			args.push("--studio-export", STUDIO_EXPORT_FILE);
+		}
 		const [bin, ...rest] = (this.options.command ?? defaultCommand)(args);
 		this.options.log("info", `${kind}: typetorch ${args.join(" ")}`);
 		let stdout = "";

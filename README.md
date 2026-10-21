@@ -229,7 +229,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch keys init [--key-file]` / `keys init --fallback [--force] [--yes]` / `keys rotate [--yes]` / `keys resign` | the signing keys: see "Signing prod deploys" |
 | `typetorch pin <artifact> --branch <b> (--servers <ids> \| --pct <1-99>)` / `pin --unpin --branch <b> (--servers <ids> \| --all)` | A/B experiment pins, signed on prod-channel branches; `--by`, `--dry-run` |
 | `typetorch reject <id> [--reason]` / `typetorch proposals [--all]` | drop a proposal / list them |
-| `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n>]` | hot assets: export the instances marked `TypeTorchAsset` from the place's latest published version, upload new and changed ones, write `typetorch.assets.lock.json`; see "Hot assets" |
+| `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n> \| --studio-export <file>]` | hot assets: export the instances marked `TypeTorchAsset` from the place's latest published version (or the Studio plugin's export), upload new and changed ones, write `typetorch.assets.lock.json`; see "Hot assets" |
 | `typetorch assets status` / `typetorch assets list` | export + diff without uploading / the lockfile |
 | `typetorch remote-claude --users <ids> [...]` | runs `typetorch-dev-server remote-claude` ([`@typetorch/dev-server`](https://github.com/typetorch/dev-server)) with the same arguments in this terminal, and exits with its code: devs prompt Claude Code on this machine from the in-game DEV > Claude tab (dev-channel branches only). Found in `TYPETORCH_DEV_SERVER` (an entry), `node_modules/@typetorch/dev-server` in the game repo or a parent, next to this CLI (`npm i -g @typetorch/dev-server`; with npx: `npx -p @typetorch/cli -p @typetorch/dev-server typetorch remote-claude ...`), or a sibling `../dev-server` checkout; else a clear error. It gets the real environment (the dev-server reads the key, `--env-file` / `TYPETORCH_ENV_FILE` and `.env` itself) |
 | `typetorch dev --users <ids> [...]` | the same as `typetorch remote-claude` |
@@ -517,13 +517,14 @@ build's channel in brackets when it differs.
   payload a moment after each change, so a save reaches the playtest without Stop + Play (server and client code, like
   Reload). It follows the edit session's rules (the matching experience, or a server accepted with Connect anyway;
   auto-connect on) and can be turned off in the panel ("Live playtest").
-- **Hot assets without the CLI.** The panel's Hot assets card marks the selected instance (`TypeTorchAsset` = a key
-  suggested from its name) or unmarks it, lists what the place marks against the lockfile, and flags what a sync would
-  refuse (bad or duplicate keys, scripts inside, nesting) before anything runs. **Check**, **Sync** and **Sync + deploy
-  to dev** run `typetorch assets status`, `assets sync` and `assets sync --deploy <dev branch>` inside `serve` (its
-  env file and keys; progress in `serve logs`). The dev branch is `dev` (`serve --dev-branch <b>`); a prod-channel
-  branch is refused, and the deploy follows the approval policy like any other (a proposal when it needs approval).
-  Sync reads the published place, so publish first.
+- **Hot assets without the CLI.** The panel's Hot assets card marks every selected instance with **Add** (a key from
+  its name, or the name box) and unmarks with **Remove**, and shows each marked instance as new, changed, up to date
+  or what a sync would refuse (bad or duplicate keys, scripts inside, nesting). The plugin exports the marked
+  instances from the open place itself (`SerializationService`), so nothing has to be published first: **Check**,
+  **Upload** and **Publish to dev** run `typetorch assets status`, `assets sync` and `assets sync --deploy <dev
+  branch>` inside `serve` on that export (`--studio-export`; its env file and keys; progress in `serve logs`). Check
+  needs no key. The dev branch is `dev` (`serve --dev-branch <b>`); a prod-channel branch is refused, and the deploy
+  follows the approval policy like any other (a proposal when it needs approval).
 - **An agent can always get Studio back.** The plugin long-polls the control API for commands whatever its sync is
   doing (down, backing off, waiting for a click, paused), so a broken sync doesn't cut the agent off:
   `typetorch studio reconnect` turns auto-connect on, resyncs from scratch and waits to report whether it connected
@@ -569,6 +570,11 @@ versions without a restart (the framework's `hotAsset`). Guide: [Hot assets](htt
      copies on that promise. A failed run writes nothing and exits 1; the next run reuses its approved uploads
      (`assets.jsonl`) and a placeholder it created. A newer published place with the same assets only updates
      `placeVersion`.
+  From Studio (`--studio-export <file>`, what the plugin's buttons use): step 1 reads the plugin's export of the open
+  place instead, so unpublished edits count. Changed entries then match no place version, so the lockfile records
+  `placeVersion` 0 and new servers load every key whose copy differs; when nothing changed, the lockfile keeps its
+  place version. The next sync from a published place records that version again. An export from another place is
+  refused.
   6. **Report** and print the next step. `--dry-run` stops after the diff. `--deploy <branch>` then runs `typetorch
      deploy --branch <branch>` (same approval policy; `--message`, `--propose`, `--proposed-by`,
      `--moderation-timeout` and the key file flags are passed on) when the Assets attribute changes. A prod-channel
