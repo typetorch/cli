@@ -1,9 +1,10 @@
 /**
- * `typetorch serve --remote`: one port for a Studio on another machine, meant to sit behind a tunnel the owner runs
- * (Cloudflare Tunnel: `service: http://localhost:<port>`). It listens on 127.0.0.1 only; the tunnel is what makes it
+ * `typetorch serve --remote`: one port for a Studio on another machine, behind a tunnel: serve's own Cloudflare quick
+ * tunnel (tunnel.ts) or one the owner runs (`--url`). It listens on 127.0.0.1 only; the tunnel is what makes it
  * public, so every request but pairing needs a device token (pairing.ts):
  *
  *   GET  /tt/claude/stream the Claude tab's WebSocket (claude-stream.ts), same token in the Authorization header
+ *   GET  /tt/ping          {app: "typetorch-remote"}, no token: serve's tunnel checks it reaches the gateway
  *   POST /tt/pair          {code, name, userId?} -> {token, expiresAt}: a one-time code from `typetorch serve pair`;
  *                          userId (the person's Roblox user) is whose prompts the Claude tab sends
  *   /tt/...                the control API, `Authorization: Bearer <token>`, limited to what the plugin needs
@@ -82,6 +83,8 @@ export class RemoteGateway {
 		const url = new URL(req.url ?? "/", "http://remote");
 		try {
 			if (req.method === "OPTIONS" || req.headers.origin !== undefined) return sendJson(res, 403, { error: "browser requests are refused" });
+			// what serve's tunnel checks before it hands out its address (tunnel.ts); says nothing else
+			if (req.method === "GET" && url.pathname === "/tt/ping") return sendJson(res, 200, { app: "typetorch-remote" });
 			if (req.method === "POST" && url.pathname === "/tt/pair") return await this.pair(req, res);
 			const rojo = rojoPath(url.pathname);
 			if (rojo) return this.proxyRojo(req, res, rojo, url.search);

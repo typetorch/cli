@@ -348,8 +348,12 @@ export class ControlServer {
 		switch (key) {
 			case "GET /tt/hello":
 				return this.handlers.hello();
-			case "GET /tt/status":
-				return this.status();
+			case "GET /tt/status": {
+				const status = this.status();
+				// a pairing link lets anyone pair another device: not for a remote Studio
+				if (remote && status.remote) status.remote = { ...status.remote, link: undefined, linkExpiresAt: undefined };
+				return status;
+			}
 			case "GET /tt/logs": {
 				const since = Number(url.searchParams.get("since") ?? 0) || 0;
 				const ring = url.searchParams.get("source") === "studio" ? this.studioLogs : this.serveLogs;
