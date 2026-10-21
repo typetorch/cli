@@ -22,12 +22,15 @@ import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, write
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { STRIP_TRANSFORMER_VERSION } from "./debug-macros.ts";
 import { settings } from "./env.ts";
-import { parseJsonc } from "./json.ts";
+import { isRecord, parseJsonc } from "./json.ts";
 import { debug } from "./log.ts";
 import type { Channel } from "./naming.ts";
 
-/** Bump when what the cache stores or how it is checked changes: older caches are then dropped. */
-export const BUILD_CACHE_VERSION = 1;
+/**
+ * Bump when what the cache stores or how it is checked changes: older caches are then dropped.
+ * 2: caches built with `assumeChangesOnlyAffectDirectDependencies` (see withFullInvalidation) may hold stale outputs.
+ */
+export const BUILD_CACHE_VERSION = 2;
 export const BUILD_CACHE_DIR = ".typetorch/build-cache";
 const MANIFEST = "manifest.json";
 const FILES = "files";
@@ -190,4 +193,18 @@ export function saveBuildCache(root: string, layout: CacheLayout, channel: Chann
 	}
 	writeFileSync(join(dir, MANIFEST), JSON.stringify(manifest));
 	return Object.keys(manifest.files).length;
+}
+
+/**
+ * The tsconfig with `assumeChangesOnlyAffectDirectDependencies` turned off, or undefined when it isn't on. With it on,
+ * rbxtsc recompiles only the direct importers of an edited file, but a file's Luau can depend on a type two imports
+ * away (cecot: QuestCategory in server/common/quests.ts -> IQuest in quest.service.ts -> the generated network guard in
+ * shared/net.ts kept the old category list). Fine for a watch loop; a CLI build must match a full build, so it compiles
+ * with every transitive importer.
+ */
+export function withFullInvalidation(config: unknown): Record<string, any> | undefined {
+	if (!isRecord(config) || !isRecord(config.compilerOptions) || config.compilerOptions.assumeChangesOnlyAffectDirectDependencies !== true) return undefined;
+	const copy: Record<string, any> = structuredClone(config);
+	copy.compilerOptions.assumeChangesOnlyAffectDirectDependencies = false;
+	return copy;
 }
