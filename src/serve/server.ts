@@ -99,6 +99,8 @@ const REMOTE_ROUTES = new Set([
 	"GET /tt/claude/prompt",
 	"POST /tt/claude/deploy",
 	"POST /tt/claude/cancel",
+	"GET /tt/claude/chat",
+	"POST /tt/claude/chat",
 ]);
 
 export class HttpError extends Error {
@@ -434,6 +436,14 @@ export class ControlServer {
 			}
 			case "POST /tt/claude/cancel":
 				return this.claude().cancel(this.claudeUser(remote, body?.user), str(body?.id, "id", 64));
+			case "GET /tt/claude/chat":
+				return this.claude().chat(this.claudeUser(remote, url.searchParams.get("user")));
+			case "POST /tt/claude/chat": {
+				const conversationId = body?.conversationId === undefined || body.conversationId === null ? undefined : str(body.conversationId, "conversationId", 64);
+				if (!Array.isArray(body?.prompts) || body.prompts.length > 500) throw new HttpError(400, "prompts: a list of prompt ids");
+				const prompts = (body.prompts as unknown[]).map((id) => str(id, "prompts[]", 64));
+				return this.claude().saveChat(this.claudeUser(remote, body?.user), conversationId, prompts);
+			}
 			default:
 				throw new HttpError(404, `no route ${key}`);
 		}

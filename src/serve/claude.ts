@@ -67,10 +67,20 @@ function pidAlive(pid: number): boolean {
 	}
 }
 
+/** Prompts kept per chat (older ones drop off the plugin's transcript). */
+const MAX_CHAT_PROMPTS = 100;
+
+export interface ClaudeChat {
+	conversationId?: string;
+	prompts: string[];
+	updatedAt?: string;
+}
+
 export class ClaudeBridge {
 	private readonly tokens = new Map<number, Tokens>();
 	/** One token exchange per user at a time: refresh tokens rotate, and a reused one revokes the pairing. */
 	private readonly pending = new Map<number, Promise<string>>();
+	private readonly chats = new Map<number, ClaudeChat & { sid: string }>();
 	private readonly fetch: typeof fetch;
 	private readonly now: () => number;
 	private readonly alive: (pid: number) => boolean;
@@ -194,4 +204,24 @@ export class ClaudeBridge {
 	cancel(user: number, id: string) {
 		return this.request(user, "POST", `/v1/prompts/${encodeURIComponent(id)}/cancel`, {});
 	}
+
+	/**
+	 * The chat the Claude tab shows, per user: its conversation and prompt ids, so every copy of the plugin (Edit, the
+	 * Play client and server: plugin settings don't cross between them live) picks up the same chat and re-polls it.
+	 * Kept in memory for this session only: a new remote-claude session forgets the prompts.
+	 */
+	chat(user: number): ClaudeChat {
+		const saved = this.chats.get(user);
+		const sid = this.session()?.sid;
+		if (!saved || saved.sid !== sid) return { prompts: [] };
+		return { conversationId: saved.conversationId, prompts: [...saved.prompts], updatedAt: saved.updatedAt };
+	}
+
+	saveChat(user: number, conversationId: string | undefined, prompts: string[]): ClaudeChat {
+		const sid = this.session()?.sid;
+		if (!sid) throw new ClaudeError(503, "Claude isn't running here: the owner starts it with `typetorch serve --claude`");
+		this.chats.set(user, { sid, conversationId, prompts: prompts.slice(-MAX_CHAT_PROMPTS), updatedAt: new Date(this.now()).toISOString() });
+		return this.chat(user);
+	}
 }
+

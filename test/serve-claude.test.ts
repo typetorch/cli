@@ -135,6 +135,19 @@ describe("serve --claude", () => {
 		expect(refused.status).toBe(403);
 	});
 
+	test("the chat is shared by every copy of the plugin, per user, for this session", async () => {
+		expect(await call<unknown>(controlPort, "GET", "/tt/claude/chat?user=7")).toEqual({ prompts: [] });
+		await call(controlPort, "POST", "/tt/claude/chat", { user: 7, conversationId: "c1", prompts: ["p1", "p2"] });
+		expect(await call<unknown>(controlPort, "GET", "/tt/claude/chat?user=7")).toEqual({ conversationId: "c1", prompts: ["p1", "p2"], updatedAt: expect.any(String) });
+		expect(await call<unknown>(controlPort, "GET", "/tt/claude/chat?user=8")).toEqual({ prompts: [] });
+		await expect(call(controlPort, "POST", "/tt/claude/chat", { user: 7, prompts: "p1" })).rejects.toThrow("prompts");
+		// a new remote-claude session: its prompts are gone, so is the chat
+		const port = (fake.server.address() as { port: number }).port;
+		writeFileSync(join(root, CLAUDE_SESSION_FILE), JSON.stringify({ v: 1, sid: "f".repeat(32), branch: "dev", port, url: null, pid: process.pid }));
+		expect(await call<unknown>(controlPort, "GET", "/tt/claude/chat?user=7")).toEqual({ prompts: [] });
+		writeSession(port);
+	});
+
 	test("concurrent requests share one token exchange (refresh tokens rotate)", async () => {
 		fake.revokeAccess();
 		const before = fake.state.grants.length;
