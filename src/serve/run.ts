@@ -16,6 +16,7 @@ import { branchChannel } from "../naming.ts";
 import { removeServeFile, writeServeFile } from "./client.ts";
 import { CompileTracker, stripAnsi } from "./compile.ts";
 import { API_VERSION, ROJO_DEFAULT_PORT, type Hello } from "./protocol.ts";
+import { ClaudeBridge } from "./claude.ts";
 import { JobRunner } from "./jobs.ts";
 import { Pairing } from "./pairing.ts";
 import { RemoteGateway } from "./remote.ts";
@@ -49,6 +50,11 @@ export interface ServeOptions {
 	jobCommand?: (args: string[]) => string[];
 	/** --remote: the gateway's port for a Studio on another machine (remote.ts); absent: local only. */
 	remotePort?: number;
+	/**
+	 * --claude: also runs remote-claude (@typetorch/dev-server) without a tunnel, for the plugin's Claude tab (claude.ts):
+	 * its command line (the dev-server's entry, without arguments), the environment it gets, and --claude-users.
+	 */
+	claude?: { command: string[]; environment: Record<string, string>; users?: string };
 }
 
 export interface RunningServe {
@@ -150,6 +156,7 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 		jobs,
 		assets: () => assetsSummary(root, options.devBranch ?? "dev"),
 		pairing: options.remotePort !== undefined ? new Pairing(root) : undefined,
+		claude: new ClaudeBridge({ root }),
 	});
 	function log(source: string, level: "info" | "warn" | "error", text: string) {
 		control.serveLogs.push(source, level, text);
@@ -180,6 +187,17 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 		cwd: root,
 	});
 	for (const name of options.extra) supervisor.add({ name, command: ["bun", "run", name], cwd: root });
+	if (options.claude) {
+		const users = options.claude.users ? ["--users", options.claude.users] : [];
+		supervisor.add({
+			name: "claude",
+			command: [...options.claude.command, "remote-claude", "--no-tunnel", "--no-announce", "--no-clipboard", ...users],
+			cwd: root,
+			environment: options.claude.environment,
+			// A refusal (no --claude-users yet, a prod branch, no Claude login) would only repeat: `serve restart claude`.
+			restart: false,
+		});
+	}
 	writeServeFile(root, { port, pid: process.pid, rojoPort, startedAt, root, logFile: options.logFile });
 	log("serve", "info", `control API on 127.0.0.1:${port}, Rojo on ${rojoPort} (${projectFile}); the TypeTorch Studio plugin connects by itself`);
 	if (relative(root, options.cwd)) log("serve", "info", `game repo: ${root}`);
