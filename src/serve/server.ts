@@ -27,6 +27,8 @@ import type { Pairing } from "./pairing.ts";
 /** Lines kept per source group (serve's own children, Studio). */
 const RING_SIZE = 2000;
 const MAX_BODY = 256 * 1024;
+/** POST /tt/jobs may carry the plugin's hot asset export (models in base64). */
+const MAX_JOB_BODY = 64 * 1024 * 1024;
 /** A plugin that hasn't been heard from for this long is dropped from the list. */
 export const STUDIO_TIMEOUT_MS = 30_000;
 /** How long `GET /tt/plugin/poll` holds an empty answer (well under Roblox's HTTP timeout and STUDIO_TIMEOUT_MS). */
@@ -302,7 +304,7 @@ export class ControlServer {
 			this.checkRequest(req, remote !== undefined);
 			const url = new URL(req.url ?? "/", "http://127.0.0.1");
 			if (remote !== undefined && !REMOTE_ROUTES.has(`${req.method} ${url.pathname}`)) throw new HttpError(403, "not available to a remote Studio");
-			const body = req.method === "POST" ? await readJson(req) : undefined;
+			const body = req.method === "POST" ? await readJson(req, url.pathname === "/tt/jobs" ? MAX_JOB_BODY : MAX_BODY) : undefined;
 			if (remote !== undefined) {
 				const prefix = `remote/${remote}/`;
 				const own = (id: unknown) => {
@@ -398,7 +400,9 @@ export class ControlServer {
 				if (!jobs) throw new HttpError(404, "no jobs here");
 				const kind = str(body?.kind, "kind", 40);
 				if (!(JOB_KINDS as readonly string[]).includes(kind)) throw new HttpError(400, `kind: one of ${JOB_KINDS.join(", ")}`);
-				return jobs.start(kind as JobKind);
+				const studioExport = body?.export;
+				if (studioExport !== undefined && (studioExport === null || typeof studioExport !== "object" || Array.isArray(studioExport))) throw new HttpError(400, "export: expected an object");
+				return jobs.start(kind as JobKind, studioExport as Record<string, unknown> | undefined);
 			}
 			case "GET /tt/jobs": {
 				const jobs = this.handlers.jobs;
@@ -549,13 +553,13 @@ function send(res: ServerResponse, status: number, body: unknown) {
 	res.end(text);
 }
 
-function readJson(req: IncomingMessage): Promise<unknown> {
+function readJson(req: IncomingMessage, limit: number): Promise<unknown> {
 	return new Promise((done, fail) => {
 		const chunks: Buffer[] = [];
 		let size = 0;
 		req.on("data", (chunk: Buffer) => {
 			size += chunk.length;
-			if (size > MAX_BODY) {
+			if (size > limit) {
 				fail(new HttpError(413, "body too large"));
 				req.destroy();
 				return;
