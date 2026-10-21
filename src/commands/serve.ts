@@ -15,7 +15,7 @@ import { serveDevices, serveLogs, servePairCode, serveRestart, serveStatus, serv
 import { REMOTE_DEFAULT_PORT } from "../serve/remote.ts";
 import { RECONNECT_LUAU, type CommandKind, type CommandResult, type LogLine, type ServeStatus } from "../serve/protocol.ts";
 import { startServe } from "../serve/run.ts";
-import { cliRoot } from "./remote-claude.ts";
+import { cliRoot, DEV_SERVER_PACKAGE, devServerEnv, findDevServer } from "./remote-claude.ts";
 
 export const serveFlags = {
 	detach: "boolean",
@@ -33,9 +33,11 @@ export const serveFlags = {
 	"remote-port": "string",
 	name: "string",
 	all: "boolean",
+	claude: "boolean",
+	"claude-users": "string",
 } as const;
 
-export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <script,...>] [--dev-branch <b>] [--remote [--remote-port <n>]] [--json]
+export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <script,...>] [--dev-branch <b>] [--remote [--remote-port <n>]] [--claude [--claude-users <ids>]] [--json]
 typetorch serve pair [--json]
 typetorch serve devices [--json]
 typetorch serve unpair (--name <device> | --all) [--json]
@@ -60,6 +62,11 @@ typetorch serve logs [--studio] [--since <seq>] [--limit <n>] [--follow] [--json
                tunnel you run (Cloudflare Tunnel: service http://localhost:${REMOTE_DEFAULT_PORT}). Every request needs a device token
                from pairing; a remote Studio syncs code read-only, reports its state and runs hot asset jobs (dev only),
                but can't stop serve, drive other Studios or read serve's log
+  --claude     also runs remote-claude (typetorch remote-claude, from @typetorch/dev-server) on this machine for the
+               plugin's Claude tab: Studio users prompt Claude Code here in Code mode (edits on this branch, which must be
+               dev-channel, then Deploy or Discard). --claude-users <ids>: the Roblox user ids allowed (remembered; the
+               first time it's required, and a remote helper's id goes there too). A remote-claude you run yourself in
+               this repo works as well
   pair         a one-time pairing code (15 min): the other person enters your tunnel URL and the code in the plugin's
                Remote card; their Studio stays paired for 30 days
   devices      the paired devices; unpair --name <device> (or --all) revokes them
@@ -195,6 +202,7 @@ async function foreground(args: ParsedArgs) {
 		envFile: flagString(args, "env-file"),
 		devBranch: flagString(args, "dev-branch"),
 		remotePort: flagBool(args, "remote") || flagString(args, "remote-port") ? flagInt(args, "remote-port", REMOTE_DEFAULT_PORT) : undefined,
+		claude: flagBool(args, "claude") || flagString(args, "claude-users") ? claudeChild(root, flagString(args, "claude-users")) : undefined,
 		print: (line) => (json ? console.log(JSON.stringify({ at: new Date().toISOString(), ...line })) : printLine(line)),
 	});
 	if (!json) {
@@ -206,6 +214,14 @@ async function foreground(args: ParsedArgs) {
 	for (const signal of signals) process.on(signal, onSignal);
 	await serve.stopped;
 	for (const signal of signals) process.off(signal, onSignal);
+}
+
+/** --claude: how serve runs the dev-server (found as `typetorch remote-claude` finds it). */
+function claudeChild(root: string, users: string | undefined) {
+	const found = findDevServer({ cwd: root, cliRoot: cliRoot() });
+	if ("searched" in found) throw new UsageError(`--claude needs ${DEV_SERVER_PACKAGE}: \`bun add -d ${DEV_SERVER_PACKAGE}\` in the game repo (or npm i -g ${DEV_SERVER_PACKAGE})`);
+	if (users !== undefined && !/^\d+(,\d+)*$/.test(users.replace(/\s/g, ""))) throw new UsageError("--claude-users: comma-separated Roblox user ids");
+	return { command: found.cmd, environment: devServerEnv(), users: users?.replace(/\s/g, "") };
 }
 
 /** Starts `typetorch serve` in the background with the same flags (minus --detach) and waits until it answers. */

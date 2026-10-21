@@ -18,6 +18,7 @@ import {
 	type StudioInfo,
 } from "./protocol.ts";
 import { JOB_KINDS, type JobKind, type JobRunner } from "./jobs.ts";
+import { ClaudeError, type ClaudeBridge } from "./claude.ts";
 import type { Pairing } from "./pairing.ts";
 
 /** Lines kept per source group (serve's own children, Studio). */
@@ -72,6 +73,8 @@ export interface ControlHandlers {
 	assets?: () => unknown;
 	/** Devices paired for --remote (absent without it). */
 	pairing?: Pairing;
+	/** The plugin's Claude tab (claude.ts; absent in tests that don't need it). */
+	claude?: ClaudeBridge;
 }
 
 /**
@@ -89,6 +92,11 @@ const REMOTE_ROUTES = new Set([
 	"POST /tt/plugin/logs",
 	"GET /tt/plugin/poll",
 	"POST /tt/plugin/result",
+	"GET /tt/claude",
+	"POST /tt/claude/prompt",
+	"GET /tt/claude/prompt",
+	"POST /tt/claude/deploy",
+	"POST /tt/claude/cancel",
 ]);
 
 export class HttpError extends Error {
@@ -251,11 +259,11 @@ export class ControlServer {
 	 * A request a paired device sent through the remote gateway (remote.ts checked its token): REMOTE_ROUTES only, and
 	 * its plugin ids live under `remote/<device>/` so they can't take over a local Studio's.
 	 */
-	handleRemote(req: IncomingMessage, res: ServerResponse, device: string) {
-		return this.handle(req, res, device);
+	handleRemote(req: IncomingMessage, res: ServerResponse, device: string, userId?: number) {
+		return this.handle(req, res, device, userId);
 	}
 
-	private async handle(req: IncomingMessage, res: ServerResponse, remote?: string) {
+	private async handle(req: IncomingMessage, res: ServerResponse, remote?: string, remoteUser?: number) {
 		try {
 			this.checkRequest(req, remote !== undefined);
 			const url = new URL(req.url ?? "/", "http://127.0.0.1");
@@ -274,10 +282,10 @@ export class ControlServer {
 			}
 			const gone = new AbortController();
 			res.on("close", () => gone.abort());
-			const result = await this.route(req.method ?? "GET", url, body as Record<string, unknown> | undefined, gone.signal);
+			const result = await this.route(req.method ?? "GET", url, body as Record<string, unknown> | undefined, gone.signal, remote === undefined ? undefined : { userId: remoteUser });
 			send(res, 200, result);
 		} catch (error) {
-			if (error instanceof HttpError) send(res, error.status, { error: error.message });
+			if (error instanceof HttpError || error instanceof ClaudeError) send(res, error.status, { error: error.message });
 			else send(res, 500, { error: (error as Error).message ?? String(error) });
 		}
 	}
@@ -295,8 +303,11 @@ export class ControlServer {
 		if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) throw new HttpError(403, "bad Host");
 	}
 
-	/** `gone`: the caller hung up (a long poll must not hand its commands to a closed connection). */
-	protected async route(method: string, url: URL, body: Record<string, unknown> | undefined, gone?: AbortSignal): Promise<unknown> {
+	/**
+	 * `gone`: the caller hung up (a long poll must not hand its commands to a closed connection). `remote`: the paired
+	 * device a remote request came from (absent: a local caller).
+	 */
+	protected async route(method: string, url: URL, body: Record<string, unknown> | undefined, gone?: AbortSignal, remote?: { userId?: number }): Promise<unknown> {
 		const key = `${method} ${url.pathname}`;
 		switch (key) {
 			case "GET /tt/hello":
@@ -394,6 +405,25 @@ export class ControlServer {
 				}
 				return { ok: true };
 			}
+			case "GET /tt/claude":
+				return this.claude().status();
+			case "POST /tt/claude/prompt": {
+				const prompt = str(body?.prompt, "prompt", 20_000);
+				const conversationId = body?.conversationId === undefined ? undefined : str(body.conversationId, "conversationId", 64);
+				return this.claude().prompt(this.claudeUser(remote, body?.user), prompt, conversationId);
+			}
+			case "GET /tt/claude/prompt": {
+				const id = str(url.searchParams.get("id") ?? undefined, "id", 64);
+				const since = Math.max(0, Math.floor(Number(url.searchParams.get("since") ?? 0) || 0));
+				return this.claude().poll(this.claudeUser(remote, url.searchParams.get("user")), id, since);
+			}
+			case "POST /tt/claude/deploy": {
+				const decision = str(body?.decision, "decision", 10);
+				if (decision !== "deploy" && decision !== "discard") throw new HttpError(400, "decision: deploy or discard");
+				return this.claude().deploy(this.claudeUser(remote, body?.user), str(body?.id, "id", 64), decision);
+			}
+			case "POST /tt/claude/cancel":
+				return this.claude().cancel(this.claudeUser(remote, body?.user), str(body?.id, "id", 64));
 			default:
 				throw new HttpError(404, `no route ${key}`);
 		}
@@ -401,6 +431,25 @@ export class ControlServer {
 
 	get pairingStore(): Pairing | undefined {
 		return this.handlers.pairing;
+	}
+
+	private claude(): ClaudeBridge {
+		if (!this.handlers.claude) throw new HttpError(404, "no Claude here");
+		return this.handlers.claude;
+	}
+
+	/**
+	 * Whose prompts these are (a Roblox user id, which remote-claude's --users must allow): a remote device's is the one it
+	 * paired with, and can't be changed per request; a local caller names it.
+	 */
+	private claudeUser(remote: { userId?: number } | undefined, given: unknown): number {
+		if (remote) {
+			if (remote.userId === undefined) throw new HttpError(403, "this Studio paired without its Roblox user: pair it again for the Claude tab");
+			return remote.userId;
+		}
+		const user = typeof given === "string" ? Number(given) : given;
+		if (typeof user !== "number" || !Number.isSafeInteger(user) || user <= 0) throw new HttpError(400, "user: expected a Roblox user id");
+		return user;
 	}
 
 	private pairing(): Pairing {

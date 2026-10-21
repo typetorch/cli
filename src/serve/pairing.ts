@@ -21,6 +21,8 @@ export const MAX_BAD_CODES = 5;
 export interface Device {
 	/** What the person called their Studio (the plugin sends the Roblox user name). */
 	name: string;
+	/** Their Roblox user id, which the plugin sends when pairing: whose prompts the Claude tab sends (claude.ts). */
+	userId?: number;
 	/** SHA-256 of the token, hex. */
 	hash: string;
 	createdAt: string;
@@ -61,7 +63,9 @@ export class Pairing {
 		if (existsSync(file)) {
 			try {
 				const raw = JSON.parse(readFileSync(file, "utf8"));
-				if (Array.isArray(raw?.devices)) this.devices = raw.devices.filter((d: Device) => typeof d?.hash === "string" && typeof d?.name === "string");
+				if (Array.isArray(raw?.devices)) {
+					this.devices = raw.devices.filter((d: Device) => typeof d?.hash === "string" && typeof d?.name === "string" && (d.userId === undefined || Number.isSafeInteger(d.userId)));
+				}
 			} catch {
 				this.devices = [];
 			}
@@ -79,7 +83,7 @@ export class Pairing {
 	}
 
 	/** Trades the current code for a device token; the code works once. Throws a message for the caller. */
-	pair(code: string, name: string): { token: string; expiresAt: string } {
+	pair(code: string, name: string, userId?: number): { token: string; expiresAt: string } {
 		const current = this.code;
 		if (!current || this.now() > current.expiresAt) throw new Error("no pairing code is active: ask the owner to run `typetorch serve pair`");
 		if (this.badCodes >= MAX_BAD_CODES) throw new Error("too many wrong codes: ask the owner for a new one (`typetorch serve pair`)");
@@ -93,6 +97,7 @@ export class Pairing {
 		const createdAt = this.now();
 		const device: Device = {
 			name: name.slice(0, 60) || "Studio",
+			...(userId !== undefined ? { userId } : {}),
 			hash: hashOf(token),
 			createdAt: new Date(createdAt).toISOString(),
 			expiresAt: new Date(createdAt + TOKEN_DAYS * 86_400_000).toISOString(),

@@ -547,6 +547,14 @@ build's channel in brackets when it differs.
   to the dev branch). It can't stop or restart serve, read serve's log or drive other Studios, and `typetorch studio
   ...` and the MCP tools never pick a remote Studio unless `--target` names it. Wrong codes lock pairing after 5
   tries until you make a new code.
+- **Claude in Studio** (`serve --claude`). serve also runs remote-claude (`typetorch remote-claude`, from
+  `@typetorch/dev-server`) on this machine without a tunnel, and the plugin's **Claude** tab prompts it: Claude Code
+  edits this branch (Code mode; the branch must be dev-channel), then the tab shows Deploy or Discard, as the in-game
+  DEV > Claude tab does. `--claude-users <ids>` lists the Roblox user ids allowed (remembered; required the first time),
+  so add a remote helper's id there too: a remote Studio prompts as the Roblox user it paired with, and serve pairs with
+  remote-claude for them (nobody handles a remote-claude code). A remote-claude you start yourself in the repo works the
+  same way (serve finds it through `.typetorch/remote-claude.session.json`). Claude acting inside Studio itself (Live
+  mode) isn't there yet.
 
 ### Hot assets
 

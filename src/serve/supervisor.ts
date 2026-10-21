@@ -14,6 +14,8 @@ export interface ChildSpec {
 	cwd: string;
 	/** Extra environment for this child (never a secret). */
 	env?: Record<string, string>;
+	/** The whole environment instead of the minimal one (remote-claude needs the user's own: Claude's login, the key). */
+	environment?: Record<string, string>;
 	/** Restart when it exits (default true). */
 	restart?: boolean;
 }
@@ -39,12 +41,16 @@ class Child {
 		this.status = { name: spec.name, command: spec.command, state: "starting", restarts: 0 };
 	}
 
+	private env(): Record<string, string> {
+		return this.spec.environment ?? childEnv(this.spec.env);
+	}
+
 	start() {
 		this.stopped = false;
 		this.status.state = "starting";
 		let resolved;
 		try {
-			resolved = resolveCommand(this.spec.command, childEnv(this.spec.env));
+			resolved = resolveCommand(this.spec.command, this.env());
 		} catch (error) {
 			this.sink(this.spec.name, "stderr", `could not start: ${(error as Error).message}`);
 			this.status.state = "exited";
@@ -53,7 +59,7 @@ class Child {
 		}
 		const child = spawn(resolved.file, resolved.args, {
 			cwd: this.spec.cwd,
-			env: childEnv(this.spec.env),
+			env: this.env(),
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 			windowsVerbatimArguments: resolved.windowsVerbatimArguments,

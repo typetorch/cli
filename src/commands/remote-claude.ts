@@ -122,7 +122,7 @@ export const REMOTE_CLAUDE_USAGE = `typetorch remote-claude --users <id,id,...> 
   With npx: npx -p @typetorch/cli -p ${DEV_SERVER_PACKAGE} typetorch remote-claude --users ...`;
 
 /** The environment for the dev-server: the real one, minus what Bun auto-loaded from .env files here. */
-function devServerEnv(): Record<string, string> {
+export function devServerEnv(): Record<string, string> {
 	const config = settings();
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) {

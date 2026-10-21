@@ -3,7 +3,8 @@
  * (Cloudflare Tunnel: `service: http://localhost:<port>`). It listens on 127.0.0.1 only; the tunnel is what makes it
  * public, so every request but pairing needs a device token (pairing.ts):
  *
- *   POST /tt/pair          {code, name} -> {token, expiresAt}: a one-time code from `typetorch serve pair`
+ *   POST /tt/pair          {code, name, userId?} -> {token, expiresAt}: a one-time code from `typetorch serve pair`;
+ *                          userId (the person's Roblox user) is whose prompts the Claude tab sends
  *   /tt/...                the control API, `Authorization: Bearer <token>`, limited to what the plugin needs
  *                          (server.ts REMOTE_ROUTES)
  *   /r/<token>/api/...     Rojo, proxied to its local port. The token sits in the path because Rojo's client sends
@@ -84,7 +85,7 @@ export class RemoteGateway {
 				const token = auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
 				const device = this.options.pairing.check(token);
 				if (!device || !token) return sendJson(res, 401, { error: "not paired: pair this Studio with a code from `typetorch serve pair`" });
-				return await this.options.control.handleRemote(req, res, deviceLabel(device.name, token));
+				return await this.options.control.handleRemote(req, res, deviceLabel(device.name, token), device.userId);
 			}
 			sendJson(res, 404, { error: "not found" });
 		} catch (error) {
@@ -98,15 +99,17 @@ export class RemoteGateway {
 			text += chunk;
 			if (text.length > MAX_PAIR_BODY) return sendJson(res, 413, { error: "body too large" });
 		}
-		let body: { code?: unknown; name?: unknown };
+		let body: { code?: unknown; name?: unknown; userId?: unknown };
 		try {
 			body = JSON.parse(text || "{}");
 		} catch {
 			return sendJson(res, 400, { error: "body: expected JSON" });
 		}
 		if (typeof body.code !== "string" || typeof body.name !== "string") return sendJson(res, 400, { error: "code and name: expected strings" });
+		const userId = body.userId;
+		if (userId !== undefined && (typeof userId !== "number" || !Number.isSafeInteger(userId) || userId <= 0)) return sendJson(res, 400, { error: "userId: expected a Roblox user id" });
 		try {
-			const paired = this.options.pairing.pair(body.code, body.name);
+			const paired = this.options.pairing.pair(body.code, body.name, userId);
 			this.options.log("info", `remote: paired "${body.name.slice(0, 60)}"`);
 			sendJson(res, 200, paired);
 		} catch (error) {
