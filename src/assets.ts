@@ -45,6 +45,8 @@ export const ASSETS_PAYLOAD_FOLDER = "Server";
 /** First bytes of the export task's binary output. */
 export const EXPORT_MAGIC = "TTA1";
 export const KEY_MAX_LENGTH = 64;
+/** The lockfile's placeVersion for assets exported from an open Studio session (unsaved edits match no place version). */
+export const STUDIO_PLACE_VERSION = 0;
 /** LuaSourceContainer classes (checked again in the exported bytes). */
 export const SCRIPT_CLASSES: ReadonlySet<string> = new Set(["Script", "LocalScript", "ModuleScript", "CoreScript"]);
 /** Services whose content stays on the server; everything else is replicated. */
@@ -73,7 +75,10 @@ export interface LockEntry {
 
 export interface AssetsLock {
 	v: 1;
-	/** The place version the assets were exported from. */
+	/**
+	 * The place version the assets were exported from; STUDIO_PLACE_VERSION (0) when they came from an open Studio
+	 * (`typetorch serve` for the plugin), which matches no version a server runs, so servers load every key.
+	 */
 	placeVersion: number;
 	assets: Record<string, LockEntry>;
 }
@@ -102,13 +107,14 @@ export function assetHash(bytes: Uint8Array): string {
 // The lockfile -------------------------------------------------------------------------------------------------------
 
 const positiveInt = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+const wholeInt = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 
 /** Validates a parsed lockfile; returns it normalized, or the problems. */
 export function validateAssetsLock(raw: unknown): { lock?: AssetsLock; errors: string[] } {
 	const errors: string[] = [];
 	if (!isRecord(raw)) return { errors: ["must be a JSON object"] };
 	if (raw.v !== 1) errors.push(`"v" must be 1`);
-	if (!positiveInt(raw.placeVersion)) errors.push(`"placeVersion" must be a positive integer`);
+	if (!wholeInt(raw.placeVersion)) errors.push(`"placeVersion" must be a whole number (0: exported from Studio)`);
 	if (!isRecord(raw.assets)) errors.push(`"assets" must be an object`);
 	const assets: Record<string, LockEntry> = {};
 	for (const [key, entry] of Object.entries(isRecord(raw.assets) ? raw.assets : {})) {
@@ -435,6 +441,21 @@ export function parseExport(results: unknown[], binary: Uint8Array | undefined):
 	assets.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 	const reported = typeof meta.placeVersion === "number" && Number.isSafeInteger(meta.placeVersion) ? meta.placeVersion : undefined;
 	return { reportedPlaceVersion: reported, assets };
+}
+
+/**
+ * An export the Studio plugin made from the open place (`POST /tt/jobs` with `export`, written to a file by `typetorch
+ * serve`): the export task's metadata table (same fields, see exportScript) plus `binary`, the "TTA1" output in base64.
+ */
+export function parseStudioExport(raw: unknown, placeId: number): ExportResult {
+	if (!isRecord(raw) || raw.v !== 1) throw new AssetsError("the Studio export isn't a TypeTorch export (v 1)");
+	if (raw.placeId !== undefined && String(raw.placeId) !== String(placeId)) {
+		throw new AssetsError(`the Studio export comes from place ${String(raw.placeId)}, but typetorch.json names place ${placeId}: open the game's place in Studio`);
+	}
+	if (typeof raw.binary !== "string") throw new AssetsError("the Studio export has no binary output");
+	const binary = new Uint8Array(Buffer.from(raw.binary, "base64"));
+	const { binary: _, ...meta } = raw;
+	return parseExport([meta], binary);
 }
 
 // Diff ---------------------------------------------------------------------------------------------------------------

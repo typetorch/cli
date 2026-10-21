@@ -1,6 +1,6 @@
 /** `typetorch serve`: the compile tracker, the control API's request rules and plugin registry, the supervisor. */
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pluginProject } from "../src/commands/serve";
@@ -9,7 +9,7 @@ import { call, ServeClientError } from "../src/serve/client";
 import { handleMessage, TOOLS } from "../src/commands/mcp";
 import { RECONNECT_LUAU, type CommandResult, type Hello, type StudioCommand } from "../src/serve/protocol";
 import { ControlServer } from "../src/serve/server";
-import { JobRunner, type Job } from "../src/serve/jobs";
+import { JobRunner, STUDIO_EXPORT_FILE, type Job } from "../src/serve/jobs";
 import { assetsTypesSource } from "../src/assets";
 import { Supervisor } from "../src/serve/supervisor";
 
@@ -260,6 +260,20 @@ describe("hot asset jobs", () => {
 		for (let i = 0; i < 100 && job.state === "running"; i++) await Bun.sleep(50);
 		expect(job).toMatchObject({ state: "failed", error: "no assets key" });
 		await expect(call(port, "POST", "/tt/jobs", { kind: "rm-rf" })).rejects.toThrow("kind: one of");
+	});
+
+	test("a job with the plugin's Studio export reads it from a file in .typetorch", async () => {
+		const root = mkdtempSync(join(tmpdir(), "tt-jobs-"));
+		try {
+			const runner = new JobRunner({ root, devBranch: "dev", isProd: () => false, baseArgs: [], log: () => {}, command: fake });
+			const job = runner.start("assets-sync", { v: 1, assets: [], binary: "VFRBMQ==" });
+			for (let i = 0; i < 100 && job.state === "running"; i++) await Bun.sleep(50);
+			expect((job.result as { args: string[] }).args).toEqual(["assets", "sync", "--json", "--studio-export", join(".typetorch", "studio-export.json")]);
+			expect(JSON.parse(readFileSync(join(root, STUDIO_EXPORT_FILE), "utf8"))).toEqual({ v: 1, assets: [], binary: "VFRBMQ==" });
+			await expect(call(port, "POST", "/tt/jobs", { kind: "assets-status", export: "nope" })).rejects.toThrow("export: expected an object");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 
 	test("never deploys a prod-channel branch from the plugin", () => {
