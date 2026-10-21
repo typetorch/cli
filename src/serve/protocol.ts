@@ -84,5 +84,33 @@ export interface ServeStatus {
 	studios: StudioInfo[];
 }
 
+/**
+ * Commands for a Studio plugin. The CLI (or `typetorch mcp`) posts one to `POST /tt/command` and waits for the answer;
+ * the plugin long-polls `GET /tt/plugin/poll` and answers with `POST /tt/plugin/result`. The plugin keeps polling
+ * whatever its Rojo sync is doing (waiting for a click, paused, disconnected), so an agent can always reach it.
+ *   ping       which DataModel answered and its sync state
+ *   reconnect  turn auto-connect on and resync from scratch; `anyway: true` also accepts a server for another
+ *              experience or an unpublished place (the panel's "Connect anyway")
+ *   play       start a playtest (`mode: "play"`, default, or "run")
+ *   stop       end the playtest
+ */
+export const COMMAND_KINDS = ["ping", "reconnect", "play", "stop"] as const;
+export type CommandKind = (typeof COMMAND_KINDS)[number];
+
+export interface StudioCommand {
+	id: string;
+	kind: CommandKind;
+	args: Record<string, unknown>;
+}
+
+/** What `POST /tt/command` answers once the plugin has run the command. */
+export interface CommandResult {
+	ok: boolean;
+	/** The plugin that ran it. */
+	studio: { id: string; mode: StudioInfo["mode"]; placeName: string };
+	result?: Record<string, unknown>;
+	error?: string;
+}
+
 /** The Luau line that asks a stuck plugin to reconnect (Studio command bar or the Roblox Studio MCP's execute_luau). */
 export const RECONNECT_LUAU = `game:GetService("ServerStorage"):SetAttribute("TypeTorchReconnect", os.time())`;

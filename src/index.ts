@@ -43,6 +43,7 @@ import { pinCommand, pinFlags } from "./commands/pin.ts";
 import { promoteCommand, promoteFlags } from "./commands/promote.ts";
 import { REMOTE_CLAUDE_USAGE, remoteClaudeCommand } from "./commands/remote-claude.ts";
 import { rollbackCommand, rollbackFlags } from "./commands/rollback.ts";
+import { MCP_USAGE, mcpServe } from "./commands/mcp.ts";
 import { SERVE_USAGE, serveCommand, serveFlags, STUDIO_USAGE, studioCommand, studioFlags } from "./commands/serve.ts";
 import { UPDATE_USAGE, updateCommandRun, updateFlags } from "./commands/update.ts";
 import { gameDirFor, redact, Settings, useSettings } from "./env.ts";
@@ -420,8 +421,21 @@ typetorch assets list
 	studio: {
 		flags: studioFlags,
 		run: studioCommand,
-		summary: "the TypeTorch Studio plugin (install)",
+		summary: "drive the attached Studio: reconnect, play, stop, logs; install the plugin",
 		usage: STUDIO_USAGE,
+	},
+	mcp: {
+		flags: {},
+		run: async () => {},
+		raw: (argv) => {
+			if (argv.length) {
+				console.error(argv.some((a) => HELP_WORDS.has(a)) ? MCP_USAGE : `typetorch mcp takes no arguments\n${MCP_USAGE}`);
+				return Promise.resolve(argv.some((a) => HELP_WORDS.has(a)) ? 0 : 2);
+			}
+			return mcpServe(pkg.version);
+		},
+		summary: "an MCP server (stdio) with serve and studio as tools, for agents",
+		usage: MCP_USAGE,
 	},
 	"remote-claude": {
 		flags: {},

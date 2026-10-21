@@ -235,7 +235,9 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch dev --users <ids> [...]` | the same as `typetorch remote-claude` |
 | `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <scripts>]` | the Studio dev loop in one process: rbxtsc -w, `rojo serve`, extra package.json scripts, and the control API the TypeTorch Studio plugin attaches to by itself; see "Studio: typetorch serve" |
 | `typetorch serve status` / `stop` / `restart <child>` / `logs [--studio] [--follow]` | the running server's children, attached Studios, sync state and compile errors / stop it / restart one child / its log |
+| `typetorch studio status` / `reconnect [--anyway]` / `play [--run]` / `stop` / `logs [--follow]` | drives the Studio the plugin attached: its sync state / resync from scratch / start / end a playtest / Studio's Output |
 | `typetorch studio install-plugin` | builds the TypeTorch Studio plugin into Studio's plugins folder |
+| `typetorch mcp` | an MCP server on stdio with `serve` and `studio` as tools, for agents |
 | `typetorch migrate --from flamework [--dry-run] [--net compat\|native] [--report <file>] [--allow-dirty]` | the mechanical part of moving a Flamework 1.x game (see "Migrating from Flamework"); local only, no keys |
 | `typetorch update [<version>] [--check] [--yes]` | updates this CLI to the newest `@typetorch/cli` on npm (or `<version>`) the way it was installed: in the game's `package.json` with its package manager (bun, pnpm, yarn or npm, from the lockfile; a devDependency stays one), or globally (`npm i -g`, `bun add -g`, pnpm, yarn). Asks y/N first (`--yes` skips; without a terminal it prints the command). npx needs nothing (`npx @typetorch/cli@latest`); a git checkout gets the `git pull` to run. `--check` only shows the versions and the command. After any other command at a terminal, the CLI checks npm at most once a day (1.5 s timeout, cached in `~/.typetorch/update-check.json`) and, when a newer version is out, asks once whether to update now; after a no it reminds once a day. Never in CI, `--json` or non-interactive runs; `TYPETORCH_UPDATE_CHECK=off` turns it off |
 | `typetorch doctor [--show-ok]` | prints the **Config** section (every value the CLI reads and where it came from: typetorch.json, the game repo's `.env`, the environment, the settings record; secrets only as set / unset), then checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the health window per channel and the auto-rollback threshold, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), the backend (typetorch.json `backend.url` with your keys: url, `/healthz`, the game key's and the admin token's roles; the record's own backend section; a stale tunnel or a wrong key is a FAIL with the fix), the backend's owner list against the signed record, **live servers** (FAIL when the published place has the kernel, the default branch has no verified head in the DataStore heads or the kernel's BootstrapHeads, and the place has no backup build: kernel 0.3.6+ then moves every player out after 15 s and kicks after 3 bounces; the fix names the git branch mapped to the default branch and `kernel restore --version <n>`), **old game build** (warn when a roblox-ts build such as `ServerScriptService.TS` or `ReplicatedStorage.rbxts_include` runs next to the kernel), and probes each key's scopes with harmless calls. Only problems and info lines print; `--show-ok` lists the passed checks too (`--json` always has every check) |
@@ -509,6 +511,18 @@ build's channel in brackets when it differs.
   and this one at a time.
 - **Agents.** `typetorch serve --detach` starts it in the background (log: `.typetorch/serve.log`) and returns once it
   answers; every subcommand takes `--json`. In the foreground, `--json` prints one JSON line per log line.
+- **An agent can always get Studio back.** The plugin long-polls the control API for commands whatever its sync is
+  doing (down, backing off, waiting for a click, paused), so a broken sync doesn't cut the agent off:
+  `typetorch studio reconnect` turns auto-connect on, resyncs from scratch and waits to report whether it connected
+  (`--anyway` also accepts a place of another experience or an unpublished one); `studio play [--run]` and `studio
+  stop` start and end a playtest (StudioTestService; the plugin also runs in the playtest's server and client); `studio
+  logs` is Studio's Output, edit and playtest, as the plugin forwards it. When no Studio is attached at all, the error
+  says why and gives the last resort: setting `ServerStorage`'s `TypeTorchReconnect` attribute (Studio's command bar,
+  or the Roblox Studio MCP's `execute_luau`) makes the plugin reconnect:
+  `game:GetService("ServerStorage"):SetAttribute("TypeTorchReconnect", os.time())`.
+- **MCP.** `typetorch mcp` serves the same as tools over stdio (`serve_status`, `serve_start`, `serve_stop`,
+  `serve_logs`, `studio_logs`, `studio_reconnect`, `studio_play`, `studio_stop`). Claude Code, from the game repo:
+  `claude mcp add typetorch -- bunx typetorch mcp`.
 
 ### Hot assets
 

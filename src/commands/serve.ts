@@ -2,8 +2,7 @@
  * `typetorch serve` and `typetorch studio`: the Studio dev loop in one command (serve/run.ts), and the commands that
  * talk to it (serve/client.ts). Every subcommand answers with --json for agents.
  */
-import { spawn } from "node:child_process";
-import { closeSync, existsSync, mkdirSync, openSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
 import { rojoBinary } from "../build.ts";
@@ -11,8 +10,9 @@ import { findProjectRoot, loadProject } from "../config.ts";
 import { bold, cyan, dim, emitJson, info, isJson, red, yellow } from "../log.ts";
 import { run } from "../proc.ts";
 import { sleep } from "../runtime.ts";
-import { call, findRunning, ServeClientError } from "../serve/client.ts";
-import type { LogLine, ServeStatus } from "../serve/protocol.ts";
+import { findRunning } from "../serve/client.ts";
+import { serveLogs, serveRestart, serveStatus, serveStop, startDetached, studioSend } from "../serve/ops.ts";
+import { RECONNECT_LUAU, type CommandKind, type CommandResult, type LogLine, type ServeStatus } from "../serve/protocol.ts";
 import { startServe } from "../serve/run.ts";
 import { cliRoot } from "./remote-claude.ts";
 
@@ -52,15 +52,42 @@ typetorch serve logs [--studio] [--since <seq>] [--limit <n>] [--follow] [--json
   .typetorch/serve.json (git-ignored) holds the control port while it runs.`;
 
 export const studioFlags = {
+	anyway: "boolean",
+	run: "boolean",
+	target: "string",
+	timeout: "string",
+	since: "string",
+	follow: "boolean",
+	limit: "string",
 	from: "string",
 } as const;
 
-export const STUDIO_USAGE = `typetorch studio install-plugin [--from <dir>] [--json]
+export const STUDIO_USAGE = `typetorch studio status [--json]
+typetorch studio reconnect [--anyway] [--target <id|edit>] [--json]
+typetorch studio play [--run] [--json]
+typetorch studio stop [--json]
+typetorch studio logs [--since <seq>] [--limit <n>] [--follow] [--json]
+typetorch studio install-plugin [--from <dir>] [--json]
 
+  Drives the Studio that the TypeTorch plugin attached to \`typetorch serve\` (which must be running). The plugin keeps
+  listening for these even while its sync is down, waiting for a click or paused, so an agent can always get it back.
+  status          attached Studios (edit, playtest server and client) and their sync state
+  reconnect       turns the plugin's auto-connect on and resyncs from scratch; waits for the result
+    --anyway      also sync into a place of another experience or an unpublished one (the panel's "Connect anyway")
+  play            starts a playtest (Play); --run: Run mode (no player)
+  stop            ends the playtest
+  logs            Studio's Output (edit and playtest), as the plugin forwards it; --follow keeps printing
+  --target        a plugin id from \`studio status\`, or edit / server / client (default: the edit DataModel; stop: the
+                  playtest server)
+  --timeout <s>   how long to wait for Studio's answer (default 20)
   install-plugin  builds the TypeTorch Studio plugin (github.com/typetorch/studio-plugin) with Rojo into Studio's
                   plugins folder as TypeTorchSync.rbxm, from the game's devDependency @typetorch/studio-plugin
                   (\`bun add -d @typetorch/studio-plugin\`) or --from a checkout. Restart Studio, or reload plugins, to
-                  load it. Keep the stock Rojo plugin if you like, but connect only one of them at a time.`;
+                  load it. Keep the stock Rojo plugin if you like, but connect only one of them at a time.
+
+  When no Studio is attached and Studio is open, the plugin may be stuck: run this in Studio's command bar, or through
+  the Roblox Studio MCP's execute_luau, to make it reconnect:
+    ${RECONNECT_LUAU}`;
 
 function gameRoot(args: ParsedArgs): string {
 	const config = flagString(args, "config");
@@ -68,12 +95,6 @@ function gameRoot(args: ParsedArgs): string {
 	const root = findProjectRoot();
 	if (!root) throw new UsageError("run inside a TypeTorch game repo (no typetorch.json here or above)");
 	return root;
-}
-
-async function requireRunning(root: string) {
-	const running = await findRunning(root);
-	if (!running) throw new ServeClientError("typetorch serve isn't running in this repo: start it with `typetorch serve` (agents: `typetorch serve --detach`)");
-	return running;
 }
 
 function extraScripts(args: ParsedArgs): string[] {
@@ -98,30 +119,21 @@ export async function serveCommand(args: ParsedArgs) {
 		case "status":
 			return status(args);
 		case "stop": {
-			const root = gameRoot(args);
-			const running = await findRunning(root);
-			if (!running) {
-				if (isJson()) emitJson({ ok: true, running: false });
-				else info("typetorch serve isn't running");
-				return;
-			}
-			await call(running.file.port, "POST", "/tt/stop");
-			for (let i = 0; i < 50 && (await findRunning(root)); i++) await sleep(200);
+			const result = await serveStop(gameRoot(args));
 			if (isJson()) emitJson({ ok: true, running: false });
-			else info("stopped");
+			else info(result.wasRunning ? "stopped" : "typetorch serve isn't running");
 			return;
 		}
 		case "restart": {
 			const child = rest[0];
 			if (!child) throw new UsageError("restart needs a child name: watch, rojo or a --with script");
-			const running = await requireRunning(gameRoot(args));
-			await call(running.file.port, "POST", "/tt/restart", { child });
+			await serveRestart(gameRoot(args), child);
 			if (isJson()) emitJson({ ok: true });
 			else info(`restarted ${child}`);
 			return;
 		}
 		case "logs":
-			return logs(args);
+			return logs(args, flagBool(args, "studio") ? "studio" : "serve");
 		default:
 			throw new UsageError(`unknown serve subcommand "${sub}"`);
 	}
@@ -153,37 +165,11 @@ async function foreground(args: ParsedArgs) {
 
 /** Starts `typetorch serve` in the background with the same flags (minus --detach) and waits until it answers. */
 async function detach(args: ParsedArgs) {
-	const root = gameRoot(args);
-	const already = await findRunning(root);
-	if (already) {
-		if (isJson()) emitJson({ ok: true, alreadyRunning: true, port: already.file.port, rojoPort: already.file.rojoPort, pid: already.file.pid });
-		else info(`already running (pid ${already.file.pid}, control port ${already.file.port})`);
-		return;
-	}
-	const logFile = join(root, ".typetorch", "serve.log");
-	mkdirSync(dirname(logFile), { recursive: true });
-	const out = openSync(logFile, "a");
-	const argv = process.argv.slice(1).filter((arg) => arg !== "--detach" && arg !== "--json");
-	const child = spawn(process.execPath, argv, {
-		cwd: process.cwd(),
-		detached: true,
-		stdio: ["ignore", out, out],
-		windowsHide: true,
-		env: { ...process.env, TYPETORCH_SERVE_LOG: logFile, NO_COLOR: "1", TYPETORCH_UPDATE_CHECK: "off" },
-	});
-	child.unref();
-	closeSync(out);
-	for (let i = 0; i < 100; i++) {
-		await sleep(200);
-		const running = await findRunning(root);
-		if (running) {
-			if (isJson()) emitJson({ ok: true, port: running.file.port, rojoPort: running.file.rojoPort, pid: running.file.pid, log: logFile });
-			else info(`typetorch serve started in the background (pid ${running.file.pid}, control port ${running.file.port}, Rojo ${running.file.rojoPort}); log: ${logFile}`);
-			return;
-		}
-		if (child.exitCode !== null) break;
-	}
-	throw new Error(`typetorch serve did not start; see ${logFile}`);
+	const argv = process.argv.slice(2).filter((arg) => arg !== "--detach" && arg !== "--json");
+	const r = await startDetached(gameRoot(args), argv, process.cwd());
+	if (isJson()) emitJson(r);
+	else if (r.alreadyRunning) info(`already running (pid ${r.pid}, control port ${r.port})`);
+	else info(`typetorch serve started in the background (pid ${r.pid}, control port ${r.port}, Rojo ${r.rojoPort}); log: ${r.log}`);
 }
 
 export function describeStatus(s: ServeStatus): string[] {
@@ -202,26 +188,19 @@ export function describeStatus(s: ServeStatus): string[] {
 }
 
 async function status(args: ParsedArgs) {
-	const root = gameRoot(args);
-	const running = await findRunning(root);
-	if (!running) {
-		if (isJson()) emitJson({ running: false });
-		else info("typetorch serve isn't running here (`typetorch serve`, or `typetorch serve --detach` for agents)");
-		return;
-	}
-	const s = await call<ServeStatus>(running.file.port, "GET", "/tt/status");
-	if (isJson()) emitJson({ running: true, port: running.file.port, ...s });
+	const s = await serveStatus(gameRoot(args));
+	if (isJson()) emitJson(s);
+	else if (!s.running) info("typetorch serve isn't running here (`typetorch serve`, or `typetorch serve --detach` for agents)");
 	else for (const line of describeStatus(s)) info(line);
 }
 
-async function logs(args: ParsedArgs) {
-	const running = await requireRunning(gameRoot(args));
-	const source = flagBool(args, "studio") ? "studio" : "serve";
-	let since = Number(flagString(args, "since") ?? 0) || 0;
+/** `serve logs` and `studio logs`. */
+async function logs(args: ParsedArgs, source: "serve" | "studio") {
+	const root = gameRoot(args);
 	const limit = flagInt(args, "limit", 200);
-	const fetchLines = () => call<{ last: number; lines: LogLine[] }>(running.file.port, "GET", `/tt/logs?source=${source}&since=${since}&limit=${limit}`);
-	const first = await fetchLines();
-	if (isJson() && !flagBool(args, "follow")) {
+	const follow = flagBool(args, "follow");
+	const first = await serveLogs(root, source, Number(flagString(args, "since") ?? 0) || 0, limit);
+	if (isJson() && !follow) {
 		emitJson(first);
 		return;
 	}
@@ -229,10 +208,10 @@ async function logs(args: ParsedArgs) {
 		for (const line of lines) isJson() ? console.log(JSON.stringify(line)) : printLine(line);
 	};
 	show(first.lines);
-	since = first.last;
-	while (flagBool(args, "follow")) {
+	let since = first.last;
+	while (follow) {
 		await sleep(1000);
-		const next = await fetchLines();
+		const next = await serveLogs(root, source, since, limit);
 		show(next.lines);
 		since = next.last;
 	}
@@ -243,9 +222,45 @@ export async function studioCommand(args: ParsedArgs) {
 	switch (sub) {
 		case "install-plugin":
 			return installPlugin(args);
+		case "status": {
+			const s = await serveStatus(gameRoot(args));
+			if (!s.running) throw new UsageError("typetorch serve isn't running here: start it with `typetorch serve` (agents: `typetorch serve --detach`)");
+			if (isJson()) emitJson({ studios: s.studios });
+			else if (s.studios.length === 0) info(`no Studio attached. Studio open? Install the plugin (\`typetorch studio install-plugin\`), or if it's stuck run in Studio: ${RECONNECT_LUAU}`);
+			else for (const st of s.studios) info(`${st.mode.padEnd(6)} "${st.placeName}" (place ${st.placeId})  ${st.sync.status}${st.sync.detail ? `: ${st.sync.detail}` : ""}  ${dim(st.id)}`);
+			return;
+		}
+		case "reconnect":
+			return studioRun(args, "reconnect", { anyway: flagBool(args, "anyway") }, (r) => {
+				const phase = String(r.result?.phase ?? "");
+				return phase === "connected" ? `connected: ${r.result?.detail ?? ""}` : `not connected yet (${phase}${r.result?.detail ? `: ${r.result.detail}` : ""})`;
+			}, (r) => r.result?.phase === "connected");
+		case "play":
+			return studioRun(args, "play", { mode: flagBool(args, "run") ? "run" : "play" }, () => `playtest started (${flagBool(args, "run") ? "run" : "play"})`);
+		case "stop":
+			return studioRun(args, "stop", {}, () => "playtest stopped");
+		case "logs":
+			return logs(args, "studio");
 		default:
 			throw new UsageError(sub ? `unknown studio subcommand "${sub}"` : "studio needs a subcommand");
 	}
+}
+
+/** Sends one command to Studio; prints the answer, exit code 1 when it failed (or `success` says it didn't work). */
+async function studioRun(
+	args: ParsedArgs,
+	kind: CommandKind,
+	commandArgs: Record<string, unknown>,
+	describe: (r: CommandResult) => string,
+	success: (r: CommandResult) => boolean = () => true,
+) {
+	const timeout = flagInt(args, "timeout", 20);
+	const r = await studioSend(gameRoot(args), kind, commandArgs, flagString(args, "target"), timeout * 1000);
+	const worked = r.ok && success(r);
+	if (!worked) process.exitCode = 1;
+	if (isJson()) emitJson(r);
+	else if (!r.ok) console.error(red(`${kind} failed in Studio (${r.studio.mode}): ${r.error ?? "unknown error"}`));
+	else info(describe(r));
 }
 
 export const PLUGIN_FILE = "TypeTorchSync.rbxm";
