@@ -540,8 +540,9 @@ build's channel in brackets when it differs.
 - **A Studio on another machine** (`serve --remote`). serve also opens a gateway on `127.0.0.1:34890`
   (`--remote-port`) for a tunnel you run, so someone else's Studio can attach over the internet. With Cloudflare
   Tunnel, route a hostname to `http://localhost:34890`, for example `cloudflared tunnel --url http://localhost:34890`
-  for a quick one, or an ingress rule in a named tunnel. Then `typetorch serve pair` prints a one-time code (15 min).
-  The other person enters the tunnel URL and the code in the plugin's Remote card, and their Studio stays paired for 30
+  for a quick one, or an ingress rule in a named tunnel. Then `typetorch serve pair --url https://<your tunnel>` prints a
+  one-time pairing link (15 min): the tunnel URL with the code after a `#` (the URL is remembered, so later it's just
+  `typetorch serve pair`). The other person pastes that link into the plugin's Remote card, and their Studio stays paired for 30
   days (`serve devices`, `serve unpair --name <device>|--all`). Every request but pairing needs that device's token
   (kept hashed in `.typetorch/serve-remote.json`). A remote Studio syncs code read-only through Rojo (never Rojo's
   `write` or `open`), reports its state and Output, and runs the hot asset buttons (uploads with your keys, deploys only
