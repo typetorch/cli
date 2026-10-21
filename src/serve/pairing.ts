@@ -50,8 +50,24 @@ export function normalizeCode(code: string): string {
 	return code.toUpperCase().replace(/[\s-]/g, "");
 }
 
+/** `serve.example.com/` -> `https://serve.example.com`; throws on anything but an http(s) address (with an optional path). */
+export function normalizeUrl(raw: string): string {
+	let text = raw.trim().replace(/\/+$/, "");
+	if (!/^https?:\/\//i.test(text)) text = `https://${text}`;
+	let url: URL;
+	try {
+		url = new URL(text);
+	} catch {
+		throw new Error(`not a URL: ${raw}`);
+	}
+	if (url.search || url.hash || url.username || url.password) throw new Error(`--url: just the tunnel's address, e.g. https://serve.example.com (got ${raw})`);
+	return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, "")}`;
+}
+
 export class Pairing {
 	private devices: Device[] = [];
+	/** The owner's tunnel URL (`serve pair --url`), remembered so `serve pair` prints one link with the code in it. */
+	url?: string;
 	private code?: { code: string; expiresAt: number };
 	private badCodes = 0;
 
@@ -63,6 +79,7 @@ export class Pairing {
 		if (existsSync(file)) {
 			try {
 				const raw = JSON.parse(readFileSync(file, "utf8"));
+				if (typeof raw?.url === "string") this.url = raw.url;
 				if (Array.isArray(raw?.devices)) {
 					this.devices = raw.devices.filter((d: Device) => typeof d?.hash === "string" && typeof d?.name === "string" && (d.userId === undefined || Number.isSafeInteger(d.userId)));
 				}
@@ -73,13 +90,20 @@ export class Pairing {
 		this.prune();
 	}
 
-	/** A new one-time code (replaces any earlier one and unlocks pairing). */
-	newCode(): { code: string; expiresAt: string } {
+	/**
+	 * A new one-time code (replaces any earlier one and unlocks pairing). `url`: the owner's tunnel URL, remembered for
+	 * later codes. With a URL, `link` is the one thing to share: `<url>#<code>`, which the plugin's Remote box takes as is.
+	 */
+	newCode(url?: string): { code: string; expiresAt: string; url?: string; link?: string } {
+		if (url !== undefined) {
+			this.url = normalizeUrl(url);
+			this.save();
+		}
 		const code = newCode();
 		const expiresAt = this.now() + CODE_MINUTES * 60_000;
 		this.code = { code, expiresAt };
 		this.badCodes = 0;
-		return { code, expiresAt: new Date(expiresAt).toISOString() };
+		return { code, expiresAt: new Date(expiresAt).toISOString(), ...(this.url ? { url: this.url, link: `${this.url}#${code}` } : {}) };
 	}
 
 	/** Trades the current code for a device token; the code works once. Throws a message for the caller. */
@@ -142,6 +166,6 @@ export class Pairing {
 	private save() {
 		const file = join(this.root, PAIRING_FILE);
 		mkdirSync(dirname(file), { recursive: true });
-		writeFileSync(file, JSON.stringify({ v: 1, devices: this.devices.map(({ lastSeen: _, ...d }) => d) }, null, "\t") + "\n", { mode: 0o600 });
+		writeFileSync(file, JSON.stringify({ v: 1, ...(this.url ? { url: this.url } : {}), devices: this.devices.map(({ lastSeen: _, ...d }) => d) }, null, "\t") + "\n", { mode: 0o600 });
 	}
 }

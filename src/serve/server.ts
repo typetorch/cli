@@ -377,8 +377,14 @@ export class ControlServer {
 			}
 			case "POST /tt/plugin/hello":
 				return this.pluginHello(body ?? {});
-			case "POST /tt/remote/code":
-				return this.pairing().newCode();
+			case "POST /tt/remote/code": {
+				const url = body?.url === undefined ? undefined : str(body.url, "url", 300);
+				try {
+					return this.pairing().newCode(url);
+				} catch (error) {
+					throw new HttpError(400, (error as Error).message);
+				}
+			}
 			case "GET /tt/remote/devices":
 				return { devices: this.pairing().list() };
 			case "POST /tt/remote/revoke": {

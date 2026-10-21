@@ -6,7 +6,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { call } from "../src/serve/client";
-import { MAX_BAD_CODES, newCode, normalizeCode, Pairing, PAIRING_FILE } from "../src/serve/pairing";
+import { MAX_BAD_CODES, newCode, normalizeCode, normalizeUrl, Pairing, PAIRING_FILE } from "../src/serve/pairing";
 import type { Hello } from "../src/serve/protocol";
 import { RemoteGateway, rojoPath } from "../src/serve/remote";
 import { ControlServer, HttpError } from "../src/serve/server";
@@ -62,6 +62,22 @@ describe("pairing", () => {
 			expect(pairing.list().map((d) => d.name)).toEqual(["a"]);
 			expect(pairing.revoke("a")).toBe(1);
 			expect(pairing.check(a)).toBeUndefined();
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("with the tunnel URL, a code comes as one link; the URL is remembered", () => {
+		const root = mkdtempSync(join(tmpdir(), "tt-pair-"));
+		try {
+			const pairing = new Pairing(root);
+			expect(pairing.newCode().link).toBeUndefined();
+			const first = pairing.newCode("serve.example.com/");
+			expect(first.link).toBe(`https://serve.example.com#${first.code}`);
+			const later = new Pairing(root).newCode();
+			expect(later.link).toBe(`https://serve.example.com#${later.code}`);
+			expect(normalizeUrl("http://127.0.0.1:34890/")).toBe("http://127.0.0.1:34890");
+			expect(() => normalizeUrl("https://x.example?a=1")).toThrow("just the tunnel");
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
