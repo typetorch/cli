@@ -3,6 +3,7 @@
  * (Cloudflare Tunnel: `service: http://localhost:<port>`). It listens on 127.0.0.1 only; the tunnel is what makes it
  * public, so every request but pairing needs a device token (pairing.ts):
  *
+ *   GET  /tt/claude/stream the Claude tab's WebSocket (claude-stream.ts), same token in the Authorization header
  *   POST /tt/pair          {code, name, userId?} -> {token, expiresAt}: a one-time code from `typetorch serve pair`;
  *                          userId (the person's Roblox user) is whose prompts the Claude tab sends
  *   /tt/...                the control API, `Authorization: Bearer <token>`, limited to what the plugin needs
@@ -155,6 +156,17 @@ export class RemoteGateway {
 			socket.end(`HTTP/1.1 ${status} ${text}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
 		};
 		const url = new URL(req.url ?? "/", "http://remote");
+		if (url.pathname === "/tt/claude/stream") {
+			// the Claude tab's event stream (claude-stream.ts), with the same device token as the control API
+			if (req.headers.origin !== undefined) return refuse(403, "Forbidden");
+			const auth = req.headers.authorization ?? "";
+			const token = auth.startsWith("Bearer ") ? auth.slice(7) : undefined;
+			const device = this.options.pairing.check(token);
+			if (!device || !token) return refuse(401, "Unauthorized");
+			this.sockets.add(socket);
+			socket.on("close", () => this.sockets.delete(socket));
+			return this.options.control.upgrade(req, socket, head, { userId: device.userId });
+		}
 		const parsed = rojoPath(url.pathname);
 		if (!parsed || req.headers.origin !== undefined) return refuse(404, "Not Found");
 		const target = this.rojoTarget(parsed, true);
