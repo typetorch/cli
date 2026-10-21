@@ -49,6 +49,8 @@ export interface StudioInfo {
 	sync: { status: "idle" | "connecting" | "connected" | "disconnected" | "paused"; detail?: string; at?: string };
 	firstSeen: string;
 	lastSeen: string;
+	/** The paired device's name when this Studio came through `serve --remote`. */
+	remote?: string;
 }
 
 export interface LogLine {

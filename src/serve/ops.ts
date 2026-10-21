@@ -98,3 +98,21 @@ export async function studioSend(
 	const running = await requireRunning(root);
 	return call<CommandResult>(running.file.port, "POST", "/tt/command", { kind, args, target, timeoutMs }, timeoutMs + 5000);
 }
+
+/** `typetorch serve pair`: a new one-time pairing code for a remote Studio (serve must run with --remote). */
+/** A one-time pairing code; `url` (the tunnel's address) is remembered, and with one the result has a shareable `link`. */
+export async function servePairCode(root: string, url?: string): Promise<{ code: string; expiresAt: string; url?: string; link?: string }> {
+	const running = await requireRunning(root);
+	return call(running.file.port, "POST", "/tt/remote/code", url === undefined ? {} : { url });
+}
+
+export async function serveDevices(root: string): Promise<{ devices: { name: string; createdAt: string; expiresAt: string; lastSeen?: string }[] }> {
+	const running = await requireRunning(root);
+	return call(running.file.port, "GET", "/tt/remote/devices");
+}
+
+/** Revokes the paired devices called `name`, or all of them. */
+export async function serveUnpair(root: string, name?: string): Promise<{ revoked: number }> {
+	const running = await requireRunning(root);
+	return call(running.file.port, "POST", "/tt/remote/revoke", name === undefined ? {} : { name });
+}

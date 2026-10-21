@@ -538,6 +538,28 @@ build's channel in brackets when it differs.
 - **MCP.** `typetorch mcp` serves the same as tools over stdio (`serve_status`, `serve_start`, `serve_stop`,
   `serve_logs`, `studio_logs`, `studio_reconnect`, `studio_play`, `studio_stop`). Claude Code, from the game repo:
   `claude mcp add typetorch -- bunx typetorch mcp`.
+- **A Studio on another machine** (`serve --remote`). serve also opens a gateway on `127.0.0.1:34890`
+  (`--remote-port`) for a tunnel you run, so someone else's Studio can attach over the internet. With Cloudflare
+  Tunnel, route a hostname to `http://localhost:34890`, for example `cloudflared tunnel --url http://localhost:34890`
+  for a quick one, or an ingress rule in a named tunnel. Then `typetorch serve pair --url https://<your tunnel>` prints a
+  one-time pairing link (15 min): the tunnel URL with the code after a `#` (the URL is remembered, so later it's just
+  `typetorch serve pair`). The other person pastes that link into the plugin's Remote card, and their Studio stays paired for 30
+  days (`serve devices`, `serve unpair --name <device>|--all`). Every request but pairing needs that device's token
+  (kept hashed in `.typetorch/serve-remote.json`). A remote Studio syncs code read-only through Rojo (never Rojo's
+  `write` or `open`), reports its state and Output, and runs the hot asset buttons (uploads with your keys, deploys only
+  to the dev branch). It can't stop or restart serve, read serve's log or drive other Studios, and `typetorch studio
+  ...` and the MCP tools never pick a remote Studio unless `--target` names it. Wrong codes lock pairing after 5
+  tries until you make a new code.
+- **Claude in Studio** (`serve --claude`). serve also runs remote-claude (`typetorch remote-claude`, from
+  `@typetorch/dev-server`) on this machine without a tunnel, and the plugin's **Claude** tab prompts it: Claude Code
+  edits this branch (Code mode; the branch must be dev-channel), then the tab shows Deploy or Discard, as the in-game
+  DEV > Claude tab does. `--claude-users <ids>` lists the Roblox user ids allowed (remembered; required the first time),
+  so add a remote helper's id there too: a remote Studio prompts as the Roblox user it paired with, and serve pairs with
+  remote-claude for them (nobody handles a remote-claude code). A remote-claude you start yourself in the repo works the
+  same way (serve finds it through `.typetorch/remote-claude.session.json`). The tab has the in-game tab's options too:
+  Live mode (the game tools answer from a running playtest), Toolbox, screenshots, logs and recent chats; the chat
+  follows you between Edit and Play (serve keeps it per user while remote-claude runs). Replies stream to the tab over
+  a WebSocket (`/tt/claude/stream`, through the tunnel too), so they show as Claude writes them.
 
 ### Hot assets
 

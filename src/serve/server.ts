@@ -18,6 +18,11 @@ import {
 	type StudioInfo,
 } from "./protocol.ts";
 import { JOB_KINDS, type JobKind, type JobRunner } from "./jobs.ts";
+import { ClaudeError, type ClaudeBridge } from "./claude.ts";
+import { serveClaudeStream } from "./claude-stream.ts";
+import { acceptWebSocket, refuseUpgrade, type WebSocketConnection } from "./ws.ts";
+import type { Socket } from "node:net";
+import type { Pairing } from "./pairing.ts";
 
 /** Lines kept per source group (serve's own children, Studio). */
 const RING_SIZE = 2000;
@@ -69,7 +74,37 @@ export interface ControlHandlers {
 	jobs?: JobRunner;
 	/** The hot assets the lockfile knows (GET /tt/assets). */
 	assets?: () => unknown;
+	/** Devices paired for --remote (absent without it). */
+	pairing?: Pairing;
+	/** The plugin's Claude tab (claude.ts; absent in tests that don't need it). */
+	claude?: ClaudeBridge;
 }
+
+/**
+ * What a paired device may call through the remote gateway (remote.ts): what the plugin needs to sync, report and run
+ * hot asset jobs. Not stop, restart, agent commands (`/tt/command`) or serve's own logs.
+ */
+const REMOTE_ROUTES = new Set([
+	"GET /tt/hello",
+	"GET /tt/status",
+	"GET /tt/assets",
+	"POST /tt/jobs",
+	"GET /tt/jobs",
+	"POST /tt/plugin/hello",
+	"POST /tt/plugin/state",
+	"POST /tt/plugin/logs",
+	"GET /tt/plugin/poll",
+	"POST /tt/plugin/result",
+	"GET /tt/claude",
+	"POST /tt/claude/prompt",
+	"GET /tt/claude/prompt",
+	"POST /tt/claude/deploy",
+	"POST /tt/claude/cancel",
+	"POST /tt/claude/v1",
+	"GET /tt/claude/stream",
+	"GET /tt/claude/chat",
+	"POST /tt/claude/chat",
+]);
 
 export class HttpError extends Error {
 	constructor(
@@ -102,6 +137,8 @@ export class ControlServer {
 	private readonly studios = new Map<string, StudioInfo>();
 	/** Commands waiting for each plugin's next poll, and the poll waiting for them. */
 	private readonly queues = new Map<string, { commands: StudioCommand[]; waiter?: () => void }>();
+	/** Open Claude streams (upgraded sockets: server.close() doesn't end them). */
+	private readonly streams = new Set<WebSocketConnection>();
 	/** Commands sent and waiting for their result. */
 	private readonly pending = new Map<string, { studio: string; done: (result: CommandResult) => void }>();
 	private server?: Server;
@@ -113,6 +150,7 @@ export class ControlServer {
 	async listen(ports: readonly number[] = CONTROL_PORTS): Promise<number> {
 		for (const port of ports) {
 			const server = createServer((req, res) => void this.handle(req, res));
+			server.on("upgrade", (req, socket, head) => this.upgrade(req, socket as Socket, head));
 			const ok = await new Promise<boolean>((done) => {
 				server.once("error", () => done(false));
 				server.listen(port, "127.0.0.1", () => done(true));
@@ -129,6 +167,8 @@ export class ControlServer {
 
 	close(): Promise<void> {
 		for (const queue of this.queues.values()) queue.waiter?.();
+		for (const stream of this.streams) stream.close(1001);
+		this.streams.clear();
 		return new Promise((done) => {
 			if (!this.server) return done();
 			this.server.close(() => done());
@@ -163,8 +203,9 @@ export class ControlServer {
 			studio = studios.find((s) => s.id === target);
 			if (!studio) throw new HttpError(404, `no attached Studio with id ${target}`);
 		} else {
+			// a paired remote Studio only by its id: an agent here never drives someone else's Studio by accident
 			const modes = target ? [target] : kind === "stop" ? ["server", "edit"] : ["edit"];
-			for (const mode of modes) studio ??= studios.find((s) => s.mode === mode);
+			for (const mode of modes) studio ??= studios.find((s) => s.mode === mode && !s.remote);
 			if (!studio) throw new HttpError(409, noStudioMessage(modes.join(" or ")));
 		}
 		const command: StudioCommand = { id: randomUUID(), kind, args };
@@ -226,32 +267,81 @@ export class ControlServer {
 		return studio;
 	}
 
-	private async handle(req: IncomingMessage, res: ServerResponse) {
+	/**
+	 * A WebSocket upgrade: only `/tt/claude/stream` (claude-stream.ts). Local callers pass the same checks as HTTP and
+	 * name their user (`?user=`); a paired device (remote.ts checked its token) streams as the user it paired with.
+	 */
+	upgrade(req: IncomingMessage, socket: Socket, head: Buffer, remote?: { userId?: number }) {
 		try {
-			this.checkRequest(req);
+			this.checkRequest(req, remote !== undefined);
 			const url = new URL(req.url ?? "/", "http://127.0.0.1");
+			if (url.pathname !== "/tt/claude/stream") throw new HttpError(404, "Not Found");
+			const user = this.claudeUser(remote, url.searchParams.get("user"));
+			const bridge = this.claude();
+			const connection = acceptWebSocket(req, socket, head);
+			if (!connection) return;
+			this.streams.add(connection);
+			connection.on("close", () => this.streams.delete(connection));
+			serveClaudeStream(connection, bridge, user);
+		} catch (error) {
+			const status = error instanceof HttpError || error instanceof ClaudeError ? error.status : 500;
+			refuseUpgrade(socket, status, status === 404 ? "Not Found" : status === 401 ? "Unauthorized" : "Forbidden");
+		}
+	}
+
+	/**
+	 * A request a paired device sent through the remote gateway (remote.ts checked its token): REMOTE_ROUTES only, and
+	 * its plugin ids live under `remote/<device>/` so they can't take over a local Studio's.
+	 */
+	handleRemote(req: IncomingMessage, res: ServerResponse, device: string, userId?: number) {
+		return this.handle(req, res, device, userId);
+	}
+
+	private async handle(req: IncomingMessage, res: ServerResponse, remote?: string, remoteUser?: number) {
+		try {
+			this.checkRequest(req, remote !== undefined);
+			const url = new URL(req.url ?? "/", "http://127.0.0.1");
+			if (remote !== undefined && !REMOTE_ROUTES.has(`${req.method} ${url.pathname}`)) throw new HttpError(403, "not available to a remote Studio");
 			const body = req.method === "POST" ? await readJson(req) : undefined;
+			if (remote !== undefined) {
+				const prefix = `remote/${remote}/`;
+				const own = (id: unknown) => {
+					if (typeof id !== "string" || id.length === 0 || id.length > 64) throw new HttpError(400, "id: expected a string");
+					return prefix + id;
+				};
+				if (body && "id" in (body as Record<string, unknown>)) (body as Record<string, unknown>).id = own((body as Record<string, unknown>).id);
+				const id = url.searchParams.get("id");
+				if (id && url.pathname.startsWith("/tt/plugin/")) url.searchParams.set("id", String(own(id)));
+				if (url.pathname === "/tt/plugin/hello" && body) (body as Record<string, unknown>).remote = remote;
+			}
 			const gone = new AbortController();
 			res.on("close", () => gone.abort());
-			const result = await this.route(req.method ?? "GET", url, body as Record<string, unknown> | undefined, gone.signal);
+			const result = await this.route(req.method ?? "GET", url, body as Record<string, unknown> | undefined, gone.signal, remote === undefined ? undefined : { userId: remoteUser });
 			send(res, 200, result);
 		} catch (error) {
-			if (error instanceof HttpError) send(res, error.status, { error: error.message });
+			if (error instanceof HttpError || error instanceof ClaudeError) send(res, error.status, { error: error.message });
 			else send(res, 500, { error: (error as Error).message ?? String(error) });
 		}
 	}
 
-	/** Loopback callers only, with the header, without a browser Origin, and with a loopback Host (no DNS rebinding). */
-	private checkRequest(req: IncomingMessage) {
+	/**
+	 * Loopback callers only, with the header, without a browser Origin, and with a loopback Host (no DNS rebinding). A
+	 * remote request came through a tunnel (its Host is the tunnel's) and was checked by its token instead.
+	 */
+	private checkRequest(req: IncomingMessage, remote = false) {
 		if (req.method === "OPTIONS") throw new HttpError(403, "no CORS");
 		if (req.headers.origin !== undefined) throw new HttpError(403, "browser requests are refused");
 		if (req.headers[HEADER] !== "1") throw new HttpError(403, `missing ${HEADER} header`);
+		if (remote) return;
 		const host = (req.headers.host ?? "").toLowerCase();
 		if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) throw new HttpError(403, "bad Host");
 	}
 
-	/** `gone`: the caller hung up (a long poll must not hand its commands to a closed connection). */
-	protected async route(method: string, url: URL, body: Record<string, unknown> | undefined, gone?: AbortSignal): Promise<unknown> {
+	/**
+	 * `gone`: the caller hung up (a long poll must not hand its commands to a closed connection). `remote`: the paired
+	 * device a remote request came from (absent: a local caller).
+	 */
+	protected async route(method: string, url: URL, body: Record<string, unknown> | undefined, gone?: AbortSignal, remote?: { userId?: number }): Promise<unknown> {
 		const key = `${method} ${url.pathname}`;
 		switch (key) {
 			case "GET /tt/hello":
@@ -281,13 +371,13 @@ export class ControlServer {
 				return this.command(kind as CommandKind, (args as Record<string, unknown>) ?? {}, target, Math.min(Math.max(timeout, 1000), COMMAND_TIMEOUT_MAX_MS));
 			}
 			case "GET /tt/plugin/poll": {
-				const id = str(url.searchParams.get("id") ?? undefined, "id", 64);
+				const id = str(url.searchParams.get("id") ?? undefined, "id", 140);
 				this.touch(id);
 				const hold = Number(url.searchParams.get("wait") ?? POLL_HOLD_MS / 1000);
 				return this.poll(id, Math.min(Math.max(Number.isFinite(hold) ? hold * 1000 : 0, 0), POLL_HOLD_MS), gone);
 			}
 			case "POST /tt/plugin/result": {
-				const studio = this.touch(str(body?.id, "id", 64));
+				const studio = this.touch(str(body?.id, "id", 140));
 				const entry = this.pending.get(str(body?.command, "command", 64));
 				// Late (timed out) or someone else's: nothing waits for it.
 				if (!entry || entry.studio !== studio.id) return { ok: true, late: true };
@@ -321,8 +411,22 @@ export class ControlServer {
 			}
 			case "POST /tt/plugin/hello":
 				return this.pluginHello(body ?? {});
+			case "POST /tt/remote/code": {
+				const url = body?.url === undefined ? undefined : str(body.url, "url", 300);
+				try {
+					return this.pairing().newCode(url);
+				} catch (error) {
+					throw new HttpError(400, (error as Error).message);
+				}
+			}
+			case "GET /tt/remote/devices":
+				return { devices: this.pairing().list() };
+			case "POST /tt/remote/revoke": {
+				const name = body?.name === undefined ? undefined : str(body.name, "name", 60);
+				return { revoked: this.pairing().revoke(name) };
+			}
 			case "POST /tt/plugin/state": {
-				const studio = this.touch(str(body?.id, "id", 64));
+				const studio = this.touch(str(body?.id, "id", 140));
 				const status = str(body?.status, "status", 20);
 				if (!SYNC_STATES.has(status)) throw new HttpError(400, "status: unknown value");
 				const detail = typeof body?.detail === "string" ? body.detail.slice(0, 500) : undefined;
@@ -332,7 +436,7 @@ export class ControlServer {
 				return { ok: true };
 			}
 			case "POST /tt/plugin/logs": {
-				const studio = this.touch(str(body?.id, "id", 64));
+				const studio = this.touch(str(body?.id, "id", 140));
 				const lines = Array.isArray(body?.lines) ? body.lines.slice(0, 200) : [];
 				for (const entry of lines as Record<string, unknown>[]) {
 					const level = typeof entry?.level === "string" && LEVELS.has(entry.level) ? (entry.level as LogLine["level"]) : "info";
@@ -341,13 +445,79 @@ export class ControlServer {
 				}
 				return { ok: true };
 			}
+			case "GET /tt/claude":
+				return this.claude().status();
+			case "POST /tt/claude/prompt": {
+				const prompt = str(body?.prompt, "prompt", 20_000);
+				const conversationId = body?.conversationId === undefined ? undefined : str(body.conversationId, "conversationId", 64);
+				const mode = body?.mode === undefined ? undefined : str(body.mode, "mode", 10);
+				if (mode !== undefined && mode !== "live" && mode !== "code") throw new HttpError(400, "mode: live or code");
+				const attachments = body?.attachments === undefined ? undefined : Array.isArray(body.attachments) && body.attachments.length <= 8 ? (body.attachments as unknown[]).map((id) => str(id, "attachments[]", 64)) : undefined;
+				if (body?.attachments !== undefined && attachments === undefined) throw new HttpError(400, "attachments: a list of attachment ids");
+				const context = body?.context === undefined ? undefined : typeof body.context === "object" && body.context !== null && !Array.isArray(body.context) ? (body.context as Record<string, unknown>) : undefined;
+				if (body?.context !== undefined && context === undefined) throw new HttpError(400, "context: an object");
+				return this.claude().prompt(this.claudeUser(remote, body?.user), prompt, conversationId, { mode, toolbox: body?.toolbox === true, attachments, context });
+			}
+			case "GET /tt/claude/prompt": {
+				const id = str(url.searchParams.get("id") ?? undefined, "id", 64);
+				const since = Math.max(0, Math.floor(Number(url.searchParams.get("since") ?? 0) || 0));
+				return this.claude().poll(this.claudeUser(remote, url.searchParams.get("user")), id, since);
+			}
+			case "POST /tt/claude/deploy": {
+				const decision = str(body?.decision, "decision", 10);
+				if (decision !== "deploy" && decision !== "discard") throw new HttpError(400, "decision: deploy or discard");
+				return this.claude().deploy(this.claudeUser(remote, body?.user), str(body?.id, "id", 64), decision);
+			}
+			case "POST /tt/claude/cancel":
+				return this.claude().cancel(this.claudeUser(remote, body?.user), str(body?.id, "id", 64));
+			case "POST /tt/claude/v1": {
+				const method = str(body?.method, "method", 4);
+				if (method !== "GET" && method !== "POST") throw new HttpError(400, "method: GET or POST");
+				return this.claude().passthrough(this.claudeUser(remote, body?.user), method, str(body?.path, "path", 200), body?.body);
+			}
+			case "GET /tt/claude/chat":
+				return this.claude().chat(this.claudeUser(remote, url.searchParams.get("user")));
+			case "POST /tt/claude/chat": {
+				const conversationId = body?.conversationId === undefined || body.conversationId === null ? undefined : str(body.conversationId, "conversationId", 64);
+				if (!Array.isArray(body?.prompts) || body.prompts.length > 500) throw new HttpError(400, "prompts: a list of prompt ids");
+				const prompts = (body.prompts as unknown[]).map((id) => str(id, "prompts[]", 64));
+				return this.claude().saveChat(this.claudeUser(remote, body?.user), conversationId, prompts);
+			}
 			default:
 				throw new HttpError(404, `no route ${key}`);
 		}
 	}
 
+	get pairingStore(): Pairing | undefined {
+		return this.handlers.pairing;
+	}
+
+	private claude(): ClaudeBridge {
+		if (!this.handlers.claude) throw new HttpError(404, "no Claude here");
+		return this.handlers.claude;
+	}
+
+	/**
+	 * Whose prompts these are (a Roblox user id, which remote-claude's --users must allow): a remote device's is the one it
+	 * paired with, and can't be changed per request; a local caller names it.
+	 */
+	private claudeUser(remote: { userId?: number } | undefined, given: unknown): number {
+		if (remote) {
+			if (remote.userId === undefined) throw new HttpError(403, "this Studio paired without its Roblox user: pair it again for the Claude tab");
+			return remote.userId;
+		}
+		const user = typeof given === "string" ? Number(given) : given;
+		if (typeof user !== "number" || !Number.isSafeInteger(user) || user <= 0) throw new HttpError(400, "user: expected a Roblox user id");
+		return user;
+	}
+
+	private pairing(): Pairing {
+		if (!this.handlers.pairing) throw new HttpError(404, "typetorch serve runs without --remote");
+		return this.handlers.pairing;
+	}
+
 	private pluginHello(body: Record<string, unknown>) {
-		const id = str(body.id, "id", 64);
+		const id = str(body.id, "id", 140);
 		const mode = str(body.mode, "mode", 10);
 		if (!MODES.has(mode)) throw new HttpError(400, "mode: edit, server or client");
 		const now = new Date().toISOString();
@@ -360,11 +530,15 @@ export class ControlServer {
 			placeName: typeof body.placeName === "string" ? body.placeName.slice(0, 100) : "",
 			pluginVersion: typeof body.pluginVersion === "string" ? body.pluginVersion.slice(0, 40) : "",
 			sync: existing?.sync ?? { status: "idle" },
+			...(typeof body.remote === "string" ? { remote: body.remote } : {}),
 			firstSeen: existing?.firstSeen ?? now,
 			lastSeen: now,
 		};
 		this.studios.set(id, studio);
-		if (!existing) this.serveLogs.push("studio", "info", `${studio.mode} plugin attached (${studio.placeName || "unnamed place"}, place ${studio.placeId})`);
+		if (!existing) {
+			const from = studio.remote ? `, remote: ${studio.remote}` : "";
+			this.serveLogs.push("studio", "info", `${studio.mode} plugin attached (${studio.placeName || "unnamed place"}, place ${studio.placeId}${from})`);
+		}
 		return { ok: true, hello: this.handlers.hello() };
 	}
 }
