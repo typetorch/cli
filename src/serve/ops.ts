@@ -100,9 +100,10 @@ export async function studioSend(
 }
 
 /** `typetorch serve pair`: a new one-time pairing code for a remote Studio (serve must run with --remote). */
-export async function servePairCode(root: string): Promise<{ code: string; expiresAt: string }> {
+/** A one-time pairing code; `url` (the tunnel's address) is remembered, and with one the result has a shareable `link`. */
+export async function servePairCode(root: string, url?: string): Promise<{ code: string; expiresAt: string; url?: string; link?: string }> {
 	const running = await requireRunning(root);
-	return call(running.file.port, "POST", "/tt/remote/code");
+	return call(running.file.port, "POST", "/tt/remote/code", url === undefined ? {} : { url });
 }
 
 export async function serveDevices(root: string): Promise<{ devices: { name: string; createdAt: string; expiresAt: string; lastSeen?: string }[] }> {

@@ -33,10 +33,11 @@ export const serveFlags = {
 	"remote-port": "string",
 	name: "string",
 	all: "boolean",
+	url: "string",
 } as const;
 
 export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <script,...>] [--dev-branch <b>] [--remote [--remote-port <n>]] [--json]
-typetorch serve pair [--json]
+typetorch serve pair [--url <tunnel URL>] [--json]
 typetorch serve devices [--json]
 typetorch serve unpair (--name <device> | --all) [--json]
 typetorch serve status [--json]
@@ -60,8 +61,8 @@ typetorch serve logs [--studio] [--since <seq>] [--limit <n>] [--follow] [--json
                tunnel you run (Cloudflare Tunnel: service http://localhost:${REMOTE_DEFAULT_PORT}). Every request needs a device token
                from pairing; a remote Studio syncs code read-only, reports its state and runs hot asset jobs (dev only),
                but can't stop serve, drive other Studios or read serve's log
-  pair         a one-time pairing code (15 min): the other person enters your tunnel URL and the code in the plugin's
-               Remote card; their Studio stays paired for 30 days
+  pair         a one-time pairing link (15 min), your tunnel URL with the code in it (--url once; remembered): the
+               other person pastes it into the plugin's Remote card; their Studio stays paired for 30 days
   devices      the paired devices; unpair --name <device> (or --all) revokes them
   --json       foreground: one JSON line per log line; subcommands: one JSON document
   status       children, attached Studios (edit / playtest), sync state, last compile result and its errors
@@ -152,10 +153,16 @@ export async function serveCommand(args: ParsedArgs) {
 		case "logs":
 			return logs(args, flagBool(args, "studio") ? "studio" : "serve");
 		case "pair": {
-			const r = await servePairCode(gameRoot(args));
+			const r = await servePairCode(gameRoot(args), flagString(args, "url"));
 			if (isJson()) return emitJson(r);
-			info(`pairing code: ${bold(r.code)} (once, until ${new Date(r.expiresAt).toLocaleTimeString()})`);
-			info(dim("In Studio: TypeTorch panel > Remote server: your tunnel URL and this code > Pair"));
+			const until = new Date(r.expiresAt).toLocaleTimeString();
+			if (r.link) {
+				info(`pairing link: ${bold(r.link)} (works once, until ${until})`);
+				info(dim("Send it to them; in Studio: TypeTorch panel > Remote server > paste it > Pair"));
+			} else {
+				info(`pairing code: ${bold(r.code)} (once, until ${until})`);
+				info(dim("Add your tunnel's address once for a link to share: typetorch serve pair --url https://<your tunnel>"));
+			}
 			return;
 		}
 		case "devices": {
