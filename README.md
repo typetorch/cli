@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/typetorch/docs/main/brand/typetorch.svg" width="64" alt="TypeTorch logo">
+
 # @typetorch/cli
 
 `typetorch` builds a roblox-ts game into a payload, uploads it to Roblox as a private Model asset, and hot-swaps it
