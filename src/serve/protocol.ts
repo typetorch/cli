@@ -1,0 +1,88 @@
+/**
+ * `typetorch serve`: the local dev server that replaces `bun run studio`, `bun run watch` and friends, and
+ * the HTTP contract the TypeTorch Studio plugin (github.com/typetorch/studio-plugin) and the CLI's own subcommands speak with it.
+ *
+ * - The control API listens on 127.0.0.1, on the first free port of CONTROL_PORTS. The plugin probes the whole range
+ *   every few seconds (`GET /tt/hello`) and attaches to the server whose universeId matches its place, so nobody
+ *   clicks Connect. Rojo keeps its own port (ROJO_DEFAULT_PORT, Rojo's default, so the stock plugin still works);
+ *   /tt/hello tells the plugin where it is.
+ * - Every request needs the header `X-TypeTorch: 1` and must not carry an `Origin` header; the server never answers
+ *   CORS preflights. A web page in a browser therefore can't call it (a custom header forces a preflight).
+ * - Bodies are JSON. Errors are `{ "error": "<text>" }` with a 4xx/5xx status.
+ */
+
+export const API_VERSION = 1;
+
+/** The control API's port range (Rojo's default 34872 is left to Rojo). */
+export const CONTROL_PORTS = [34880, 34881, 34882, 34883, 34884, 34885, 34886, 34887] as const;
+
+/** Rojo's own default port; `serve` uses it (or the next free one) so the stock Rojo plugin connects too. */
+export const ROJO_DEFAULT_PORT = 34872;
+
+export const HEADER = "x-typetorch";
+
+/** What `GET /tt/hello` answers: enough for the plugin to pick the right server and reach Rojo. */
+export interface Hello {
+	app: "typetorch-serve";
+	api: number;
+	/** typetorch.json "project". */
+	project: string;
+	universeId: number;
+	placeId: number;
+	/** Rojo's port on 127.0.0.1, or 0 while Rojo isn't up. */
+	rojoPort: number;
+	/** The project file Rojo serves (relative to the game repo). */
+	projectFile: string;
+	pid: number;
+	startedAt: string;
+}
+
+/** One running Studio plugin (a DataModel: edit, or a playtest's server or client). */
+export interface StudioInfo {
+	id: string;
+	mode: "edit" | "server" | "client";
+	placeId: number;
+	gameId: number;
+	placeName: string;
+	pluginVersion: string;
+	/** Rojo sync state as the plugin reports it. */
+	sync: { status: "idle" | "connecting" | "connected" | "disconnected" | "paused"; detail?: string; at?: string };
+	firstSeen: string;
+	lastSeen: string;
+}
+
+export interface LogLine {
+	seq: number;
+	at: string;
+	source: string;
+	level: "info" | "warn" | "error";
+	text: string;
+}
+
+/** A compile problem parsed from `rbxtsc -w`. */
+export interface CompileError {
+	file: string;
+	line: number;
+	column: number;
+	code?: string;
+	message: string;
+}
+
+export interface ChildStatus {
+	name: string;
+	command: string[];
+	state: "starting" | "running" | "exited" | "restarting" | "stopped";
+	pid?: number;
+	restarts: number;
+	exitCode?: number | null;
+}
+
+export interface ServeStatus {
+	hello: Hello;
+	children: ChildStatus[];
+	compile: { state: "idle" | "compiling" | "ok" | "errors"; errors: CompileError[]; at?: string };
+	studios: StudioInfo[];
+}
+
+/** The Luau line that asks a stuck plugin to reconnect (Studio command bar or the Roblox Studio MCP's execute_luau). */
+export const RECONNECT_LUAU = `game:GetService("ServerStorage"):SetAttribute("TypeTorchReconnect", os.time())`;

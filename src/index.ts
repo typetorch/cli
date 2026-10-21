@@ -43,6 +43,7 @@ import { pinCommand, pinFlags } from "./commands/pin.ts";
 import { promoteCommand, promoteFlags } from "./commands/promote.ts";
 import { REMOTE_CLAUDE_USAGE, remoteClaudeCommand } from "./commands/remote-claude.ts";
 import { rollbackCommand, rollbackFlags } from "./commands/rollback.ts";
+import { SERVE_USAGE, serveCommand, serveFlags, STUDIO_USAGE, studioCommand, studioFlags } from "./commands/serve.ts";
 import { UPDATE_USAGE, updateCommandRun, updateFlags } from "./commands/update.ts";
 import { gameDirFor, redact, Settings, useSettings } from "./env.ts";
 import { closestCommand, renderHelp } from "./help.ts";
@@ -409,6 +410,18 @@ typetorch assets list
   status  export + diff, nothing uploaded or written
   list    the lockfile
   Scopes (the assets key): asset:read, asset:write, universe.place.luau-execution-session:read and :write.`,
+	},
+	serve: {
+		flags: serveFlags,
+		run: serveCommand,
+		summary: "the Studio dev loop: watch + Rojo + plugin control, one process",
+		usage: SERVE_USAGE,
+	},
+	studio: {
+		flags: studioFlags,
+		run: studioCommand,
+		summary: "the TypeTorch Studio plugin (install)",
+		usage: STUDIO_USAGE,
 	},
 	"remote-claude": {
 		flags: {},

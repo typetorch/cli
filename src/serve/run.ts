@@ -1,0 +1,143 @@
+/**
+ * `typetorch serve` in the foreground: one process for the whole Studio dev loop.
+ *   watch  the game's "watch" script (rbxtsc -w; the template's also writes build-info), else `bun run rbxtsc -w`
+ *   rojo   `rojo serve <project> --port <p>` on Rojo's default port or the next free one
+ *   extra  each `--with <script>` (`--live` = `--with live`): `bun run <script>`
+ * plus the control API (server.ts) the TypeTorch Studio plugin attaches to by itself. Ctrl+C (or `typetorch serve
+ * stop`) stops everything. `.typetorch/serve.json` tells the other commands where the control API is.
+ */
+import { existsSync, readFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { join, relative } from "node:path";
+import { rojoBinary } from "../build.ts";
+import { loadProject } from "../config.ts";
+import { removeServeFile, writeServeFile } from "./client.ts";
+import { CompileTracker, stripAnsi } from "./compile.ts";
+import { API_VERSION, ROJO_DEFAULT_PORT, type Hello } from "./protocol.ts";
+import { ControlServer } from "./server.ts";
+import { Supervisor } from "./supervisor.ts";
+
+export interface ServeOptions {
+	cwd: string;
+	config?: string;
+	/** Project file for Rojo (default studio.project.json, else default.project.json). */
+	project?: string;
+	/** Rojo's port (default: ROJO_DEFAULT_PORT or the next free one). */
+	rojoPort?: number;
+	/** Control API ports to try (tests). */
+	controlPorts?: readonly number[];
+	watch: boolean;
+	/** package.json scripts to run next to the others (`--with`, `--live`). */
+	extra: string[];
+	/** Rojo's command (tests). */
+	rojoCommand?: string[];
+	/** The watch command (tests). */
+	watchCommand?: string[];
+	/** Every log line (human output or JSON lines). */
+	print: (line: { source: string; level: "info" | "warn" | "error"; text: string }) => void;
+	logFile?: string;
+}
+
+export interface RunningServe {
+	port: number;
+	rojoPort: number;
+	control: ControlServer;
+	stop: () => Promise<void>;
+	stopped: Promise<void>;
+}
+
+function scripts(root: string): Record<string, string> {
+	try {
+		return JSON.parse(readFileSync(join(root, "package.json"), "utf8"))?.scripts ?? {};
+	} catch {
+		return {};
+	}
+}
+
+function portFree(port: number): Promise<boolean> {
+	return new Promise((done) => {
+		const server = createServer();
+		server.once("error", () => done(false));
+		server.listen(port, "127.0.0.1", () => server.close(() => done(true)));
+	});
+}
+
+export async function freePort(from: number, tries = 20): Promise<number> {
+	for (let port = from; port < from + tries; port++) if (await portFree(port)) return port;
+	throw new Error(`no free port in ${from}-${from + tries - 1}`);
+}
+
+export function defaultProjectFile(root: string): string {
+	return existsSync(join(root, "studio.project.json")) ? "studio.project.json" : "default.project.json";
+}
+
+export async function startServe(options: ServeOptions): Promise<RunningServe> {
+	const project = loadProject(options.config, options.cwd);
+	const root = project.root;
+	const projectFile = options.project ?? defaultProjectFile(root);
+	if (!existsSync(join(root, projectFile))) throw new Error(`${projectFile} not found in ${root}`);
+	const known = scripts(root);
+	for (const name of options.extra) {
+		if (typeof known[name] !== "string") throw new Error(`package.json has no "${name}" script (--with ${name})`);
+	}
+	const rojoPort = options.rojoPort ?? (await freePort(ROJO_DEFAULT_PORT));
+	const startedAt = new Date().toISOString();
+	const supervisor = new Supervisor((source, stream, raw) => {
+		const text = stripAnsi(raw);
+		if (source === "watch") compile.line(raw);
+		if (!text.trim()) return;
+		const level = /\berror\b/i.test(text) ? "error" : stream === "stderr" ? "warn" : "info";
+		log(source, level, text);
+	});
+	const compile = new CompileTracker();
+	let stopping: Promise<void> | undefined;
+	let markStopped!: () => void;
+	const stopped = new Promise<void>((done) => (markStopped = done));
+
+	const hello = (): Hello => ({
+		app: "typetorch-serve",
+		api: API_VERSION,
+		project: project.config.project,
+		universeId: project.config.universeId,
+		placeId: project.config.placeId,
+		rojoPort: supervisor.status().some((c) => c.name === "rojo" && c.state === "running") ? rojoPort : 0,
+		projectFile,
+		pid: process.pid,
+		startedAt,
+	});
+	const control = new ControlServer({
+		hello,
+		status: () => ({ hello: hello(), children: supervisor.status(), compile: compile.snapshot() }),
+		stop: () => void stop(),
+		restart: (child) => supervisor.restart(child),
+	});
+	function log(source: string, level: "info" | "warn" | "error", text: string) {
+		control.serveLogs.push(source, level, text);
+		options.print({ source, level, text });
+	}
+
+	const port = await control.listen(options.controlPorts);
+	const watchCommand = options.watchCommand ?? (typeof known.watch === "string" ? ["bun", "run", "watch"] : ["bun", "run", "rbxtsc", "-w"]);
+	if (options.watch) supervisor.add({ name: "watch", command: watchCommand, cwd: root });
+	supervisor.add({
+		name: "rojo",
+		command: options.rojoCommand ?? [rojoBinary(), "serve", projectFile, "--port", String(rojoPort)],
+		cwd: root,
+	});
+	for (const name of options.extra) supervisor.add({ name, command: ["bun", "run", name], cwd: root });
+	writeServeFile(root, { port, pid: process.pid, rojoPort, startedAt, root, logFile: options.logFile });
+	log("serve", "info", `control API on 127.0.0.1:${port}, Rojo on ${rojoPort} (${projectFile}); the TypeTorch Studio plugin connects by itself`);
+	if (relative(root, options.cwd)) log("serve", "info", `game repo: ${root}`);
+
+	async function stop() {
+		stopping ??= (async () => {
+			log("serve", "info", "stopping");
+			await supervisor.stopAll();
+			await control.close();
+			removeServeFile(root, process.pid);
+			markStopped();
+		})();
+		return stopping;
+	}
+	return { port, rojoPort, control, stop, stopped };
+}
