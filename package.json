@@ -22,7 +22,8 @@
 	],
 	"type": "module",
 	"bin": {
-		"typetorch": "dist/index.js"
+		"typetorch": "dist/index.js",
+		"tt": "dist/index.js"
 	},
 	"files": [
 		"dist",

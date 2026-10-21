@@ -36,7 +36,8 @@ if (!existsSync(bin)) {
 	process.exit(1);
 }
 
-// 1. The bin.
+// 1. The bin (`tt` is an alias of `typetorch`).
+check("bin tt is the same file as typetorch", pkg.bin.tt === pkg.bin.typetorch);
 check("bin starts with #!/usr/bin/env node", readFileSync(bin, "utf8").startsWith("#!/usr/bin/env node\n"));
 let r = node([bin, "--help"]);
 check("typetorch --help", r.code === 0 && r.out.includes("usage: typetorch <command>"), `exit ${r.code}`);

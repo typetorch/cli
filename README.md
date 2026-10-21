@@ -17,7 +17,7 @@ Part of TypeTorch: the kernel (`@typetorch/kernel`) is baked into the place and 
 The CLI runs on **Node 20+** (npm, npx) or **Bun 1.3+**; you don't need both to run it.
 
 ```sh
-npm i -g @typetorch/cli        # then: typetorch <command>
+npm i -g @typetorch/cli        # then: typetorch <command> (or the short alias: tt <command>)
 npx @typetorch/cli <command>   # no install
 bun add -d @typetorch/cli      # in the game repo, then: bunx typetorch <command>
 bun src/index.ts <command>     # from a checkout of this repo
@@ -37,8 +37,8 @@ What the commands call:
 
 ### `typetorch` on PATH (from a checkout)
 
-`bin/typetorch.cmd` (cmd.exe and PowerShell) and `bin/typetorch` (bash/zsh) run this checkout with Bun. Add `bin/` to
-your user PATH once, then open a new terminal. PowerShell, for this machine's checkout:
+`bin/typetorch.cmd` (cmd.exe and PowerShell) and `bin/typetorch` (bash/zsh) run this checkout with Bun (`bin/tt.cmd`
+and `bin/tt` are the same, shorter). Add `bin/` to your user PATH once, then open a new terminal. PowerShell, for this machine's checkout:
 
 ```powershell
 [Environment]::SetEnvironmentVariable("Path", [Environment]::GetEnvironmentVariable("Path", "User") + ";<path-to>\typetorch-cli\bin", "User")
