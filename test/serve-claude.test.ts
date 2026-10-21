@@ -165,6 +165,38 @@ describe("serve --claude", () => {
 			await expect(call(controlPort, "POST", "/tt/claude/v1", { user: 7, method, path })).rejects.toThrow("not allowed");
 	});
 
+	test("the stream pushes a prompt's events over a WebSocket, locally and through the gateway", async () => {
+		syncCode();
+		const first = (ws: WebSocket) =>
+			new Promise<Record<string, unknown>[]>((done, fail) => {
+				const got: Record<string, unknown>[] = [];
+				ws.onmessage = (event) => {
+					got.push(JSON.parse(String(event.data)));
+					if (got[0]?.type === "ready" && got.length === 1) ws.send(JSON.stringify({ watch: "p1", since: 3 }));
+					if (got.length === 3) done(got);
+				};
+				ws.onerror = () => fail(new Error("socket error"));
+				ws.onclose = (event) => fail(new Error(`closed ${event.code}`));
+			});
+		const local = new WebSocket(`ws://127.0.0.1:${controlPort}/tt/claude/stream?user=7`, { headers: { "x-typetorch": "1" } } as never);
+		const got = await first(local);
+		local.close();
+		expect(got[1]).toMatchObject({ type: "prompt", id: "p1", since: 3, state: "done", events: [{ i: 3, text: "hi 7" }] });
+		expect(got[2]).toMatchObject({ type: "prompt", since: 4 });
+		// without the header (a browser page can't set it): refused
+		const refused = new WebSocket(`ws://127.0.0.1:${controlPort}/tt/claude/stream?user=7`);
+		await expect(first(refused)).rejects.toThrow();
+		// a paired device: its own user, whatever ?user= says
+		const { code } = await call<{ code: string }>(controlPort, "POST", "/tt/remote/code");
+		const paired = await fetch(base + "/tt/pair", { method: "POST", headers: { "x-typetorch": "1", "content-type": "application/json" }, body: JSON.stringify({ code, name: "asset guy", userId: 8 }) });
+		const { token } = (await paired.json()) as { token: string };
+		const remote = new WebSocket(`${base.replace("http", "ws")}/tt/claude/stream?user=7`, { headers: { "x-typetorch": "1", authorization: `Bearer ${token}` } } as never);
+		const remoteGot = await first(remote);
+		remote.close();
+		expect(remoteGot[1]).toMatchObject({ type: "prompt", events: [{ text: "hi 8" }] });
+		await expect(first(new WebSocket(`${base.replace("http", "ws")}/tt/claude/stream`, { headers: { "x-typetorch": "1" } } as never))).rejects.toThrow();
+	});
+
 	test("concurrent requests share one token exchange (refresh tokens rotate)", async () => {
 		fake.revokeAccess();
 		const before = fake.state.grants.length;

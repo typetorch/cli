@@ -19,6 +19,9 @@ import {
 } from "./protocol.ts";
 import { JOB_KINDS, type JobKind, type JobRunner } from "./jobs.ts";
 import { ClaudeError, type ClaudeBridge } from "./claude.ts";
+import { serveClaudeStream } from "./claude-stream.ts";
+import { acceptWebSocket, refuseUpgrade, type WebSocketConnection } from "./ws.ts";
+import type { Socket } from "node:net";
 import type { Pairing } from "./pairing.ts";
 
 /** Lines kept per source group (serve's own children, Studio). */
@@ -100,6 +103,7 @@ const REMOTE_ROUTES = new Set([
 	"POST /tt/claude/deploy",
 	"POST /tt/claude/cancel",
 	"POST /tt/claude/v1",
+	"GET /tt/claude/stream",
 	"GET /tt/claude/chat",
 	"POST /tt/claude/chat",
 ]);
@@ -135,6 +139,8 @@ export class ControlServer {
 	private readonly studios = new Map<string, StudioInfo>();
 	/** Commands waiting for each plugin's next poll, and the poll waiting for them. */
 	private readonly queues = new Map<string, { commands: StudioCommand[]; waiter?: () => void }>();
+	/** Open Claude streams (upgraded sockets: server.close() doesn't end them). */
+	private readonly streams = new Set<WebSocketConnection>();
 	/** Commands sent and waiting for their result. */
 	private readonly pending = new Map<string, { studio: string; done: (result: CommandResult) => void }>();
 	private server?: Server;
@@ -146,6 +152,7 @@ export class ControlServer {
 	async listen(ports: readonly number[] = CONTROL_PORTS): Promise<number> {
 		for (const port of ports) {
 			const server = createServer((req, res) => void this.handle(req, res));
+			server.on("upgrade", (req, socket, head) => this.upgrade(req, socket as Socket, head));
 			const ok = await new Promise<boolean>((done) => {
 				server.once("error", () => done(false));
 				server.listen(port, "127.0.0.1", () => done(true));
@@ -162,6 +169,8 @@ export class ControlServer {
 
 	close(): Promise<void> {
 		for (const queue of this.queues.values()) queue.waiter?.();
+		for (const stream of this.streams) stream.close(1001);
+		this.streams.clear();
 		return new Promise((done) => {
 			if (!this.server) return done();
 			this.server.close(() => done());
@@ -258,6 +267,28 @@ export class ControlServer {
 		if (!studio) throw new HttpError(404, "unknown plugin id: send /tt/plugin/hello first");
 		studio.lastSeen = new Date().toISOString();
 		return studio;
+	}
+
+	/**
+	 * A WebSocket upgrade: only `/tt/claude/stream` (claude-stream.ts). Local callers pass the same checks as HTTP and
+	 * name their user (`?user=`); a paired device (remote.ts checked its token) streams as the user it paired with.
+	 */
+	upgrade(req: IncomingMessage, socket: Socket, head: Buffer, remote?: { userId?: number }) {
+		try {
+			this.checkRequest(req, remote !== undefined);
+			const url = new URL(req.url ?? "/", "http://127.0.0.1");
+			if (url.pathname !== "/tt/claude/stream") throw new HttpError(404, "Not Found");
+			const user = this.claudeUser(remote, url.searchParams.get("user"));
+			const bridge = this.claude();
+			const connection = acceptWebSocket(req, socket, head);
+			if (!connection) return;
+			this.streams.add(connection);
+			connection.on("close", () => this.streams.delete(connection));
+			serveClaudeStream(connection, bridge, user);
+		} catch (error) {
+			const status = error instanceof HttpError || error instanceof ClaudeError ? error.status : 500;
+			refuseUpgrade(socket, status, status === 404 ? "Not Found" : status === 401 ? "Unauthorized" : "Forbidden");
+		}
 	}
 
 	/**
