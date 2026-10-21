@@ -17,6 +17,7 @@ import {
 	type StudioCommand,
 	type StudioInfo,
 } from "./protocol.ts";
+import { JOB_KINDS, type JobKind, type JobRunner } from "./jobs.ts";
 
 /** Lines kept per source group (serve's own children, Studio). */
 const RING_SIZE = 2000;
@@ -64,6 +65,10 @@ export interface ControlHandlers {
 	status: () => Omit<ServeStatus, "studios">;
 	stop: () => void;
 	restart: (child: string) => Promise<boolean>;
+	/** Hot asset jobs for the plugin's buttons (absent in tests that don't need them). */
+	jobs?: JobRunner;
+	/** The hot assets the lockfile knows (GET /tt/assets). */
+	assets?: () => unknown;
 }
 
 export class HttpError extends Error {
@@ -294,6 +299,25 @@ export class ControlServer {
 					error: typeof body?.error === "string" ? body.error.slice(0, 2000) : undefined,
 				});
 				return { ok: true };
+			}
+			case "GET /tt/assets":
+				if (!this.handlers.assets) throw new HttpError(404, "no assets here");
+				return this.handlers.assets();
+			case "POST /tt/jobs": {
+				const jobs = this.handlers.jobs;
+				if (!jobs) throw new HttpError(404, "no jobs here");
+				const kind = str(body?.kind, "kind", 40);
+				if (!(JOB_KINDS as readonly string[]).includes(kind)) throw new HttpError(400, `kind: one of ${JOB_KINDS.join(", ")}`);
+				return jobs.start(kind as JobKind);
+			}
+			case "GET /tt/jobs": {
+				const jobs = this.handlers.jobs;
+				if (!jobs) throw new HttpError(404, "no jobs here");
+				const id = url.searchParams.get("id");
+				if (!id) return { jobs: jobs.list() };
+				const job = jobs.get(id);
+				if (!job) throw new HttpError(404, `no job ${id}`);
+				return job;
 			}
 			case "POST /tt/plugin/hello":
 				return this.pluginHello(body ?? {});

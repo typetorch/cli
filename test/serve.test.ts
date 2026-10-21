@@ -9,6 +9,8 @@ import { call, ServeClientError } from "../src/serve/client";
 import { handleMessage, TOOLS } from "../src/commands/mcp";
 import { RECONNECT_LUAU, type CommandResult, type Hello, type StudioCommand } from "../src/serve/protocol";
 import { ControlServer } from "../src/serve/server";
+import { JobRunner, type Job } from "../src/serve/jobs";
+import { assetsTypesSource } from "../src/assets";
 import { Supervisor } from "../src/serve/supervisor";
 
 const PORTS = [45880, 45881, 45882];
@@ -201,6 +203,82 @@ describe("typetorch mcp", () => {
 		expect((await ask("tools/call", { name: "nope" })).error.code).toBe(-32602);
 		expect((await ask("resources/list")).error.code).toBe(-32601);
 		expect(await handleMessage({ jsonrpc: "2.0", method: "notifications/initialized" }, undefined, "1")).toBeUndefined();
+	});
+});
+
+describe("hot asset jobs", () => {
+	const logged: string[] = [];
+	// Stands in for `typetorch assets ...`: progress on stderr, the JSON answer on stdout, exit 1 for "fail".
+	const fake = (args: string[]) => [
+		process.execPath,
+		"-e",
+		`const a = ${JSON.stringify(args)}; console.error("exporting"); if (a.includes("fail")) { console.error("error: no assets key"); process.exit(1) } console.log(JSON.stringify({ args: a, dryRun: a[1] === "status", changes: [{ key: "ui/shop", status: "added" }] }))`,
+	];
+	const jobs = new JobRunner({
+		root: process.cwd(),
+		devBranch: "dev",
+		isProd: (branch) => branch === "main",
+		baseArgs: ["--env-file", "x.env"],
+		log: (level, text) => logged.push(`${level}: ${text}`),
+		command: fake,
+	});
+	const server = new ControlServer({
+		hello,
+		status: () => ({ hello: hello(), children: [], compile: { state: "idle", errors: [] } }),
+		stop: () => {},
+		restart: async () => false,
+		jobs,
+		assets: () => ({ lockfile: true, devBranch: "dev", assets: { "ui/shop": { className: "Frame", path: "ReplicatedStorage" } } }),
+	});
+	let port = 0;
+	afterAll(() => server.close());
+	const finished = async (id: string) => {
+		for (let i = 0; i < 100; i++) {
+			const job = await call<Job>(port, "GET", `/tt/jobs?id=${id}`);
+			if (job.state !== "running") return job;
+			await Bun.sleep(50);
+		}
+		throw new Error("job never ended");
+	};
+
+	test("the plugin starts a sync with a deploy to the dev branch and reads its result", async () => {
+		port = await server.listen([45895, 45896, 45897]);
+		expect(await call(port, "GET", "/tt/assets")).toMatchObject({ assets: { "ui/shop": { className: "Frame" } } });
+		const started = await call<Job>(port, "POST", "/tt/jobs", { kind: "assets-deploy-dev" });
+		expect(started.state).toBe("running");
+		await expect(call(port, "POST", "/tt/jobs", { kind: "assets-status" })).rejects.toThrow("still running");
+		const job = await finished(started.id);
+		expect(job.state).toBe("done");
+		expect((job.result as { args: string[] }).args).toEqual(["assets", "sync", "--deploy", "dev", "--proposed-by", "studio-plugin", "--json", "--env-file", "x.env"]);
+		expect(job.tail).toEqual(["exporting"]);
+		expect(logged.some((l) => l.includes("assets-deploy-dev done"))).toBe(true);
+	});
+
+	test("a failed job keeps its error; unknown kinds are refused", async () => {
+		const failing = new JobRunner({ root: process.cwd(), devBranch: "dev", isProd: () => false, baseArgs: ["fail"], log: () => {}, command: fake });
+		const job = failing.start("assets-status");
+		for (let i = 0; i < 100 && job.state === "running"; i++) await Bun.sleep(50);
+		expect(job).toMatchObject({ state: "failed", error: "no assets key" });
+		await expect(call(port, "POST", "/tt/jobs", { kind: "rm-rf" })).rejects.toThrow("kind: one of");
+	});
+
+	test("never deploys a prod-channel branch from the plugin", () => {
+		const prod = new JobRunner({ root: process.cwd(), devBranch: "main", isProd: (b) => b === "main", baseArgs: [], log: () => {}, command: fake });
+		expect(() => prod.start("assets-deploy-dev")).toThrow("prod-channel branch");
+	});
+
+	test("assets types: the keys with their classes, and a never type when there are none", () => {
+		const text = assetsTypesSource({
+			v: 1,
+			placeVersion: 3,
+			assets: {
+				"ui/shop": { id: 1, ver: 2, n: 1, hash: "abc", realm: "replicated", path: "ReplicatedStorage", className: "Frame" },
+				box: { id: 3, ver: 4, n: 1, hash: "def", realm: "replicated", path: "Workspace", className: "Model" },
+			},
+		} as never);
+		expect(text).toContain('\t"box": "Model",\n\t"ui/shop": "Frame",');
+		expect(text).toContain("export type HotAssetKey = keyof typeof HOT_ASSETS;");
+		expect(assetsTypesSource(undefined)).toContain("export type HotAssetKey = never;");
 	});
 });
 

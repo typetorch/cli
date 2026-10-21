@@ -39,7 +39,11 @@ import {
 	type ExportResult,
 	type HotAssetUpload,
 	type ResolveItem,
+	ASSETS_TYPES_FILE,
+	assetsTypesSource,
 } from "../assets.ts";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { Project } from "../config.ts";
 import { bold, captureJson, debug, dim, emitJson, formatBytes, formatSeconds, info, isJson, seconds, Stopwatch, table, warn } from "../log.ts";
 import { branchChannel, branchNameError } from "../naming.ts";
@@ -53,6 +57,7 @@ export const assetsFlags = {
 	deploy: "string",
 	"place-version": "string",
 	"moderation-timeout": "string",
+	out: "string",
 	// passed on to the deploy (--deploy)
 	message: "string",
 	propose: "boolean",
@@ -353,7 +358,10 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 			for (const [key, outcome] of outcomes) if (outcome.upload && outcome.ver !== undefined && !outcome.error) uploaded.set(key, { id: outcome.upload.assetId, ver: outcome.ver, n: outcome.upload.n });
 			const next = nextLock({ placeVersion: placed.placeVersion, changes, uploaded });
 			const written = failed.length === 0 && lockChanges && formatAssetsLock(next) !== (lock ? formatAssetsLock(lock) : undefined);
-			if (written) writeAssetsLock(proj.root, next);
+			if (written) {
+				writeAssetsLock(proj.root, next);
+				if (existsSync(join(proj.root, ASSETS_TYPES_FILE))) writeTypes(proj.root, next);
+			}
 			appendAssetLog(stateDir, { event: "synced", universeId, project: proj.config.project, placeVersion: placed.placeVersion, ...counts, uploaded: [...uploaded.keys()], failed, written });
 			return { next: written ? next : lock, written, changed: written && assetsAttribute(next) !== assetsAttribute(lock) };
 		},
@@ -422,11 +430,32 @@ function listCommand(args: ParsedArgs) {
 	);
 }
 
+/** Writes the typed keys file; returns whether it changed. */
+export function writeTypes(root: string, lock: AssetsLock | undefined, file = ASSETS_TYPES_FILE): boolean {
+	const path = join(root, file);
+	const text = assetsTypesSource(lock);
+	if (existsSync(path) && readFileSync(path, "utf8") === text) return false;
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, text);
+	return true;
+}
+
+function typesCommand(args: ParsedArgs) {
+	const proj = project(args);
+	const lock = readAssetsLock(proj.root);
+	const file = flagString(args, "out") ?? ASSETS_TYPES_FILE;
+	const changed = writeTypes(proj.root, lock, file);
+	const count = Object.keys(lock?.assets ?? {}).length;
+	if (isJson()) return emitJson({ file, changed, keys: count });
+	info(`${changed ? "wrote" : "unchanged:"} ${file} (${count} hot asset key${count === 1 ? "" : "s"}); \`typetorch assets sync\` keeps it up to date`);
+}
+
 export async function assetsCommand(args: ParsedArgs, deps: AssetsDeps = {}) {
 	const [sub, extra] = args.positionals;
 	if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
 	if (sub === "list") return listCommand(args);
+	if (sub === "types") return typesCommand(args);
 	if (sub === "status") return syncCommand(args, deps, "status");
 	if (sub === "sync") return syncCommand(args, deps, "sync");
-	throw new UsageError(`unknown assets subcommand "${sub ?? ""}" (sync, status, list)`);
+	throw new UsageError(`unknown assets subcommand "${sub ?? ""}" (sync, status, list, types)`);
 }
