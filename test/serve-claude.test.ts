@@ -138,7 +138,7 @@ describe("serve --claude", () => {
 	test("the chat is shared by every copy of the plugin, per user, for this session", async () => {
 		expect(await call<unknown>(controlPort, "GET", "/tt/claude/chat?user=7")).toEqual({ prompts: [] });
 		await call(controlPort, "POST", "/tt/claude/chat", { user: 7, conversationId: "c1", prompts: ["p1", "p2"] });
-		expect(await call<unknown>(controlPort, "GET", "/tt/claude/chat?user=7")).toEqual({ conversationId: "c1", prompts: ["p1", "p2"], updatedAt: expect.any(String) });
+		expect(await call<unknown>(controlPort, "GET", "/tt/claude/chat?user=7")).toEqual({ conversationId: "c1", prompts: ["p1", "p2"], texts: { p1: "make the door red" }, updatedAt: expect.any(String) });
 		expect(await call<unknown>(controlPort, "GET", "/tt/claude/chat?user=8")).toEqual({ prompts: [] });
 		await expect(call(controlPort, "POST", "/tt/claude/chat", { user: 7, prompts: "p1" })).rejects.toThrow("prompts");
 		// a new remote-claude session: its prompts are gone, so is the chat

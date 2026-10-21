@@ -73,6 +73,8 @@ const MAX_CHAT_PROMPTS = 100;
 export interface ClaudeChat {
 	conversationId?: string;
 	prompts: string[];
+	/** The text of each prompt sent through this serve (missing for older ones). */
+	texts?: Record<string, string>;
 	updatedAt?: string;
 }
 
@@ -81,6 +83,8 @@ export class ClaudeBridge {
 	/** One token exchange per user at a time: refresh tokens rotate, and a reused one revokes the pairing. */
 	private readonly pending = new Map<number, Promise<string>>();
 	private readonly chats = new Map<number, ClaudeChat & { sid: string }>();
+	/** Prompt id → its text, per user (the last MAX_CHAT_PROMPTS sent through this serve). */
+	private readonly texts = new Map<number, Map<string, string>>();
 	private readonly fetch: typeof fetch;
 	private readonly now: () => number;
 	private readonly alive: (pid: number) => boolean;
@@ -188,8 +192,17 @@ export class ClaudeBridge {
 	}
 
 	/** A Code-mode prompt; `conversationId` continues a conversation. */
-	prompt(user: number, prompt: string, conversationId?: string) {
-		return this.request(user, "POST", "/v1/prompts", { prompt, mode: "code", ...(conversationId ? { conversationId } : {}) });
+	async prompt(user: number, prompt: string, conversationId?: string) {
+		const started = await this.request(user, "POST", "/v1/prompts", { prompt, mode: "code", ...(conversationId ? { conversationId } : {}) });
+		const id = (started as { id?: unknown } | undefined)?.id;
+		if (typeof id === "string") {
+			// what was asked, so another copy of the plugin can show the user's bubble (remote-claude's polls don't carry it)
+			const texts = this.texts.get(user) ?? new Map<string, string>();
+			texts.set(id, prompt);
+			while (texts.size > MAX_CHAT_PROMPTS) texts.delete(texts.keys().next().value!);
+			this.texts.set(user, texts);
+		}
+		return started;
 	}
 
 	/** The prompt's state and its events from `since`. */
@@ -214,7 +227,13 @@ export class ClaudeBridge {
 		const saved = this.chats.get(user);
 		const sid = this.session()?.sid;
 		if (!saved || saved.sid !== sid) return { prompts: [] };
-		return { conversationId: saved.conversationId, prompts: [...saved.prompts], updatedAt: saved.updatedAt };
+		const known = this.texts.get(user);
+		const texts: Record<string, string> = {};
+		for (const id of saved.prompts) {
+			const text = known?.get(id);
+			if (text !== undefined) texts[id] = text;
+		}
+		return { conversationId: saved.conversationId, prompts: [...saved.prompts], texts, updatedAt: saved.updatedAt };
 	}
 
 	saveChat(user: number, conversationId: string | undefined, prompts: string[]): ClaudeChat {
