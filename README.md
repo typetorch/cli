@@ -536,6 +536,17 @@ build's channel in brackets when it differs.
 - **MCP.** `typetorch mcp` serves the same as tools over stdio (`serve_status`, `serve_start`, `serve_stop`,
   `serve_logs`, `studio_logs`, `studio_reconnect`, `studio_play`, `studio_stop`). Claude Code, from the game repo:
   `claude mcp add typetorch -- bunx typetorch mcp`.
+- **A Studio on another machine** (`serve --remote`). serve also opens a gateway on `127.0.0.1:34890`
+  (`--remote-port`) for a tunnel you run, so someone else's Studio can attach over the internet. With Cloudflare
+  Tunnel, route a hostname to `http://localhost:34890`, for example `cloudflared tunnel --url http://localhost:34890`
+  for a quick one, or an ingress rule in a named tunnel. Then `typetorch serve pair` prints a one-time code (15 min).
+  The other person enters the tunnel URL and the code in the plugin's Remote card, and their Studio stays paired for 30
+  days (`serve devices`, `serve unpair --name <device>|--all`). Every request but pairing needs that device's token
+  (kept hashed in `.typetorch/serve-remote.json`). A remote Studio syncs code read-only through Rojo (never Rojo's
+  `write` or `open`), reports its state and Output, and runs the hot asset buttons (uploads with your keys, deploys only
+  to the dev branch). It can't stop or restart serve, read serve's log or drive other Studios, and `typetorch studio
+  ...` and the MCP tools never pick a remote Studio unless `--target` names it. Wrong codes lock pairing after 5
+  tries until you make a new code.
 
 ### Hot assets
 

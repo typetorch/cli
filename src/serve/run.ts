@@ -17,6 +17,8 @@ import { removeServeFile, writeServeFile } from "./client.ts";
 import { CompileTracker, stripAnsi } from "./compile.ts";
 import { API_VERSION, ROJO_DEFAULT_PORT, type Hello } from "./protocol.ts";
 import { JobRunner } from "./jobs.ts";
+import { Pairing } from "./pairing.ts";
+import { RemoteGateway } from "./remote.ts";
 import { ControlServer } from "./server.ts";
 import { Supervisor } from "./supervisor.ts";
 
@@ -45,12 +47,16 @@ export interface ServeOptions {
 	devBranch?: string;
 	/** The jobs' command line (tests). */
 	jobCommand?: (args: string[]) => string[];
+	/** --remote: the gateway's port for a Studio on another machine (remote.ts); absent: local only. */
+	remotePort?: number;
 }
 
 export interface RunningServe {
 	port: number;
 	rojoPort: number;
 	control: ControlServer;
+	/** The remote gateway's port (--remote). */
+	remotePort?: number;
 	stop: () => Promise<void>;
 	stopped: Promise<void>;
 }
@@ -143,6 +149,7 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 		restart: (child) => supervisor.restart(child),
 		jobs,
 		assets: () => assetsSummary(root, options.devBranch ?? "dev"),
+		pairing: options.remotePort !== undefined ? new Pairing(root) : undefined,
 	});
 	function log(source: string, level: "info" | "warn" | "error", text: string) {
 		control.serveLogs.push(source, level, text);
@@ -150,6 +157,21 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 	}
 
 	const port = await control.listen(options.controlPorts);
+	let remote: RemoteGateway | undefined;
+	if (options.remotePort !== undefined) {
+		remote = new RemoteGateway({
+			control,
+			pairing: control.pairingStore!,
+			rojoPort: () => hello().rojoPort,
+			log: (level, text) => log("remote", level, text),
+		});
+		try {
+			await remote.listen(options.remotePort);
+		} catch (error) {
+			await control.close();
+			throw error;
+		}
+	}
 	const watchCommand = options.watchCommand ?? (typeof known.watch === "string" ? ["bun", "run", "watch"] : ["bun", "run", "rbxtsc", "-w"]);
 	if (options.watch) supervisor.add({ name: "watch", command: watchCommand, cwd: root });
 	supervisor.add({
@@ -161,16 +183,20 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 	writeServeFile(root, { port, pid: process.pid, rojoPort, startedAt, root, logFile: options.logFile });
 	log("serve", "info", `control API on 127.0.0.1:${port}, Rojo on ${rojoPort} (${projectFile}); the TypeTorch Studio plugin connects by itself`);
 	if (relative(root, options.cwd)) log("serve", "info", `game repo: ${root}`);
+	if (remote) {
+		log("serve", "info", `remote gateway on 127.0.0.1:${remote.port}: point your tunnel at http://localhost:${remote.port}, then \`typetorch serve pair\` for a pairing code`);
+	}
 
 	async function stop() {
 		stopping ??= (async () => {
 			log("serve", "info", "stopping");
 			await supervisor.stopAll();
+			await remote?.close();
 			await control.close();
 			removeServeFile(root, process.pid);
 			markStopped();
 		})();
 		return stopping;
 	}
-	return { port, rojoPort, control, stop, stopped };
+	return { port, rojoPort, control, remotePort: remote?.port, stop, stopped };
 }

@@ -11,7 +11,8 @@ import { bold, cyan, dim, emitJson, info, isJson, red, yellow } from "../log.ts"
 import { run } from "../proc.ts";
 import { sleep } from "../runtime.ts";
 import { findRunning } from "../serve/client.ts";
-import { serveLogs, serveRestart, serveStatus, serveStop, startDetached, studioSend } from "../serve/ops.ts";
+import { serveDevices, serveLogs, servePairCode, serveRestart, serveStatus, serveStop, serveUnpair, startDetached, studioSend } from "../serve/ops.ts";
+import { REMOTE_DEFAULT_PORT } from "../serve/remote.ts";
 import { RECONNECT_LUAU, type CommandKind, type CommandResult, type LogLine, type ServeStatus } from "../serve/protocol.ts";
 import { startServe } from "../serve/run.ts";
 import { cliRoot } from "./remote-claude.ts";
@@ -28,9 +29,16 @@ export const serveFlags = {
 	follow: "boolean",
 	limit: "string",
 	"dev-branch": "string",
+	remote: "boolean",
+	"remote-port": "string",
+	name: "string",
+	all: "boolean",
 } as const;
 
-export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <script,...>] [--dev-branch <b>] [--json]
+export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <script,...>] [--dev-branch <b>] [--remote [--remote-port <n>]] [--json]
+typetorch serve pair [--json]
+typetorch serve devices [--json]
+typetorch serve unpair (--name <device> | --all) [--json]
 typetorch serve status [--json]
 typetorch serve stop
 typetorch serve restart <watch|rojo|<script>>
@@ -47,7 +55,14 @@ typetorch serve logs [--studio] [--since <seq>] [--limit <n>] [--follow] [--json
   --project    project file for Rojo (default studio.project.json, else default.project.json)
   --port       Rojo's port
   --no-watch   don't run rbxtsc -w (your editor or agent compiles)
-  --dev-branch the branch the plugin's "Sync + deploy" button deploys hot assets to (default dev; never prod-channel)
+  --dev-branch the branch the plugin's "Publish to dev" button deploys hot assets to (default dev; never prod-channel)
+  --remote     also open a gateway for a Studio on another machine on 127.0.0.1:${REMOTE_DEFAULT_PORT} (--remote-port), for a
+               tunnel you run (Cloudflare Tunnel: service http://localhost:${REMOTE_DEFAULT_PORT}). Every request needs a device token
+               from pairing; a remote Studio syncs code read-only, reports its state and runs hot asset jobs (dev only),
+               but can't stop serve, drive other Studios or read serve's log
+  pair         a one-time pairing code (15 min): the other person enters your tunnel URL and the code in the plugin's
+               Remote card; their Studio stays paired for 30 days
+  devices      the paired devices; unpair --name <device> (or --all) revokes them
   --json       foreground: one JSON line per log line; subcommands: one JSON document
   status       children, attached Studios (edit / playtest), sync state, last compile result and its errors
   logs         serve's log (children); --studio: Studio's Output as the plugin forwards it; --follow keeps printing
@@ -136,6 +151,28 @@ export async function serveCommand(args: ParsedArgs) {
 		}
 		case "logs":
 			return logs(args, flagBool(args, "studio") ? "studio" : "serve");
+		case "pair": {
+			const r = await servePairCode(gameRoot(args));
+			if (isJson()) return emitJson(r);
+			info(`pairing code: ${bold(r.code)} (once, until ${new Date(r.expiresAt).toLocaleTimeString()})`);
+			info(dim("In Studio: TypeTorch panel > Remote server: your tunnel URL and this code > Pair"));
+			return;
+		}
+		case "devices": {
+			const r = await serveDevices(gameRoot(args));
+			if (isJson()) return emitJson(r);
+			if (r.devices.length === 0) return info("no paired devices");
+			for (const d of r.devices) info(`${d.name}  paired ${d.createdAt.slice(0, 10)}, expires ${d.expiresAt.slice(0, 10)}${d.lastSeen ? `, last seen ${d.lastSeen}` : ""}`);
+			return;
+		}
+		case "unpair": {
+			const name = flagString(args, "name");
+			if (name === undefined && !flagBool(args, "all")) throw new UsageError("unpair needs --name <device> or --all");
+			const r = await serveUnpair(gameRoot(args), name);
+			if (isJson()) return emitJson(r);
+			info(`revoked ${r.revoked} device${r.revoked === 1 ? "" : "s"}`);
+			return;
+		}
 		default:
 			throw new UsageError(`unknown serve subcommand "${sub}"`);
 	}
@@ -157,9 +194,13 @@ async function foreground(args: ParsedArgs) {
 		logFile: process.env.TYPETORCH_SERVE_LOG,
 		envFile: flagString(args, "env-file"),
 		devBranch: flagString(args, "dev-branch"),
+		remotePort: flagBool(args, "remote") || flagString(args, "remote-port") ? flagInt(args, "remote-port", REMOTE_DEFAULT_PORT) : undefined,
 		print: (line) => (json ? console.log(JSON.stringify({ at: new Date().toISOString(), ...line })) : printLine(line)),
 	});
-	if (!json) info(`${bold("typetorch serve")} running: ${cyan(`control 127.0.0.1:${serve.port}`)}, Rojo ${serve.rojoPort}. Ctrl+C stops.`);
+	if (!json) {
+		const remote = serve.remotePort ? `, remote gateway ${serve.remotePort}` : "";
+		info(`${bold("typetorch serve")} running: ${cyan(`control 127.0.0.1:${serve.port}`)}, Rojo ${serve.rojoPort}${remote}. Ctrl+C stops.`);
+	}
 	const signals: NodeJS.Signals[] = process.platform === "win32" ? ["SIGINT", "SIGTERM", "SIGBREAK"] : ["SIGINT", "SIGTERM", "SIGHUP"];
 	const onSignal = () => void serve.stop();
 	for (const signal of signals) process.on(signal, onSignal);
@@ -186,7 +227,8 @@ export function describeStatus(s: ServeStatus): string[] {
 	for (const e of c.errors.slice(0, 10)) lines.push(`    ${e.file}:${e.line}:${e.column} ${e.code ?? ""} ${e.message}`);
 	if (s.studios.length === 0) lines.push(`  studio   none attached (open the place in Studio with the TypeTorch plugin)`);
 	for (const st of s.studios) {
-		lines.push(`  studio   ${st.mode} "${st.placeName}" (place ${st.placeId}): ${st.sync.status}${st.sync.detail ? `, ${st.sync.detail}` : ""}`);
+		const from = st.remote ? ` [remote: ${st.remote}]` : "";
+		lines.push(`  studio   ${st.mode} "${st.placeName}" (place ${st.placeId})${from}: ${st.sync.status}${st.sync.detail ? `, ${st.sync.detail}` : ""}`);
 	}
 	return lines;
 }

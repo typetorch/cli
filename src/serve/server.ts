@@ -18,6 +18,7 @@ import {
 	type StudioInfo,
 } from "./protocol.ts";
 import { JOB_KINDS, type JobKind, type JobRunner } from "./jobs.ts";
+import type { Pairing } from "./pairing.ts";
 
 /** Lines kept per source group (serve's own children, Studio). */
 const RING_SIZE = 2000;
@@ -69,7 +70,26 @@ export interface ControlHandlers {
 	jobs?: JobRunner;
 	/** The hot assets the lockfile knows (GET /tt/assets). */
 	assets?: () => unknown;
+	/** Devices paired for --remote (absent without it). */
+	pairing?: Pairing;
 }
+
+/**
+ * What a paired device may call through the remote gateway (remote.ts): what the plugin needs to sync, report and run
+ * hot asset jobs. Not stop, restart, agent commands (`/tt/command`) or serve's own logs.
+ */
+const REMOTE_ROUTES = new Set([
+	"GET /tt/hello",
+	"GET /tt/status",
+	"GET /tt/assets",
+	"POST /tt/jobs",
+	"GET /tt/jobs",
+	"POST /tt/plugin/hello",
+	"POST /tt/plugin/state",
+	"POST /tt/plugin/logs",
+	"GET /tt/plugin/poll",
+	"POST /tt/plugin/result",
+]);
 
 export class HttpError extends Error {
 	constructor(
@@ -163,8 +183,9 @@ export class ControlServer {
 			studio = studios.find((s) => s.id === target);
 			if (!studio) throw new HttpError(404, `no attached Studio with id ${target}`);
 		} else {
+			// a paired remote Studio only by its id: an agent here never drives someone else's Studio by accident
 			const modes = target ? [target] : kind === "stop" ? ["server", "edit"] : ["edit"];
-			for (const mode of modes) studio ??= studios.find((s) => s.mode === mode);
+			for (const mode of modes) studio ??= studios.find((s) => s.mode === mode && !s.remote);
 			if (!studio) throw new HttpError(409, noStudioMessage(modes.join(" or ")));
 		}
 		const command: StudioCommand = { id: randomUUID(), kind, args };
@@ -226,11 +247,31 @@ export class ControlServer {
 		return studio;
 	}
 
-	private async handle(req: IncomingMessage, res: ServerResponse) {
+	/**
+	 * A request a paired device sent through the remote gateway (remote.ts checked its token): REMOTE_ROUTES only, and
+	 * its plugin ids live under `remote/<device>/` so they can't take over a local Studio's.
+	 */
+	handleRemote(req: IncomingMessage, res: ServerResponse, device: string) {
+		return this.handle(req, res, device);
+	}
+
+	private async handle(req: IncomingMessage, res: ServerResponse, remote?: string) {
 		try {
-			this.checkRequest(req);
+			this.checkRequest(req, remote !== undefined);
 			const url = new URL(req.url ?? "/", "http://127.0.0.1");
+			if (remote !== undefined && !REMOTE_ROUTES.has(`${req.method} ${url.pathname}`)) throw new HttpError(403, "not available to a remote Studio");
 			const body = req.method === "POST" ? await readJson(req) : undefined;
+			if (remote !== undefined) {
+				const prefix = `remote/${remote}/`;
+				const own = (id: unknown) => {
+					if (typeof id !== "string" || id.length === 0 || id.length > 64) throw new HttpError(400, "id: expected a string");
+					return prefix + id;
+				};
+				if (body && "id" in (body as Record<string, unknown>)) (body as Record<string, unknown>).id = own((body as Record<string, unknown>).id);
+				const id = url.searchParams.get("id");
+				if (id && url.pathname.startsWith("/tt/plugin/")) url.searchParams.set("id", String(own(id)));
+				if (url.pathname === "/tt/plugin/hello" && body) (body as Record<string, unknown>).remote = remote;
+			}
 			const gone = new AbortController();
 			res.on("close", () => gone.abort());
 			const result = await this.route(req.method ?? "GET", url, body as Record<string, unknown> | undefined, gone.signal);
@@ -241,11 +282,15 @@ export class ControlServer {
 		}
 	}
 
-	/** Loopback callers only, with the header, without a browser Origin, and with a loopback Host (no DNS rebinding). */
-	private checkRequest(req: IncomingMessage) {
+	/**
+	 * Loopback callers only, with the header, without a browser Origin, and with a loopback Host (no DNS rebinding). A
+	 * remote request came through a tunnel (its Host is the tunnel's) and was checked by its token instead.
+	 */
+	private checkRequest(req: IncomingMessage, remote = false) {
 		if (req.method === "OPTIONS") throw new HttpError(403, "no CORS");
 		if (req.headers.origin !== undefined) throw new HttpError(403, "browser requests are refused");
 		if (req.headers[HEADER] !== "1") throw new HttpError(403, `missing ${HEADER} header`);
+		if (remote) return;
 		const host = (req.headers.host ?? "").toLowerCase();
 		if (host !== `127.0.0.1:${this.port}` && host !== `localhost:${this.port}`) throw new HttpError(403, "bad Host");
 	}
@@ -281,13 +326,13 @@ export class ControlServer {
 				return this.command(kind as CommandKind, (args as Record<string, unknown>) ?? {}, target, Math.min(Math.max(timeout, 1000), COMMAND_TIMEOUT_MAX_MS));
 			}
 			case "GET /tt/plugin/poll": {
-				const id = str(url.searchParams.get("id") ?? undefined, "id", 64);
+				const id = str(url.searchParams.get("id") ?? undefined, "id", 140);
 				this.touch(id);
 				const hold = Number(url.searchParams.get("wait") ?? POLL_HOLD_MS / 1000);
 				return this.poll(id, Math.min(Math.max(Number.isFinite(hold) ? hold * 1000 : 0, 0), POLL_HOLD_MS), gone);
 			}
 			case "POST /tt/plugin/result": {
-				const studio = this.touch(str(body?.id, "id", 64));
+				const studio = this.touch(str(body?.id, "id", 140));
 				const entry = this.pending.get(str(body?.command, "command", 64));
 				// Late (timed out) or someone else's: nothing waits for it.
 				if (!entry || entry.studio !== studio.id) return { ok: true, late: true };
@@ -321,8 +366,16 @@ export class ControlServer {
 			}
 			case "POST /tt/plugin/hello":
 				return this.pluginHello(body ?? {});
+			case "POST /tt/remote/code":
+				return this.pairing().newCode();
+			case "GET /tt/remote/devices":
+				return { devices: this.pairing().list() };
+			case "POST /tt/remote/revoke": {
+				const name = body?.name === undefined ? undefined : str(body.name, "name", 60);
+				return { revoked: this.pairing().revoke(name) };
+			}
 			case "POST /tt/plugin/state": {
-				const studio = this.touch(str(body?.id, "id", 64));
+				const studio = this.touch(str(body?.id, "id", 140));
 				const status = str(body?.status, "status", 20);
 				if (!SYNC_STATES.has(status)) throw new HttpError(400, "status: unknown value");
 				const detail = typeof body?.detail === "string" ? body.detail.slice(0, 500) : undefined;
@@ -332,7 +385,7 @@ export class ControlServer {
 				return { ok: true };
 			}
 			case "POST /tt/plugin/logs": {
-				const studio = this.touch(str(body?.id, "id", 64));
+				const studio = this.touch(str(body?.id, "id", 140));
 				const lines = Array.isArray(body?.lines) ? body.lines.slice(0, 200) : [];
 				for (const entry of lines as Record<string, unknown>[]) {
 					const level = typeof entry?.level === "string" && LEVELS.has(entry.level) ? (entry.level as LogLine["level"]) : "info";
@@ -346,8 +399,17 @@ export class ControlServer {
 		}
 	}
 
+	get pairingStore(): Pairing | undefined {
+		return this.handlers.pairing;
+	}
+
+	private pairing(): Pairing {
+		if (!this.handlers.pairing) throw new HttpError(404, "typetorch serve runs without --remote");
+		return this.handlers.pairing;
+	}
+
 	private pluginHello(body: Record<string, unknown>) {
-		const id = str(body.id, "id", 64);
+		const id = str(body.id, "id", 140);
 		const mode = str(body.mode, "mode", 10);
 		if (!MODES.has(mode)) throw new HttpError(400, "mode: edit, server or client");
 		const now = new Date().toISOString();
@@ -360,11 +422,15 @@ export class ControlServer {
 			placeName: typeof body.placeName === "string" ? body.placeName.slice(0, 100) : "",
 			pluginVersion: typeof body.pluginVersion === "string" ? body.pluginVersion.slice(0, 40) : "",
 			sync: existing?.sync ?? { status: "idle" },
+			...(typeof body.remote === "string" ? { remote: body.remote } : {}),
 			firstSeen: existing?.firstSeen ?? now,
 			lastSeen: now,
 		};
 		this.studios.set(id, studio);
-		if (!existing) this.serveLogs.push("studio", "info", `${studio.mode} plugin attached (${studio.placeName || "unnamed place"}, place ${studio.placeId})`);
+		if (!existing) {
+			const from = studio.remote ? `, remote: ${studio.remote}` : "";
+			this.serveLogs.push("studio", "info", `${studio.mode} plugin attached (${studio.placeName || "unnamed place"}, place ${studio.placeId}${from})`);
+		}
 		return { ok: true, hello: this.handlers.hello() };
 	}
 }
