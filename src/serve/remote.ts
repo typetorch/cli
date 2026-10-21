@@ -48,6 +48,8 @@ export function rojoPath(path: string): [string, string, string] | undefined {
 
 export class RemoteGateway {
 	private server?: Server;
+	/** Rojo WebSockets joined through: server.close() doesn't end upgraded sockets, so close() does. */
+	private readonly sockets = new Set<Socket>();
 	port = 0;
 
 	constructor(private readonly options: RemoteOptions) {}
@@ -70,6 +72,8 @@ export class RemoteGateway {
 			if (!this.server) return done();
 			this.server.close(() => done());
 			this.server.closeAllConnections?.();
+			for (const socket of this.sockets) socket.destroy();
+			this.sockets.clear();
 		});
 	}
 
@@ -155,6 +159,7 @@ export class RemoteGateway {
 		if (!parsed || req.headers.origin !== undefined) return refuse(404, "Not Found");
 		const target = this.rojoTarget(parsed, true);
 		if ("error" in target) return refuse(target.status, target.status === 401 ? "Unauthorized" : "Forbidden");
+		this.sockets.add(socket);
 		const upstream = connect(target.port, "127.0.0.1", () => {
 			const headers = { ...req.headers, host: `localhost:${target.port}` };
 			let raw = `${req.method} ${target.path}${url.search} HTTP/1.1\r\n`;
@@ -166,9 +171,12 @@ export class RemoteGateway {
 			upstream.pipe(socket);
 			socket.pipe(upstream);
 		});
+		this.sockets.add(upstream);
 		const close = () => {
 			upstream.destroy();
 			socket.destroy();
+			this.sockets.delete(upstream);
+			this.sockets.delete(socket);
 		};
 		upstream.on("error", close);
 		socket.on("error", close);
