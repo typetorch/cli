@@ -25,7 +25,7 @@ export function renderHelp(version: string, summaries: Record<string, string>): 
 		([title, names]) => [title, names.filter((name) => summaries[name] !== undefined)] as const,
 	);
 	const width = Math.max(...groups.flatMap(([, names]) => names.map((name) => name.length)));
-	const lines = [`typetorch ${version}: hot-swap roblox-ts game code on live Roblox servers`, "", "usage: typetorch <command> [options]"];
+	const lines = [`typetorch ${version}: hot-swap roblox-ts game code on live Roblox servers`, "", "usage: typetorch <command> [options]   (or the short alias: tt <command>)"];
 	for (const [title, names] of groups) {
 		if (names.length === 0) continue;
 		lines.push("", bold(title));
