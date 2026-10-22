@@ -67,8 +67,8 @@ typetorch serve logs [--studio] [--since <seq>] [--limit <n>] [--follow] [--json
                Every request needs a device token from pairing; a remote Studio syncs code read-only, reports its state
                and runs hot asset jobs (dev only), but can't stop serve, drive other Studios or read serve's log
   --claude     also runs remote-claude (typetorch remote-claude, from @typetorch/dev-server) on this machine for the
-               plugin's Claude tab: Studio users prompt Claude Code here in Code mode (edits on this branch, which must be
-               dev-channel, then Deploy or Discard). --claude-users <ids>: the Roblox user ids allowed (remembered;
+               plugin's Claude tab: Studio users prompt Claude Code here in Code mode (edits on a copy of this branch, then
+               Apply into this checkout for Rojo, Deploy to dev, or Discard; dev-server 0.3.4+). --claude-users <ids>: the Roblox user ids allowed (remembered;
                default: the owners in typetorch.json; a remote helper's id goes there too). A remote-claude you run yourself in
                this repo works as well
   pair         another one-time pairing link (15 min): the tunnel's address with the code in it (serve's own tunnel, or

@@ -239,7 +239,7 @@ export class ClaudeBridge {
 		return this.request(user, "GET", `/v1/prompts/${encodeURIComponent(id)}?since=${since}`);
 	}
 
-	deploy(user: number, id: string, decision: "deploy" | "discard") {
+	deploy(user: number, id: string, decision: "apply" | "deploy" | "discard") {
 		return this.request(user, "POST", `/v1/prompts/${encodeURIComponent(id)}/deploy`, { decision });
 	}
 

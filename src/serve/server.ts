@@ -473,7 +473,7 @@ export class ControlServer {
 			}
 			case "POST /tt/claude/deploy": {
 				const decision = str(body?.decision, "decision", 10);
-				if (decision !== "deploy" && decision !== "discard") throw new HttpError(400, "decision: deploy or discard");
+				if (decision !== "apply" && decision !== "deploy" && decision !== "discard") throw new HttpError(400, "decision: apply, deploy or discard");
 				return this.claude().deploy(this.claudeUser(remote, body?.user), str(body?.id, "id", 64), decision);
 			}
 			case "POST /tt/claude/cancel":
