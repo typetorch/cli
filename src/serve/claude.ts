@@ -81,6 +81,10 @@ const PASSTHROUGH: ["GET" | "POST", RegExp][] = [
 	["POST", /^\/v1\/attachments(\/capture|\/asset)?$/],
 	["GET", new RegExp(`^/v1/images/${ID}(\\?chunk=\\d{1,4})?$`)],
 	["POST", /^\/v1\/logs$/],
+	// The game tools of the plugin's own prompts (job "": this Studio): the plugin answers them on the open place.
+	["GET", /^\/v1\/game\/pending$/],
+	["GET", /^\/v1\/game\/requests\/[0-9a-f]{32}$/],
+	["POST", /^\/v1\/game\/requests\/[0-9a-f]{32}\/result$/],
 ];
 
 /** Prompts kept per chat (older ones drop off the plugin's transcript). */
@@ -227,7 +231,8 @@ export class ClaudeBridge {
 
 	/**
 	 * The rest of remote-claude's API the in-game Claude tab uses (recent chats, screenshots, Claude's images, log
-	 * uploads), for the same user; only these paths, never the game-server ones (/v1/game/*) or /v1/token.
+	 * uploads, and the Studio game tools: pending requests, one request, its result), for the same user; only these
+	 * paths, never the game feed (/v1/game/poll, /v1/game/tool-result) or /v1/token.
 	 */
 	passthrough(user: number, method: "GET" | "POST", path: string, body?: unknown) {
 		if (!PASSTHROUGH.some(([m, pattern]) => m === method && pattern.test(path))) throw new ClaudeError(403, `not allowed: ${method} ${path}`);
