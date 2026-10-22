@@ -84,6 +84,11 @@ export interface ServeStatus {
 	children: ChildStatus[];
 	compile: { state: "idle" | "compiling" | "ok" | "errors"; errors: CompileError[]; at?: string };
 	studios: StudioInfo[];
+	/**
+	 * --remote: the gateway, its public address (serve's quick tunnel or `--url`) once it answers, and the pairing link
+	 * serve printed for it (`<url>#<code>`, one use, until linkExpiresAt). Local callers only see the link.
+	 */
+	remote?: { port: number; tunnel: "quick" | "own" | "none"; url?: string; link?: string; linkExpiresAt?: string };
 }
 
 /**

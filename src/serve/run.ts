@@ -15,11 +15,12 @@ import { loadProject } from "../config.ts";
 import { branchChannel } from "../naming.ts";
 import { removeServeFile, writeServeFile } from "./client.ts";
 import { CompileTracker, stripAnsi } from "./compile.ts";
-import { API_VERSION, ROJO_DEFAULT_PORT, type Hello } from "./protocol.ts";
+import { API_VERSION, ROJO_DEFAULT_PORT, type Hello, type ServeStatus } from "./protocol.ts";
 import { ClaudeBridge } from "./claude.ts";
 import { JobRunner } from "./jobs.ts";
 import { Pairing } from "./pairing.ts";
 import { RemoteGateway } from "./remote.ts";
+import { ensureCloudflared, QuickTunnel } from "./tunnel.ts";
 import { ControlServer } from "./server.ts";
 import { Supervisor } from "./supervisor.ts";
 
@@ -50,6 +51,13 @@ export interface ServeOptions {
 	jobCommand?: (args: string[]) => string[];
 	/** --remote: the gateway's port for a Studio on another machine (remote.ts); absent: local only. */
 	remotePort?: number;
+	/**
+	 * --remote's public address: "quick" (default) opens a Cloudflare quick tunnel (tunnel.ts) and prints a pairing link
+	 * for it, `{url}` is a tunnel the owner runs (--url), "none" leaves it to them (--no-tunnel).
+	 */
+	remoteTunnel?: "quick" | "none" | { url: string };
+	/** Finds or installs cloudflared (tests). */
+	cloudflared?: () => Promise<string>;
 	/**
 	 * --claude: also runs remote-claude (@typetorch/dev-server) without a tunnel, for the plugin's Claude tab (claude.ts):
 	 * its command line (the dev-server's entry, without arguments), the environment it gets, and --claude-users.
@@ -148,9 +156,10 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 		log: (level, text) => log("assets", level, text),
 		command: options.jobCommand,
 	});
+	let remoteState: NonNullable<ServeStatus["remote"]> | undefined;
 	const control = new ControlServer({
 		hello,
-		status: () => ({ hello: hello(), children: supervisor.status(), compile: compile.snapshot() }),
+		status: () => ({ hello: hello(), children: supervisor.status(), compile: compile.snapshot(), ...(remoteState ? { remote: { ...remoteState } } : {}) }),
 		stop: () => void stop(),
 		restart: (child) => supervisor.restart(child),
 		jobs,
@@ -201,14 +210,48 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 	writeServeFile(root, { port, pid: process.pid, rojoPort, startedAt, root, logFile: options.logFile });
 	log("serve", "info", `control API on 127.0.0.1:${port}, Rojo on ${rojoPort} (${projectFile}); the TypeTorch Studio plugin connects by itself`);
 	if (relative(root, options.cwd)) log("serve", "info", `game repo: ${root}`);
+	let tunnel: QuickTunnel | undefined;
 	if (remote) {
-		log("serve", "info", `remote gateway on 127.0.0.1:${remote.port}: point your tunnel at http://localhost:${remote.port}, then \`typetorch serve pair\` for a pairing code`);
+		const gateway = remote;
+		const pairing = control.pairingStore!;
+		const tunnelMode = options.remoteTunnel ?? "quick";
+		remoteState = { port: gateway.port, tunnel: tunnelMode === "quick" ? "quick" : tunnelMode === "none" ? "none" : "own" };
+		// One link to share: the public address with a one-time code in it (pairing.ts); `serve pair` makes another.
+		const share = (url: string) => {
+			const code = pairing.newCode(url);
+			remoteState = { ...remoteState!, url: code.url, link: code.link, linkExpiresAt: code.expiresAt };
+			log("remote", "info", `pairing link: ${code.link} (works once, until ${new Date(code.expiresAt).toLocaleTimeString()}; \`typetorch serve pair\` makes another). In Studio: TypeTorch panel > Remote server > paste it > Pair`);
+		};
+		if (tunnelMode === "none") {
+			log("serve", "info", `remote gateway on 127.0.0.1:${gateway.port}: point your tunnel at http://localhost:${gateway.port}, then \`typetorch serve pair --url <its address>\` for a pairing link`);
+		} else if (tunnelMode !== "quick") {
+			log("serve", "info", `remote gateway on 127.0.0.1:${gateway.port}, behind ${tunnelMode.url}`);
+			share(tunnelMode.url);
+		} else {
+			log("serve", "info", `remote gateway on 127.0.0.1:${gateway.port}; opening a Cloudflare quick tunnel to it`);
+			void (options.cloudflared ?? (() => ensureCloudflared((level, text) => log("remote", level, text))))()
+				.then((exe) => {
+					if (stopping) return;
+					tunnel = new QuickTunnel({
+						exe,
+						port: gateway.port,
+						log: (level, text) => log("remote", level, text),
+						onUrl: (url) => {
+							if (remoteState?.url && remoteState.url !== url) log("remote", "warn", "the tunnel restarted with a new address: remote Studios pair again with the new link");
+							share(url);
+						},
+					});
+					tunnel.start();
+				})
+				.catch((error) => log("remote", "error", `no tunnel: ${(error as Error).message}. Run your own and use \`typetorch serve pair --url <its address>\`, or start serve with --url <it>`));
+		}
 	}
 
 	async function stop() {
 		stopping ??= (async () => {
 			log("serve", "info", "stopping");
 			await supervisor.stopAll();
+			tunnel?.stop();
 			await remote?.close();
 			await control.close();
 			removeServeFile(root, process.pid);

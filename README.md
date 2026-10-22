@@ -540,11 +540,13 @@ build's channel in brackets when it differs.
   `serve_logs`, `studio_logs`, `studio_reconnect`, `studio_play`, `studio_stop`). Claude Code, from the game repo:
   `claude mcp add typetorch -- bunx typetorch mcp`.
 - **A Studio on another machine** (`serve --remote`). serve also opens a gateway on `127.0.0.1:34890`
-  (`--remote-port`) for a tunnel you run, so someone else's Studio can attach over the internet. With Cloudflare
-  Tunnel, route a hostname to `http://localhost:34890`, for example `cloudflared tunnel --url http://localhost:34890`
-  for a quick one, or an ingress rule in a named tunnel. Then `typetorch serve pair --url https://<your tunnel>` prints a
-  one-time pairing link (15 min): the tunnel URL with the code after a `#` (the URL is remembered, so later it's just
-  `typetorch serve pair`). The other person pastes that link into the plugin's Remote card, and their Studio stays paired for 30
+  (`--remote-port`) and a free Cloudflare quick tunnel to it (no account; cloudflared is installed when it's missing,
+  as the dev-server does), so someone else's Studio can attach over the internet. Once the tunnel answers, serve prints
+  a one-time pairing link (15 min): the tunnel URL with the code after a `#` (`typetorch serve status` shows it too;
+  `typetorch serve pair` makes another). A quick tunnel's address changes when cloudflared restarts, and serve then
+  prints a new link. To use a tunnel you already run (a named Cloudflare tunnel routed to `http://localhost:34890`),
+  pass `--url https://<your tunnel>`; `--no-tunnel` opens none and leaves `typetorch serve pair --url <it>` to you
+  (the URL is remembered, so later it's just `typetorch serve pair`). The other person pastes that link into the plugin's Remote card, and their Studio stays paired for 30
   days (`serve devices`, `serve unpair --name <device>|--all`). Every request but pairing needs that device's token
   (kept hashed in `.typetorch/serve-remote.json`). A remote Studio syncs code read-only through Rojo (never Rojo's
   `write` or `open`), reports its state and Output, and runs the hot asset buttons (uploads with your keys, deploys only

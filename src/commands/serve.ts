@@ -36,9 +36,10 @@ export const serveFlags = {
 	claude: "boolean",
 	"claude-users": "string",
 	url: "string",
+	"no-tunnel": "boolean",
 } as const;
 
-export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <script,...>] [--dev-branch <b>] [--remote [--remote-port <n>]] [--claude [--claude-users <ids>]] [--json]
+export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <script,...>] [--dev-branch <b>] [--remote [--remote-port <n>] [--url <your tunnel> | --no-tunnel]] [--claude [--claude-users <ids>]] [--json]
 typetorch serve pair [--url <tunnel URL>] [--json]
 typetorch serve devices [--json]
 typetorch serve unpair (--name <device> | --all) [--json]
@@ -59,17 +60,20 @@ typetorch serve logs [--studio] [--since <seq>] [--limit <n>] [--follow] [--json
   --port       Rojo's port
   --no-watch   don't run rbxtsc -w (your editor or agent compiles)
   --dev-branch the branch the plugin's "Publish to dev" button deploys hot assets to (default dev; never prod-channel)
-  --remote     also open a gateway for a Studio on another machine on 127.0.0.1:${REMOTE_DEFAULT_PORT} (--remote-port), for a
-               tunnel you run (Cloudflare Tunnel: service http://localhost:${REMOTE_DEFAULT_PORT}). Every request needs a device token
-               from pairing; a remote Studio syncs code read-only, reports its state and runs hot asset jobs (dev only),
-               but can't stop serve, drive other Studios or read serve's log
+  --remote     also let a Studio on another machine in: serve opens a Cloudflare quick tunnel (cloudflared, installed
+               if missing; no account) to a gateway on 127.0.0.1:${REMOTE_DEFAULT_PORT} (--remote-port) and prints a pairing link
+               to send them. The address changes each time serve starts, so send the new link then. --url <address>: a
+               tunnel you run yourself instead (service http://localhost:${REMOTE_DEFAULT_PORT}); --no-tunnel: just the gateway.
+               Every request needs a device token from pairing; a remote Studio syncs code read-only, reports its state
+               and runs hot asset jobs (dev only), but can't stop serve, drive other Studios or read serve's log
   --claude     also runs remote-claude (typetorch remote-claude, from @typetorch/dev-server) on this machine for the
                plugin's Claude tab: Studio users prompt Claude Code here in Code mode (edits on this branch, which must be
                dev-channel, then Deploy or Discard). --claude-users <ids>: the Roblox user ids allowed (remembered; the
                first time it's required, and a remote helper's id goes there too). A remote-claude you run yourself in
                this repo works as well
-  pair         a one-time pairing link (15 min), your tunnel URL with the code in it (--url once; remembered): the
-               other person pastes it into the plugin's Remote card; their Studio stays paired for 30 days
+  pair         another one-time pairing link (15 min): the tunnel's address with the code in it (serve's own tunnel, or
+               --url once; remembered). The other person pastes it into the plugin's Remote card; their Studio stays
+               paired for 30 days
   devices      the paired devices; unpair --name <device> (or --all) revokes them
   --json       foreground: one JSON line per log line; subcommands: one JSON document
   status       children, attached Studios (edit / playtest), sync state, last compile result and its errors
@@ -209,6 +213,7 @@ async function foreground(args: ParsedArgs) {
 		envFile: flagString(args, "env-file"),
 		devBranch: flagString(args, "dev-branch"),
 		remotePort: flagBool(args, "remote") || flagString(args, "remote-port") ? flagInt(args, "remote-port", REMOTE_DEFAULT_PORT) : undefined,
+		remoteTunnel: remoteTunnel(args),
 		claude: flagBool(args, "claude") || flagString(args, "claude-users") ? claudeChild(root, flagString(args, "claude-users")) : undefined,
 		print: (line) => (json ? console.log(JSON.stringify({ at: new Date().toISOString(), ...line })) : printLine(line)),
 	});
@@ -232,12 +237,31 @@ function claudeChild(root: string, users: string | undefined) {
 }
 
 /** Starts `typetorch serve` in the background with the same flags (minus --detach) and waits until it answers. */
+/** --remote's public address: serve's quick tunnel (default), the owner's own (--url), or none (--no-tunnel). */
+function remoteTunnel(args: ParsedArgs): "quick" | "none" | { url: string } {
+	if (flagBool(args, "no-tunnel")) return "none";
+	const url = flagString(args, "url");
+	return url ? { url } : "quick";
+}
+
 async function detach(args: ParsedArgs) {
 	const argv = process.argv.slice(2).filter((arg) => arg !== "--detach" && arg !== "--json");
-	const r = await startDetached(gameRoot(args), argv, process.cwd());
-	if (isJson()) emitJson(r);
-	else if (r.alreadyRunning) info(`already running (pid ${r.pid}, control port ${r.port})`);
+	const root = gameRoot(args);
+	const r = await startDetached(root, argv, process.cwd());
+	// --remote: wait for the tunnel and its pairing link, the one thing to send the other person
+	const remote = !r.alreadyRunning && (flagBool(args, "remote") || flagString(args, "remote-port")) && remoteTunnel(args) !== "none";
+	let link: string | undefined;
+	for (let i = 0; remote && i < 75 && !link; i++) {
+		await sleep(2000);
+		const s = await serveStatus(root).catch(() => undefined);
+		if (!s?.running) break;
+		link = s.remote?.link;
+	}
+	if (isJson()) return emitJson({ ...r, ...(link ? { link } : {}) });
+	if (r.alreadyRunning) info(`already running (pid ${r.pid}, control port ${r.port})`);
 	else info(`typetorch serve started in the background (pid ${r.pid}, control port ${r.port}, Rojo ${r.rojoPort}); log: ${r.log}`);
+	if (link) info(`pairing link: ${bold(link)} (works once, 15 min; \`typetorch serve pair\` makes another)`);
+	else if (remote) info(dim("the tunnel isn't up yet: `typetorch serve status` shows the pairing link once it is (or see the log)"));
 }
 
 export function describeStatus(s: ServeStatus): string[] {
@@ -248,6 +272,10 @@ export function describeStatus(s: ServeStatus): string[] {
 	const c = s.compile;
 	lines.push(`  compile  ${c.state}${c.errors.length ? `: ${c.errors.length} error${c.errors.length === 1 ? "" : "s"}` : ""}`);
 	for (const e of c.errors.slice(0, 10)) lines.push(`    ${e.file}:${e.line}:${e.column} ${e.code ?? ""} ${e.message}`);
+	if (s.remote) {
+		const where = s.remote.url ?? (s.remote.tunnel === "quick" ? "tunnel starting" : "no tunnel (point yours at it)");
+		lines.push(`  remote   127.0.0.1:${s.remote.port} -> ${where}${s.remote.link ? `\n           pairing link: ${s.remote.link} (once, until ${new Date(s.remote.linkExpiresAt!).toLocaleTimeString()})` : ""}`);
+	}
 	if (s.studios.length === 0) lines.push(`  studio   none attached (open the place in Studio with the TypeTorch plugin)`);
 	for (const st of s.studios) {
 		const from = st.remote ? ` [remote: ${st.remote}]` : "";

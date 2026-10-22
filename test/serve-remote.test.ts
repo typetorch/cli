@@ -94,7 +94,7 @@ describe("pairing", () => {
 describe("remote gateway", () => {
 	const root = mkdtempSync(join(tmpdir(), "tt-remote-"));
 	const pairing = new Pairing(root);
-	const control = new ControlServer({ hello, status: () => ({ hello: hello(), children: [], compile: { state: "idle", errors: [] } }), stop: () => {}, restart: async () => false, pairing });
+	const control = new ControlServer({ hello, status: () => ({ hello: hello(), children: [], compile: { state: "idle", errors: [] }, remote: { port: 1, tunnel: "quick", url: "https://a-b.trycloudflare.com", link: "https://a-b.trycloudflare.com#ABCDEFGH", linkExpiresAt: "2026-10-21T00:00:00.000Z" } }), stop: () => {}, restart: async () => false, pairing });
 	let rojoPort = 0;
 	const rojoHits: string[] = [];
 	// A stand-in for rojo serve: answers HTTP, and echoes on an upgraded socket.
@@ -130,6 +130,12 @@ describe("remote gateway", () => {
 	const remote = (path: string, init: RequestInit = {}, bearer = token) =>
 		fetch(base + path, { ...init, headers: { "x-typetorch": "1", "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}), ...(init.headers ?? {}) } });
 
+	test("/tt/ping answers without a token (the tunnel's reachability check), and says nothing else", async () => {
+		const res = await fetch(`${base}/tt/ping`);
+		expect(res.status).toBe(200);
+		expect(await res.json()).toEqual({ app: "typetorch-remote" });
+	});
+
 	test("nothing but pairing works without a token; a code from the owner pairs", async () => {
 		expect((await remote("/tt/hello", {}, "")).status).toBe(401);
 		expect((await remote("/tt/hello", {}, "x".repeat(43))).status).toBe(401);
@@ -160,6 +166,14 @@ describe("remote gateway", () => {
 		expect(control.studioList()[0].sync.status).toBe("connected");
 		// an agent here doesn't reach it without naming it
 		await expect(control.command("play")).rejects.toBeInstanceOf(HttpError);
+	});
+
+	test("the pairing link in serve's status is for the owner only", async () => {
+		expect((await call<{ remote: { link?: string } }>(controlPort, "GET", "/tt/status")).remote.link).toBe("https://a-b.trycloudflare.com#ABCDEFGH");
+		const seen = (await (await remote("/tt/status")).json()) as { remote: { url?: string; link?: string; linkExpiresAt?: string } };
+		expect(seen.remote.url).toBe("https://a-b.trycloudflare.com");
+		expect(seen.remote.link).toBeUndefined();
+		expect(seen.remote.linkExpiresAt).toBeUndefined();
 	});
 
 	test("Rojo is proxied read-only through /r/<token>", async () => {
