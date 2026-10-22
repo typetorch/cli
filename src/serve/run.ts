@@ -203,7 +203,7 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 			command: [...options.claude.command, "remote-claude", "--no-tunnel", "--no-announce", "--no-clipboard", ...users],
 			cwd: root,
 			environment: options.claude.environment,
-			// A refusal (no --claude-users yet, a prod branch, no Claude login) would only repeat: `serve restart claude`.
+			// A refusal (no --claude-users and no owner in typetorch.json, a prod branch, no Claude login) would only repeat: `serve restart claude`.
 			restart: false,
 		});
 	}
