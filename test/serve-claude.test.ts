@@ -54,6 +54,8 @@ function fakeRemoteClaude() {
 		if (req.method === "GET" && poll) return reply(200, { id: poll[1], state: "done", events: [{ i: Number(poll[2]), kind: "assistant_text", text: `hi ${user}` }], next: Number(poll[2]) + 1 });
 		if (req.method === "GET" && req.url === "/v1/conversations") return reply(200, { conversations: [{ id: "c1", user }] });
 		if (req.method === "POST" && req.url === "/v1/attachments/capture") return reply(200, { id: "a1", width: 4, height: 2, got: body });
+		if (req.method === "GET" && req.url === "/v1/game/pending") return reply(200, { requests: [{ id: "f".repeat(32), tool: "inspect", promptId: "p1", user }] });
+		if (req.method === "POST" && req.url === `/v1/game/requests/${"f".repeat(32)}/result`) return reply(200, { ok: true, got: body });
 		if (req.method === "POST" && /^\/v1\/prompts\/\w+\/deploy$/.test(req.url ?? "")) return reply(body.decision === "deploy" ? 200 : 400, { ok: true });
 		reply(404);
 	});
@@ -157,11 +159,14 @@ describe("serve --claude", () => {
 		await expect(call(controlPort, "POST", "/tt/claude/prompt", { user: 7, prompt: "x", mode: "god" })).rejects.toThrow("mode");
 	});
 
-	test("the rest of the tab's API passes through for that user, game-server and token routes don't", async () => {
+	test("the rest of the tab's API passes through for that user, game-feed and token routes don't", async () => {
 		syncCode();
 		expect(await call<unknown>(controlPort, "POST", "/tt/claude/v1", { user: 7, method: "GET", path: "/v1/conversations" })).toEqual({ conversations: [{ id: "c1", user: 7 }] });
 		expect(await call<unknown>(controlPort, "POST", "/tt/claude/v1", { user: 7, method: "POST", path: "/v1/attachments/capture", body: { captureTime: 1 } })).toEqual({ id: "a1", width: 4, height: 2, got: { captureTime: 1 } });
-		for (const [method, path] of [["GET", "/v1/game/pending"], ["POST", "/v1/token"], ["POST", "/v1/conversations"], ["GET", "/v1/conversations/../token"]])
+		// The Studio game tools: the plugin answers its own prompts' requests.
+		expect(await call<unknown>(controlPort, "POST", "/tt/claude/v1", { user: 7, method: "GET", path: "/v1/game/pending" })).toEqual({ requests: [{ id: "f".repeat(32), tool: "inspect", promptId: "p1", user: 7 }] });
+		expect(await call<unknown>(controlPort, "POST", "/tt/claude/v1", { user: 7, method: "POST", path: `/v1/game/requests/${"f".repeat(32)}/result`, body: { ok: true, output: [], data: "{}" } })).toEqual({ ok: true, got: { ok: true, output: [], data: "{}" } });
+		for (const [method, path] of [["GET", "/v1/game/poll"], ["POST", "/v1/game/tool-result"], ["GET", "/v1/game/requests/../token"], ["POST", "/v1/token"], ["POST", "/v1/conversations"], ["GET", "/v1/conversations/../token"]])
 			await expect(call(controlPort, "POST", "/tt/claude/v1", { user: 7, method, path })).rejects.toThrow("not allowed");
 	});
 
