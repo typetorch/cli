@@ -573,8 +573,9 @@ instead if you don't want the devDependency.
   DEV > Claude tab does. `--claude-users <ids>` lists the Roblox user ids allowed (remembered; before that, the owners in `typetorch.json`),
   so add a remote helper's id there too: a remote Studio prompts as the Roblox user it paired with, and serve pairs with
   remote-claude for them (nobody handles a remote-claude code). A remote-claude you start yourself in the repo works the
-  same way (serve finds it through `.typetorch/remote-claude.session.json`). The tab has the in-game tab's options too:
-  Live mode (the game tools answer from a running playtest), Toolbox, screenshots, logs and recent chats; the chat
+  same way (serve finds it through `.typetorch/remote-claude.session.json`). The tab sends Code only (the Live / Code
+  pill just points you to the in-game DEV > Claude tab for Live) and has the in-game tab's other options: Toolbox,
+  screenshots, logs and recent chats; the chat
   follows you between Edit and Play (serve keeps it per user while remote-claude runs). Replies stream to the tab over
   a WebSocket (`/tt/claude/stream`, through the tunnel too), so they show as Claude writes them.
 
