@@ -556,7 +556,7 @@ build's channel in brackets when it differs.
 - **Claude in Studio** (`serve --claude`). serve also runs remote-claude (`typetorch remote-claude`, from
   `@typetorch/dev-server`) on this machine without a tunnel, and the plugin's **Claude** tab prompts it: Claude Code
   edits this branch (Code mode; the branch must be dev-channel), then the tab shows Deploy or Discard, as the in-game
-  DEV > Claude tab does. `--claude-users <ids>` lists the Roblox user ids allowed (remembered; required the first time),
+  DEV > Claude tab does. `--claude-users <ids>` lists the Roblox user ids allowed (remembered; before that, the owners in `typetorch.json`),
   so add a remote helper's id there too: a remote Studio prompts as the Roblox user it paired with, and serve pairs with
   remote-claude for them (nobody handles a remote-claude code). A remote-claude you start yourself in the repo works the
   same way (serve finds it through `.typetorch/remote-claude.session.json`). The tab has the in-game tab's options too:
