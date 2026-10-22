@@ -200,7 +200,9 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 		const users = options.claude.users ? ["--users", options.claude.users] : [];
 		supervisor.add({
 			name: "claude",
-			command: [...options.claude.command, "remote-claude", "--no-tunnel", "--no-announce", "--no-clipboard", ...users],
+			// --deploy-branch: the tab's "Deploy to dev" goes to serve's dev branch, also from a prod-channel checkout
+			// (remote-claude 0.3.4+; Apply puts a change into this checkout for Rojo).
+			command: [...options.claude.command, "remote-claude", "--no-tunnel", "--no-announce", "--no-clipboard", "--deploy-branch", options.devBranch ?? "dev", ...users],
 			cwd: root,
 			environment: options.claude.environment,
 			// A refusal (no --claude-users and no owner in typetorch.json, a prod branch, no Claude login) would only repeat: `serve restart claude`.
