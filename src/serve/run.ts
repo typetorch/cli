@@ -8,7 +8,7 @@
  */
 import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:net";
-import { join, relative } from "node:path";
+import { basename, join, relative } from "node:path";
 import { rojoBinary } from "../build.ts";
 import { readAssetsLock } from "../assets.ts";
 import { loadProject } from "../config.ts";
@@ -122,7 +122,7 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 	for (const name of options.extra) {
 		if (typeof known[name] !== "string") throw new Error(`package.json has no "${name}" script (--with ${name})`);
 	}
-	const rojoPort = options.rojoPort ?? (await freePort(ROJO_DEFAULT_PORT));
+	let rojoPort = options.rojoPort ?? (await freePort(ROJO_DEFAULT_PORT));
 	const startedAt = new Date().toISOString();
 	const supervisor = new Supervisor((source, stream, raw) => {
 		const text = stripAnsi(raw);
@@ -130,7 +130,7 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 		if (!text.trim()) return;
 		const level = /\berror\b/i.test(text) ? "error" : stream === "stderr" ? "warn" : "info";
 		log(source, level, text);
-	});
+	}, () => saveServeFile());
 	const compile = new CompileTracker();
 	let stopping: Promise<void> | undefined;
 	let markStopped!: () => void;
@@ -173,6 +173,16 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 	}
 
 	const port = await control.listen(options.controlPorts);
+	// .typetorch/serve.json: where this serve answers, and its children's pids (a later serve stops them if this one
+	// is killed without them: client.ts stopOrphans). Written once the children are added, then on every start/exit.
+	let serveFileReady = false;
+	function saveServeFile() {
+		if (!serveFileReady || stopping) return;
+		const children = supervisor
+			.status()
+			.flatMap((c) => (c.pid ? [{ name: c.name, pid: c.pid, program: basename(c.command[0] ?? "").replace(/\.exe$/i, "") }] : []));
+		writeServeFile(root, { port, pid: process.pid, rojoPort, startedAt, root, logFile: options.logFile, children });
+	}
 	let remote: RemoteGateway | undefined;
 	if (options.remotePort !== undefined) {
 		remote = new RemoteGateway({
@@ -190,10 +200,22 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 	}
 	const watchCommand = options.watchCommand ?? (typeof known.watch === "string" ? ["bun", "run", "watch"] : ["bun", "run", "rbxtsc", "-w"]);
 	if (options.watch) supervisor.add({ name: "watch", command: watchCommand, cwd: root });
+	const rojoCommand = (port: number) => options.rojoCommand ?? [rojoBinary(), "serve", projectFile, "--port", String(port)];
 	supervisor.add({
 		name: "rojo",
-		command: options.rojoCommand ?? [rojoBinary(), "serve", projectFile, "--port", String(rojoPort)],
+		command: rojoCommand(rojoPort),
 		cwd: root,
+		// Something else took Rojo's port (a Rojo an earlier serve left running, a script): move to the next free one
+		// instead of crashing on it again and again. The plugin follows through /tt/hello.
+		prepare: async () => {
+			if (!(await portFree(rojoPort))) {
+				const taken = rojoPort;
+				rojoPort = await freePort(taken + 1);
+				log("serve", "warn", `Rojo's port ${taken} is taken by another process; Rojo moves to ${rojoPort}`);
+				saveServeFile();
+			}
+			return rojoCommand(rojoPort);
+		},
 	});
 	for (const name of options.extra) supervisor.add({ name, command: ["bun", "run", name], cwd: root });
 	if (options.claude) {
@@ -207,7 +229,8 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 			restart: false,
 		});
 	}
-	writeServeFile(root, { port, pid: process.pid, rojoPort, startedAt, root, logFile: options.logFile });
+	serveFileReady = true;
+	saveServeFile();
 	log("serve", "info", `control API on 127.0.0.1:${port}, Rojo on ${rojoPort} (${projectFile}); the TypeTorch Studio plugin connects by itself`);
 	if (relative(root, options.cwd)) log("serve", "info", `game repo: ${root}`);
 	let tunnel: QuickTunnel | undefined;

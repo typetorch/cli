@@ -16,6 +16,8 @@ export interface ServeFile {
 	startedAt: string;
 	root: string;
 	logFile?: string;
+	/** serve's children right now (Rojo, watch, scripts): stopped by the next serve if this one died without them. */
+	children?: { name: string; pid: number; program: string }[];
 }
 
 export function serveFilePath(root: string): string {
@@ -92,8 +94,42 @@ export async function findRunning(root: string): Promise<{ file: ServeFile; hell
 	} catch {
 		// not running
 	}
-	if (!pidAlive(file.pid)) rmSync(serveFilePath(root), { force: true });
+	if (!pidAlive(file.pid)) {
+		stopOrphans(file);
+		rmSync(serveFilePath(root), { force: true });
+	}
 	return undefined;
+}
+
+/**
+ * A serve that was killed (kill -9, a closed SSH session) leaves its children running: Rojo keeps its port and the next
+ * serve's Rojo or scripts can't bind it. Stops those that are still the same program (checked in /proc, so a reused pid
+ * is left alone; elsewhere they are only named).
+ */
+export function stopOrphans(file: ServeFile, log: (text: string) => void = (text) => console.error(text)): number {
+	let stopped = 0;
+	for (const child of file.children ?? []) {
+		if (!Number.isInteger(child.pid) || child.pid <= 1 || !pidAlive(child.pid)) continue;
+		let cmdline: string | undefined;
+		try {
+			cmdline = readFileSync(`/proc/${child.pid}/cmdline`, "utf8").replace(/\0/g, " ");
+		} catch {
+			// no /proc (Windows, macOS)
+		}
+		if (cmdline === undefined) {
+			log(`an earlier typetorch serve left ${child.name} running (pid ${child.pid}); stop it if its port is taken`);
+			continue;
+		}
+		if (!child.program || !cmdline.includes(child.program)) continue;
+		try {
+			process.kill(child.pid, "SIGTERM");
+			stopped++;
+			log(`stopped ${child.name} (pid ${child.pid}) that an earlier typetorch serve left running`);
+		} catch {
+			// gone meanwhile, or not ours to stop
+		}
+	}
+	return stopped;
 }
 
 export function pidAlive(pid: number): boolean {

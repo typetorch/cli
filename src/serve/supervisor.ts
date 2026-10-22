@@ -18,6 +18,8 @@ export interface ChildSpec {
 	environment?: Record<string, string>;
 	/** Restart when it exits (default true). */
 	restart?: boolean;
+	/** Before every start: the command to run this time (Rojo moves to a free port when its own was taken). */
+	prepare?: () => Promise<string[]>;
 }
 
 export type LineSink = (source: string, stream: "stdout" | "stderr", line: string) => void;
@@ -37,6 +39,7 @@ class Child {
 	constructor(
 		readonly spec: ChildSpec,
 		private readonly sink: LineSink,
+		private readonly changed: () => void = () => {},
 	) {
 		this.status = { name: spec.name, command: spec.command, state: "starting", restarts: 0 };
 	}
@@ -45,12 +48,27 @@ class Child {
 		return this.spec.environment ?? childEnv(this.spec.env);
 	}
 
-	start() {
+	async start() {
 		this.stopped = false;
 		this.status.state = "starting";
+		if (this.spec.prepare) {
+			try {
+				const command = await this.spec.prepare();
+				this.status.command = command;
+			} catch (error) {
+				this.sink(this.spec.name, "stderr", `could not start: ${(error as Error).message}`);
+				this.status.state = "exited";
+				this.status.exitCode = 1;
+				return;
+			}
+			if (this.stopped) {
+				this.status.state = "stopped";
+				return;
+			}
+		}
 		let resolved;
 		try {
-			resolved = resolveCommand(this.spec.command, this.env());
+			resolved = resolveCommand(this.status.command, this.env());
 		} catch (error) {
 			this.sink(this.spec.name, "stderr", `could not start: ${(error as Error).message}`);
 			this.status.state = "exited";
@@ -68,12 +86,14 @@ class Child {
 		this.startedAt = Date.now();
 		this.status.pid = child.pid;
 		this.status.state = "running";
+		this.changed();
 		pipeLines(child.stdout, (line) => this.sink(this.spec.name, "stdout", line));
 		pipeLines(child.stderr, (line) => this.sink(this.spec.name, "stderr", line));
 		child.on("error", (error) => this.sink(this.spec.name, "stderr", `error: ${error.message}`));
 		child.on("exit", (code, signal) => {
 			this.process = undefined;
 			this.status.pid = undefined;
+			this.changed();
 			this.status.exitCode = code ?? (signal ? null : 1);
 			if (this.stopped) {
 				this.status.state = "stopped";
@@ -89,7 +109,7 @@ class Child {
 			this.sink(this.spec.name, "stderr", `exited (${code ?? signal}); restarting in ${Math.round(this.backoff / 100) / 10} s`);
 			this.timer = setTimeout(() => {
 				this.status.restarts++;
-				this.start();
+				void this.start();
 			}, this.backoff);
 			this.backoff = Math.min(this.backoff * 2, MAX_BACKOFF_MS);
 		});
@@ -117,7 +137,7 @@ class Child {
 	async restart() {
 		await this.stop();
 		this.backoff = 500;
-		this.start();
+		await this.start();
 	}
 }
 
@@ -149,12 +169,16 @@ function pipeLines(stream: NodeJS.ReadableStream | null, onLine: (line: string) 
 export class Supervisor {
 	private readonly children: Child[] = [];
 
-	constructor(private readonly sink: LineSink) {}
+	constructor(
+		private readonly sink: LineSink,
+		/** A child started or exited (serve records the pids, so a later serve can stop what a killed one left). */
+		private readonly onChange?: () => void,
+	) {}
 
 	add(spec: ChildSpec) {
-		const child = new Child(spec, this.sink);
+		const child = new Child(spec, this.sink, () => this.onChange?.());
 		this.children.push(child);
-		child.start();
+		void child.start();
 	}
 
 	status(): ChildStatus[] {
