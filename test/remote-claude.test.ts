@@ -100,6 +100,6 @@ describe("remote-claude: running it", () => {
 
 	test("typetorch help remote-claude describes it", () => {
 		const result = Bun.spawnSync(["bun", CLI, "help", "remote-claude"], { stdout: "pipe", stderr: "pipe" });
-		expect(result.stdout.toString()).toContain("typetorch remote-claude --users");
+		expect(result.stdout.toString()).toContain("typetorch remote-claude [--users");
 	});
 });

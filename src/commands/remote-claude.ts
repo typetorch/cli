@@ -112,14 +112,15 @@ export function findDevServer(options: FindOptions): DevServerCommand | { search
 	return { searched: [...seen] };
 }
 
-export const REMOTE_CLAUDE_USAGE = `typetorch remote-claude --users <id,id,...> [options]
+export const REMOTE_CLAUDE_USAGE = `typetorch remote-claude [--users <id,id,...>] [options]
 
   Runs \`${DEV_SERVER_BIN} remote-claude\` (${DEV_SERVER_PACKAGE}) with the same arguments, in this terminal: the
   in-game DEV > Claude tab prompts Claude Code on this machine (dev-channel branches only; plans/11). Every option is
-  the dev-server's (\`typetorch remote-claude --help\` prints them): --users (required), --branch, --env-file, --cli, ...
+  the dev-server's (\`typetorch remote-claude --help\` prints them): --users (remembered once given; until then the
+  owners in typetorch.json "members"), --branch, --env-file, --cli, ...
   Found in: ${DEV_SERVER_VAR} (an entry or executable), node_modules/${DEV_SERVER_PACKAGE} in the game repo or a parent,
   next to this CLI (npm installs it there: npm i -g ${DEV_SERVER_PACKAGE}), or a sibling ../dev-server checkout.
-  With npx: npx -p @typetorch/cli -p ${DEV_SERVER_PACKAGE} typetorch remote-claude --users ...`;
+  With npx: npx -p @typetorch/cli -p ${DEV_SERVER_PACKAGE} typetorch remote-claude ...`;
 
 /** The environment for the dev-server: the real one, minus what Bun auto-loaded from .env files here. */
 export function devServerEnv(): Record<string, string> {
