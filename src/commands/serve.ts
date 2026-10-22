@@ -45,7 +45,7 @@ typetorch serve devices [--json]
 typetorch serve unpair (--name <device> | --all) [--json]
 typetorch serve status [--json]
 typetorch serve stop
-typetorch serve restart <watch|rojo|<script>>
+typetorch serve restart <watch|rojo|claude|<script>>
 typetorch serve logs [--studio] [--since <seq>] [--limit <n>] [--follow] [--json]
 
   One process for the Studio dev loop, instead of \`bun run watch\` + \`bun run studio\` + more terminals:
@@ -155,7 +155,7 @@ export async function serveCommand(args: ParsedArgs) {
 		}
 		case "restart": {
 			const child = rest[0];
-			if (!child) throw new UsageError("restart needs a child name: watch, rojo or a --with script");
+			if (!child) throw new UsageError("restart needs a child name: watch, rojo, claude (--claude) or a --with script");
 			await serveRestart(gameRoot(args), child);
 			if (isJson()) emitJson({ ok: true });
 			else info(`restarted ${child}`);

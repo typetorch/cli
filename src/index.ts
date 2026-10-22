@@ -455,7 +455,7 @@ typetorch assets types [--out <file>]
 		run: async () => {},
 		raw: (argv) => remoteClaudeCommand(argv),
 		summary: "Claude Code from the in-game dev menu",
-		usage: REMOTE_CLAUDE_USAGE.replace("typetorch remote-claude --users", "typetorch dev (= remote-claude) --users"),
+		usage: REMOTE_CLAUDE_USAGE.replace("typetorch remote-claude [--users", "typetorch dev (= remote-claude) [--users"),
 	},
 	migrate: {
 		flags: migrateFlags,
