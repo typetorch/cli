@@ -14,7 +14,7 @@ import { findRunning } from "../serve/client.ts";
 import { serveDevices, serveLogs, servePairCode, serveRestart, serveStatus, serveStop, serveUnpair, startDetached, studioSend } from "../serve/ops.ts";
 import { REMOTE_DEFAULT_PORT } from "../serve/remote.ts";
 import { RECONNECT_LUAU, type CommandKind, type CommandResult, type LogLine, type ServeStatus } from "../serve/protocol.ts";
-import { startServe } from "../serve/run.ts";
+import { scripts, startServe } from "../serve/run.ts";
 import { cliRoot, DEV_SERVER_PACKAGE, devServerEnv, findDevServer } from "./remote-claude.ts";
 
 export const serveFlags = {
@@ -23,6 +23,7 @@ export const serveFlags = {
 	port: "string",
 	"no-watch": "boolean",
 	live: "boolean",
+	"no-live": "boolean",
 	with: "string",
 	since: "string",
 	studio: "boolean",
@@ -39,7 +40,7 @@ export const serveFlags = {
 	"no-tunnel": "boolean",
 } as const;
 
-export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <script,...>] [--dev-branch <b>] [--remote [--remote-port <n>] [--url <your tunnel> | --no-tunnel]] [--claude [--claude-users <ids>]] [--json]
+export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--no-live] [--with <script,...>] [--dev-branch <b>] [--remote [--remote-port <n>] [--url <your tunnel> | --no-tunnel]] [--claude [--claude-users <ids>]] [--json]
 typetorch serve pair [--url <tunnel URL>] [--json]
 typetorch serve devices [--json]
 typetorch serve unpair (--name <device> | --all) [--json]
@@ -51,7 +52,8 @@ typetorch serve logs [--studio] [--since <seq>] [--limit <n>] [--follow] [--json
   One process for the Studio dev loop, instead of \`bun run watch\` + \`bun run studio\` + more terminals:
     watch  the game's "watch" script (else rbxtsc -w); compile errors are kept for \`serve status\`
     rojo   rojo serve <project> on Rojo's default port 34872 (or the next free one), so the stock plugin still works
-    --live / --with <a,b>  also runs those package.json scripts (\`bun run <script>\`)
+    live   the game's "live" package.json script, when it has one (on by default; --no-live turns it off)
+    --with <a,b>  also runs those package.json scripts (\`bun run <script>\`)
   and a control API on 127.0.0.1:34880-34887. The TypeTorch Studio plugin (\`typetorch studio install-plugin\`) finds
   it by itself, attaches to the server whose universeId matches the open place and reconnects on its own: nobody
   clicks Connect. Children that exit are restarted. Ctrl+C or \`typetorch serve stop\` stops everything.
@@ -126,12 +128,16 @@ function gameRoot(args: ParsedArgs): string {
 	return root;
 }
 
-function extraScripts(args: ParsedArgs): string[] {
+/** --with scripts, plus the game's "live" script: on by default when package.json has one, `--no-live` turns it off. */
+export function extraScripts(args: ParsedArgs, root: string): string[] {
 	const names = (flagString(args, "with") ?? "")
 		.split(",")
 		.map((s) => s.trim())
 		.filter(Boolean);
-	if (flagBool(args, "live") && !names.includes("live")) names.push("live");
+	if (flagBool(args, "live") && flagBool(args, "no-live")) throw new UsageError("--live and --no-live: pick one");
+	const live = flagBool(args, "live") || (!flagBool(args, "no-live") && typeof scripts(root).live === "string");
+	if (live && !names.includes("live")) names.push("live");
+	if (flagBool(args, "no-live") && names.includes("live")) names.splice(names.indexOf("live"), 1);
 	return names;
 }
 
@@ -208,7 +214,7 @@ async function foreground(args: ParsedArgs) {
 		project: flagString(args, "project"),
 		rojoPort: portFlag ? Number(portFlag) : undefined,
 		watch: !flagBool(args, "no-watch"),
-		extra: extraScripts(args),
+		extra: extraScripts(args, root),
 		logFile: process.env.TYPETORCH_SERVE_LOG,
 		envFile: flagString(args, "env-file"),
 		devBranch: flagString(args, "dev-branch"),

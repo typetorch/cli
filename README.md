@@ -235,7 +235,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch assets status` / `typetorch assets list` | export + diff without uploading / the lockfile |
 | `typetorch remote-claude --users <ids> [...]` | runs `typetorch-dev-server remote-claude` ([`@typetorch/dev-server`](https://github.com/typetorch/dev-server)) with the same arguments in this terminal, and exits with its code: devs prompt Claude Code on this machine from the in-game DEV > Claude tab (dev-channel branches only). Found in `TYPETORCH_DEV_SERVER` (an entry), `node_modules/@typetorch/dev-server` in the game repo or a parent, next to this CLI (`npm i -g @typetorch/dev-server`; with npx: `npx -p @typetorch/cli -p @typetorch/dev-server typetorch remote-claude ...`), or a sibling `../dev-server` checkout; else a clear error. It gets the real environment (the dev-server reads the key, `--env-file` / `TYPETORCH_ENV_FILE` and `.env` itself) |
 | `typetorch dev --users <ids> [...]` | the same as `typetorch remote-claude` |
-| `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <scripts>]` | the Studio dev loop in one process: rbxtsc -w, `rojo serve`, extra package.json scripts, and the control API the TypeTorch Studio plugin attaches to by itself; see "Studio: typetorch serve" |
+| `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--no-live] [--with <scripts>]` | the Studio dev loop in one process: rbxtsc -w, `rojo serve`, the game's `live` script (on by default when package.json has one; `--no-live` off), extra package.json scripts, and the control API the TypeTorch Studio plugin attaches to by itself; see "Studio: typetorch serve" |
 | `typetorch serve status` / `stop` / `restart <child>` / `logs [--studio] [--follow]` | the running server's children, attached Studios, sync state and compile errors / stop it / restart one child / its log |
 | `typetorch studio status` / `reconnect [--anyway]` / `play [--run]` / `stop` / `logs [--follow]` | drives the Studio the plugin attached: its sync state / resync from scratch / start / end a playtest / Studio's Output |
 | `typetorch studio install-plugin` | builds the TypeTorch Studio plugin into Studio's plugins folder |
@@ -490,7 +490,8 @@ build's channel in brackets when it differs.
 ### Studio: typetorch serve
 
 `typetorch serve` replaces the terminals of the Studio loop (`bun run watch`, `bun run studio`, and anything else with
-`--with <script>`; `--live` = `--with live`) with one process, and adds a control API the **TypeTorch Studio plugin**
+`--with <script>`; the game's `live` script runs by default when package.json has one, `--no-live` turns it off)
+with one process, and adds a control API the **TypeTorch Studio plugin**
 ([typetorch/studio-plugin](https://github.com/typetorch/studio-plugin): `bun add -d @typetorch/studio-plugin`, then
 `typetorch studio install-plugin`) attaches to by itself.
 

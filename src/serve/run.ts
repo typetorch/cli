@@ -2,7 +2,7 @@
  * `typetorch serve` in the foreground: one process for the whole Studio dev loop.
  *   watch  the game's "watch" script (rbxtsc -w; the template's also writes build-info), else `bun run rbxtsc -w`
  *   rojo   `rojo serve <project> --port <p>` on Rojo's default port or the next free one
- *   extra  each `--with <script>` (`--live` = `--with live`): `bun run <script>`
+ *   extra  each `--with <script>`, and the game's "live" script (on by default, `--no-live` off): `bun run <script>`
  * plus the control API (server.ts) the TypeTorch Studio plugin attaches to by itself. Ctrl+C (or `typetorch serve
  * stop`) stops everything. `.typetorch/serve.json` tells the other commands where the control API is.
  */
@@ -75,7 +75,7 @@ export interface RunningServe {
 	stopped: Promise<void>;
 }
 
-function scripts(root: string): Record<string, string> {
+export function scripts(root: string): Record<string, string> {
 	try {
 		return JSON.parse(readFileSync(join(root, "package.json"), "utf8"))?.scripts ?? {};
 	} catch {
