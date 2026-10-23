@@ -25,6 +25,9 @@ bun add -d @typetorch/cli      # in the game repo, then: bunx typetorch <command
 bun src/index.ts <command>     # from a checkout of this repo
 ```
 
+The package installs two names for the same binary, `typetorch` and the short `tt` (CLI 0.12); every `typetorch`
+below works as `tt` too (`tt deploy`, `tt serve --remote`).
+
 The [template](https://github.com/typetorch/template) already has `@typetorch/cli` (and `@typetorch/dev-server`) in its
 devDependencies and the script `"typetorch": "typetorch"`: after `bun install`, `bun run typetorch <command>` runs it.
 
@@ -70,7 +73,8 @@ By hand, a game repo has `typetorch.json` next to `default.project.json`:
   "defaultBranch": "prod",
   "branches": { "main": "prod" },        // git branch -> TypeTorch branch (default: lowercased, "/" -> "-")
   "channels": { "prod": "prod" },        // branch -> "prod" | "dev" (default: prod for defaultBranch, else dev)
-  "members": { "123456789": "owner" },   // userId -> owner | dev
+  "members": { "123456789": "owner" },   // userId -> owner | dev (owners also default remote-claude's --users)
+  "revoked": { "987654321": true },      // userIds refused dev access whatever else says (`access push`)
   "devBadgeId": null,
   "kernel": "node_modules/@typetorch/kernel",
   "approval": "all",                     // "all" (default) | "prod" | "none": which deploys need `typetorch approve`
@@ -82,7 +86,9 @@ By hand, a game repo has `typetorch.json` next to `default.project.json`:
   "backend": { "url": "https://backend.example.com" },  // the TypeTorch backend (`typetorch backend setup` writes it)
   // optional safety thresholds (see "Health window and auto-rollback settings"):
   "health": { "errors": 3, "window": 30, "rollback": true, "dev": { "rollback": false } },
-  "autoRollback": { "failedPct": 20 }
+  "autoRollback": { "failedPct": 20 },
+  // optional: the place's backup build (see "Backup build"); these are the defaults
+  "backup": { "refresh": "auto", "healthyHours": 3 }
 }
 ```
 
@@ -204,7 +210,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 
 | Command | Does |
 |---|---|
-| `typetorch init [--dir <folder>] [--phase <name>] [--answers <file>] [--agent]` | the guided setup, from an empty folder to a live game (see "Setup"); `--agent` prints `AGENT_PROMPT.md` again |
+| `typetorch init [--dir <folder>] [--phase <name>] [--answers <file>] [--agent] [--teardown]` | the guided setup, from an empty folder to a live game (see "Setup"); `--agent` prints `AGENT_PROMPT.md` again; `--teardown` removes the backend step 6 installed (asks first; its data only when you say so) |
 | `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs rbxtsc (`bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first, then restore the build cache |
 | `typetorch upload [--no-build]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
 | `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: deploy message, durable head, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
@@ -226,19 +232,24 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
 | `typetorch servers [--branch] [--watch]` | live servers from the fleet API (see "Fleet") |
 | `typetorch alerts [--follow] [--level] [--since <min>]` | the fleet's alerts (see "Fleet") |
-| `typetorch backend setup [--url <url>] [--flush-seconds <s>] [--record-share <0-1>] [--dry-run] [--force]` | point game servers at the TypeTorch backend: checks, then the record's `backend` section (and the old `fleet`/`analytics` from it), ping, owner list, typetorch.json `backend.url` (see "Fleet") |
+| `typetorch backend setup [--url <url>] [--flush-seconds <s>] [--record-share <0-1>] [--dry-run] [--force] [--no-ping]` | point game servers at the TypeTorch backend: checks, then the record's `backend` section (and the old `fleet`/`analytics` from it), ping, owner list, typetorch.json `backend.url` (see "Fleet") |
+| `typetorch backend run [--backend-dir <checkout>] [--port <n>] [--cloudflared <path>]` | the backend on this PC behind a Cloudflare quick tunnel (no account): starts the backend checkout's server (default port 8787) with the two backend keys, opens the tunnel and runs `backend setup --url <tunnel>` each time the tunnel's address changes; restarts either when it drops. `init` sets it up (`.typetorch/backend.json`) and registers it as a login task; the current address is in `.typetorch/backend-run.json` |
+| `typetorch backend bless [--url <url>] [--no-open]` | trusts one browser for admin when you sign in with typetorch.dev: sends the public signing keys to the backend, signs its one-time challenge with the main prod key (it never leaves this PC) and opens the single-use link (5 minutes) |
 | `typetorch report <seq\|artifact\|latest> [--branch]` | what the servers did with one deploy; exits 1 when one failed or rolled back (see "Fleet") |
 | `typetorch keys init [--key-file]` / `keys init --fallback [--force] [--yes]` / `keys rotate [--yes]` / `keys resign` | the signing keys: see "Signing prod deploys" |
 | `typetorch pin <artifact> --branch <b> (--servers <ids> \| --pct <1-99>)` / `pin --unpin --branch <b> (--servers <ids> \| --all)` | A/B experiment pins, signed on prod-channel branches; `--by`, `--dry-run` |
 | `typetorch reject <id> [--reason]` / `typetorch proposals [--all]` | drop a proposal / list them |
 | `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n> \| --studio-export <file>]` | hot assets: export the instances marked `TypeTorchAsset` from the place's latest published version (or the Studio plugin's export), upload new and changed ones, write `typetorch.assets.lock.json`; see "Hot assets" |
 | `typetorch assets status` / `typetorch assets list` | export + diff without uploading / the lockfile |
-| `typetorch remote-claude --users <ids> [...]` | runs `typetorch-dev-server remote-claude` ([`@typetorch/dev-server`](https://github.com/typetorch/dev-server)) with the same arguments in this terminal, and exits with its code: devs prompt Claude Code on this machine from the in-game DEV > Claude tab (dev-channel branches only). Found in `TYPETORCH_DEV_SERVER` (an entry), `node_modules/@typetorch/dev-server` in the game repo or a parent, next to this CLI (`npm i -g @typetorch/dev-server`; with npx: `npx -p @typetorch/cli -p @typetorch/dev-server typetorch remote-claude ...`), or a sibling `../dev-server` checkout; else a clear error. It gets the real environment (the dev-server reads the key, `--env-file` / `TYPETORCH_ENV_FILE` and `.env` itself) |
-| `typetorch dev --users <ids> [...]` | the same as `typetorch remote-claude` |
-| `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--no-live] [--with <scripts>]` | the Studio dev loop in one process: rbxtsc -w, `rojo serve`, the game's `live` script (on by default when package.json has one; `--no-live` off), extra package.json scripts, and the control API the TypeTorch Studio plugin attaches to by itself; see "Studio: typetorch serve" |
-| `typetorch serve status` / `stop` / `restart <child>` / `logs [--studio] [--follow]` | the running server's children, attached Studios, sync state and compile errors / stop it / restart one child / its log |
-| `typetorch studio status` / `reconnect [--anyway]` / `play [--run]` / `stop` / `logs [--follow]` | drives the Studio the plugin attached: its sync state / resync from scratch / start / end a playtest / Studio's Output |
-| `typetorch studio install-plugin` | builds the TypeTorch Studio plugin into Studio's plugins folder |
+| `typetorch remote-claude [--users <ids>] [...]` | runs `typetorch-dev-server remote-claude` ([`@typetorch/dev-server`](https://github.com/typetorch/dev-server)) with the same arguments in this terminal, and exits with its code: devs prompt Claude Code on this machine from the in-game DEV > Claude tab (dev-channel branches only). `--users` is remembered once given; until then the dev-server (0.3+) defaults to the owners in typetorch.json `members`. Found in `TYPETORCH_DEV_SERVER` (an entry), `node_modules/@typetorch/dev-server` in the game repo or a parent, next to this CLI (`npm i -g @typetorch/dev-server`; with npx: `npx -p @typetorch/cli -p @typetorch/dev-server typetorch remote-claude ...`), or a sibling `../dev-server` checkout; else a clear error. It gets the real environment (the dev-server reads the key, `--env-file` / `TYPETORCH_ENV_FILE` and `.env` itself) |
+| `typetorch dev [--users <ids>] [...]` | the same as `typetorch remote-claude` |
+| `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--no-live] [--with <scripts>] [--dev-branch <b>]` | the Studio dev loop in one process: rbxtsc -w, `rojo serve`, the game's `live` script (on by default when package.json has one; `--no-live` off), extra package.json scripts, and the control API the TypeTorch Studio plugin attaches to by itself; `--dev-branch`: where the plugin's "Publish to dev" deploys hot assets (default `dev`); see "Studio: typetorch serve" |
+| `typetorch serve --remote [--remote-port <n>] [--url <your tunnel> \| --no-tunnel]` | also lets a Studio on another machine in: a gateway on `127.0.0.1:34890` behind an automatic Cloudflare quick tunnel (cloudflared installed if missing), and one pairing link to send; see "A Studio on another machine" |
+| `typetorch serve --claude [--claude-users <ids>]` | also runs remote-claude for the plugin's Claude tab; `--claude-users` defaults to the owners in typetorch.json (remembered once given); see "Claude in Studio" |
+| `typetorch serve pair [--url <tunnel URL>]` / `devices` / `unpair (--name <device> \| --all)` | another one-time pairing link (15 min) / the paired devices / revoke them |
+| `typetorch serve status` / `stop` / `restart <watch\|rojo\|claude\|<script>>` / `logs [--studio] [--since <seq>] [--limit <n>] [--follow]` | the running server's children, attached Studios, sync state, compile errors and pairing link / stop it / restart one child / its log |
+| `typetorch studio status` / `reconnect [--anyway] [--target <id\|edit>]` / `play [--run]` / `stop` / `logs [--since <seq>] [--limit <n>] [--follow]` | drives the Studio the plugin attached: its sync state / resync from scratch / start / end a playtest / Studio's Output. `--timeout <s>`: how long to wait for Studio (default 20) |
+| `typetorch studio install-plugin [--from <dir>]` | builds the TypeTorch Studio plugin (the game's devDependency `@typetorch/studio-plugin`, or `--from` a checkout) with Rojo into Studio's plugins folder as `TypeTorchSync.rbxm` |
 | `typetorch assets types [--out <file>]` | writes `src/shared/assets.gen.ts`: the hot asset keys with their classes and a `HotAssetKey` type (sync refreshes it once it exists) |
 | `typetorch mcp` | an MCP server on stdio with `serve` and `studio` as tools, for agents |
 | `typetorch migrate --from flamework [--dry-run] [--net compat\|native] [--report <file>] [--allow-dirty]` | the mechanical part of moving a Flamework 1.x game (see "Migrating from Flamework"); local only, no keys |
@@ -493,7 +504,9 @@ build's channel in brackets when it differs.
 `--with <script>`; the game's `live` script runs by default when package.json has one, `--no-live` turns it off)
 with one process, and adds a control API the **TypeTorch Studio plugin**
 ([typetorch/studio-plugin](https://github.com/typetorch/studio-plugin): `bun add -d @typetorch/studio-plugin`, then
-`typetorch studio install-plugin`) attaches to by itself.
+`typetorch studio install-plugin`) attaches to by itself. The plugin also ships as `TypeTorchSync.rbxm` on its
+[GitHub releases](https://github.com/typetorch/studio-plugin/releases/latest): drop that into Studio's plugins folder
+instead if you don't want the devDependency.
 
 - **Children.** `watch` runs the game's `watch` script (else `bun run rbxtsc -w`); `rojo` runs `rojo serve
   studio.project.json` (else `default.project.json`; `--project`) on Rojo's default port 34872 or the next free one, so
@@ -547,7 +560,8 @@ with one process, and adds a control API the **TypeTorch Studio plugin**
   `typetorch serve pair` makes another). A quick tunnel's address changes when cloudflared restarts, and serve then
   prints a new link. To use a tunnel you already run (a named Cloudflare tunnel routed to `http://localhost:34890`),
   pass `--url https://<your tunnel>`; `--no-tunnel` opens none and leaves `typetorch serve pair --url <it>` to you
-  (the URL is remembered, so later it's just `typetorch serve pair`). The other person pastes that link into the plugin's Remote card, and their Studio stays paired for 30
+  (the URL is remembered, so later it's just `typetorch serve pair`). `serve --remote --detach` waits for the tunnel
+  and prints the link (`link` in `--json`) before it returns. The other person pastes that link into the plugin's Remote card, and their Studio stays paired for 30
   days (`serve devices`, `serve unpair --name <device>|--all`). Every request but pairing needs that device's token
   (kept hashed in `.typetorch/serve-remote.json`). A remote Studio syncs code read-only through Rojo (never Rojo's
   `write` or `open`), reports its state and Output, and runs the hot asset buttons (uploads with your keys, deploys only
@@ -556,12 +570,14 @@ with one process, and adds a control API the **TypeTorch Studio plugin**
   tries until you make a new code.
 - **Claude in Studio** (`serve --claude`). serve also runs remote-claude (`typetorch remote-claude`, from
   `@typetorch/dev-server`) on this machine without a tunnel, and the plugin's **Claude** tab prompts it: Claude Code
-  edits this branch (Code mode; the branch must be dev-channel), then the tab shows Deploy or Discard, as the in-game
-  DEV > Claude tab does. `--claude-users <ids>` lists the Roblox user ids allowed (remembered; before that, the owners in `typetorch.json`),
+  edits a copy of this branch (Code mode; a prod-channel branch works too, on `remote-claude/<branch>`), then the tab
+  shows **Apply** (the change goes into this checkout, uncommitted, so Rojo syncs it to Studio), **Deploy to dev**
+  (`--dev-branch`) and **Discard**. Needs `@typetorch/dev-server` 0.3.4 or later. `--claude-users <ids>` lists the Roblox user ids allowed (remembered; before that, the owners in `typetorch.json`),
   so add a remote helper's id there too: a remote Studio prompts as the Roblox user it paired with, and serve pairs with
   remote-claude for them (nobody handles a remote-claude code). A remote-claude you start yourself in the repo works the
-  same way (serve finds it through `.typetorch/remote-claude.session.json`). The tab has the in-game tab's options too:
-  Live mode (the game tools answer from a running playtest), Toolbox, screenshots, logs and recent chats; the chat
+  same way (serve finds it through `.typetorch/remote-claude.session.json`). The tab sends Code only (the Live / Code
+  pill just points you to the in-game DEV > Claude tab for Live) and has the in-game tab's other options: Toolbox,
+  screenshots, logs and recent chats; the chat
   follows you between Edit and Play (serve keeps it per user while remote-claude runs). Replies stream to the tab over
   a WebSocket (`/tt/claude/stream`, through the tunnel too), so they show as Claude writes them.
 
@@ -717,8 +733,9 @@ signed A/B pins: `typetorch pin <artifact> --branch prod --pct <1-99>`).
 
 ### No GitHub Actions
 
-TypeTorch doesn't use or ship GitHub Actions (owner decision: they are a common supply-chain risk). Builds,
-cloud tests and deploys run from a developer's machine. `approve --import <dir>` works in any automation you choose to
+TypeTorch doesn't use or ship GitHub Actions for games (owner decision: they are a common supply-chain risk). Game
+builds, cloud tests and deploys run from a developer's machine. (This repo's own CI and npm releases are the exception:
+see "Develop".) `approve --import <dir>` works in any automation you choose to
 run yourself.
 
 ### Kernel deploy
@@ -853,12 +870,17 @@ processes, PATH lookup, Windows `.cmd` scripts (Node won't spawn them directly: 
 node; any other `.cmd` goes through cmd.exe with every argument quoted and escaped, and arguments with a double quote
 or a line break are refused), sleep and zstd live in `src/runtime.ts`, on Node's own modules. The build compiles with
 `types: ["node"]`, so a Bun global in `src/` doesn't compile. `prepublishOnly` runs the build, `bun test` and the
-pack smoke test. Releases go out from GitHub Actions (`.github/workflows/publish.yml`): bump and tag on main with
-`npm version <x.y.z> -m "release %s" && git push origin main --follow-tags`, and the tag's workflow checks that it
-matches package.json, publishes with provenance (a `-pre` version to the `next` dist-tag) and makes the GitHub release.
-npm auth is trusted publishing (this repo and `publish.yml` as a trusted publisher of @typetorch/cli on npmjs.com) or an
-`NPM_TOKEN` repository secret. `.github/workflows/ci.yml` runs the typecheck, `bun test` (with Lune and Rojo), the build
-and the pack smoke test on every push to main and every PR.
+pack smoke test.
+
+**Releases are tag-only.** Nobody runs `npm publish` by hand: pushing a version tag publishes. Bump and tag on main
+with `npm version <x.y.z> -m "release %s" && git push origin main --follow-tags`; the tag (`v*`) starts
+`.github/workflows/publish.yml`, which checks that the tag matches package.json and that the version isn't on npm yet,
+runs `npm publish --provenance` (which runs `prepublishOnly`; a prerelease such as `0.13.0-next.0` goes to the `next`
+dist-tag, anything else to `latest`) and makes the GitHub release with generated notes. npm auth is **trusted
+publishing** (OIDC: this repo and `publish.yml` are a trusted publisher of @typetorch/cli on npmjs.com), so no npm
+token is needed; the workflow still passes an `NPM_TOKEN` repository secret if one is set. `.github/workflows/ci.yml`
+runs the typecheck, `bun test` (with Lune and Rojo), the build and the pack smoke test on every push to main and
+every PR.
 
 `bun run compile` builds a single binary (`release/typetorch`).
 
