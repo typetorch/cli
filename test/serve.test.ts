@@ -310,6 +310,26 @@ describe("Supervisor", () => {
 		expect(supervisor.status()[0].state).toBe("stopped");
 	});
 
+	test("prepare picks the command before every start (Rojo moving off a taken port)", async () => {
+		const lines: string[] = [];
+		const supervisor = new Supervisor((source, _stream, line) => lines.push(`${source}: ${line}`));
+		let starts = 0;
+		supervisor.add({
+			name: "rojo",
+			command: ["unused"],
+			cwd: process.cwd(),
+			prepare: async () => {
+				starts++;
+				return [process.execPath, "-e", `console.log('port ${34872 + starts}'); process.exit(1)`];
+			},
+		});
+		await Bun.sleep(1200);
+		await supervisor.stopAll();
+		expect(lines).toContain("rojo: port 34873");
+		expect(lines).toContain("rojo: port 34874");
+		expect(supervisor.status()[0].command[2]).toContain("console.log('port");
+	});
+
 	test("a child that won't start is reported, not thrown", () => {
 		const lines: string[] = [];
 		const supervisor = new Supervisor((source, _stream, line) => lines.push(`${source}: ${line}`));
@@ -333,5 +353,21 @@ describe("studio install-plugin", () => {
 		} finally {
 			rmSync(game, { recursive: true, force: true });
 		}
+	});
+});
+
+describe("orphans of a killed serve", () => {
+	test("a recorded child that is still the same program is stopped; others are left alone", async () => {
+		const { stopOrphans } = await import("../src/serve/client");
+		const sleeper = Bun.spawn([process.execPath, "-e", "setTimeout(() => {}, 60000)"]);
+		const lines: string[] = [];
+		const file = { port: 1, pid: 999999, rojoPort: 1, startedAt: "", root: "", children: [
+			{ name: "rojo", pid: sleeper.pid, program: "not-this-program" },
+		] };
+		expect(stopOrphans(file, (text) => lines.push(text))).toBe(0); // the pid now runs something else: untouched
+		file.children[0].program = process.execPath.split("/").pop()!;
+		expect(stopOrphans(file, (text) => lines.push(text))).toBe(1);
+		await sleeper.exited;
+		expect(lines[0]).toContain("stopped rojo");
 	});
 });

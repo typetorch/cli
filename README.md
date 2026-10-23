@@ -243,7 +243,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch assets status` / `typetorch assets list` | export + diff without uploading / the lockfile |
 | `typetorch remote-claude [--users <ids>] [...]` | runs `typetorch-dev-server remote-claude` ([`@typetorch/dev-server`](https://github.com/typetorch/dev-server)) with the same arguments in this terminal, and exits with its code: devs prompt Claude Code on this machine from the in-game DEV > Claude tab (dev-channel branches only). `--users` is remembered once given; until then the dev-server (0.3+) defaults to the owners in typetorch.json `members`. Found in `TYPETORCH_DEV_SERVER` (an entry), `node_modules/@typetorch/dev-server` in the game repo or a parent, next to this CLI (`npm i -g @typetorch/dev-server`; with npx: `npx -p @typetorch/cli -p @typetorch/dev-server typetorch remote-claude ...`), or a sibling `../dev-server` checkout; else a clear error. It gets the real environment (the dev-server reads the key, `--env-file` / `TYPETORCH_ENV_FILE` and `.env` itself) |
 | `typetorch dev [--users <ids>] [...]` | the same as `typetorch remote-claude` |
-| `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--live] [--with <scripts>] [--dev-branch <b>]` | the Studio dev loop in one process: rbxtsc -w, `rojo serve`, extra package.json scripts, and the control API the TypeTorch Studio plugin attaches to by itself; `--dev-branch`: where the plugin's "Publish to dev" deploys hot assets (default `dev`); see "Studio: typetorch serve" |
+| `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--no-live] [--with <scripts>] [--dev-branch <b>]` | the Studio dev loop in one process: rbxtsc -w, `rojo serve`, the game's `live` script (on by default when package.json has one; `--no-live` off), extra package.json scripts, and the control API the TypeTorch Studio plugin attaches to by itself; `--dev-branch`: where the plugin's "Publish to dev" deploys hot assets (default `dev`); see "Studio: typetorch serve" |
 | `typetorch serve --remote [--remote-port <n>] [--url <your tunnel> \| --no-tunnel]` | also lets a Studio on another machine in: a gateway on `127.0.0.1:34890` behind an automatic Cloudflare quick tunnel (cloudflared installed if missing), and one pairing link to send; see "A Studio on another machine" |
 | `typetorch serve --claude [--claude-users <ids>]` | also runs remote-claude for the plugin's Claude tab; `--claude-users` defaults to the owners in typetorch.json (remembered once given); see "Claude in Studio" |
 | `typetorch serve pair [--url <tunnel URL>]` / `devices` / `unpair (--name <device> \| --all)` | another one-time pairing link (15 min) / the paired devices / revoke them |
@@ -501,7 +501,8 @@ build's channel in brackets when it differs.
 ### Studio: typetorch serve
 
 `typetorch serve` replaces the terminals of the Studio loop (`bun run watch`, `bun run studio`, and anything else with
-`--with <script>`; `--live` = `--with live`) with one process, and adds a control API the **TypeTorch Studio plugin**
+`--with <script>`; the game's `live` script runs by default when package.json has one, `--no-live` turns it off)
+with one process, and adds a control API the **TypeTorch Studio plugin**
 ([typetorch/studio-plugin](https://github.com/typetorch/studio-plugin): `bun add -d @typetorch/studio-plugin`, then
 `typetorch studio install-plugin`) attaches to by itself. The plugin also ships as `TypeTorchSync.rbxm` on its
 [GitHub releases](https://github.com/typetorch/studio-plugin/releases/latest): drop that into Studio's plugins folder
