@@ -3,6 +3,7 @@
  *   watch  the game's "watch" script (rbxtsc -w; the template's also writes build-info), else `bun run rbxtsc -w`
  *   rojo   `rojo serve <project> --port <p>` on Rojo's default port or the next free one
  *   extra  each `--with <script>`, and the game's "live" script (on by default, `--no-live` off): `bun run <script>`
+ * Rojo is restarted when a `$path` folder of the project is deleted and recreated under it (pathwatch.ts).
  * plus the control API (server.ts) the TypeTorch Studio plugin attaches to by itself. Ctrl+C (or `typetorch serve
  * stop`) stops everything. `.typetorch/serve.json` tells the other commands where the control API is.
  */
@@ -23,6 +24,8 @@ import { RemoteGateway } from "./remote.ts";
 import { ensureCloudflared, QuickTunnel } from "./tunnel.ts";
 import { ControlServer } from "./server.ts";
 import { Supervisor } from "./supervisor.ts";
+import { PathWatch, watchedPaths } from "./pathwatch.ts";
+import { parseJsonc } from "../json.ts";
 
 export interface ServeOptions {
 	cwd: string;
@@ -157,11 +160,21 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 		command: options.jobCommand,
 	});
 	let remoteState: NonNullable<ServeStatus["remote"]> | undefined;
+	let pathWatch: PathWatch | undefined;
 	const control = new ControlServer({
 		hello,
-		status: () => ({ hello: hello(), children: supervisor.status(), compile: compile.snapshot(), ...(remoteState ? { remote: { ...remoteState } } : {}) }),
+		status: () => ({
+			hello: hello(),
+			children: supervisor.status(),
+			compile: compile.snapshot(),
+			...(remoteState ? { remote: { ...remoteState } } : {}),
+			...(pathWatch && (pathWatch.last || pathWatch.missing().length) ? { rojoPaths: { missing: pathWatch.missing(), lastRestart: pathWatch.last } } : {}),
+		}),
 		stop: () => void stop(),
-		restart: (child) => supervisor.restart(child),
+		restart: (child) => {
+			if (child === "rojo") pathWatch?.rebase();
+			return supervisor.restart(child);
+		},
 		jobs,
 		assets: () => assetsSummary(root, options.devBranch ?? "dev"),
 		pairing: options.remotePort !== undefined ? new Pairing(root) : undefined,
@@ -217,6 +230,22 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 			return rojoCommand(rojoPort);
 		},
 	});
+	// Rojo can't follow a `$path` folder that is deleted and recreated (a deploy's git clean of out/): restart it.
+	let projectJson: unknown;
+	try {
+		projectJson = parseJsonc(readFileSync(join(root, projectFile), "utf8"));
+	} catch (error) {
+		log("serve", "warn", `can't read ${projectFile} (${(error as Error).message}): Rojo won't be restarted when out/ is recreated`);
+	}
+	pathWatch = new PathWatch({
+		root,
+		paths: watchedPaths(projectJson),
+		onRecreated: (paths) => {
+			log("serve", "warn", `${paths.join(", ")} was deleted and recreated; Rojo can't follow that, restarting it`);
+			void supervisor.restart("rojo");
+		},
+	});
+	pathWatch.start();
 	for (const name of options.extra) supervisor.add({ name, command: ["bun", "run", name], cwd: root });
 	if (options.claude) {
 		const users = options.claude.users ? ["--users", options.claude.users] : [];
@@ -275,6 +304,7 @@ export async function startServe(options: ServeOptions): Promise<RunningServe> {
 	async function stop() {
 		stopping ??= (async () => {
 			log("serve", "info", "stopping");
+			pathWatch?.stop();
 			await supervisor.stopAll();
 			tunnel?.stop();
 			await remote?.close();

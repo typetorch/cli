@@ -89,6 +89,11 @@ export interface ServeStatus {
 	 * serve printed for it (`<url>#<code>`, one use, until linkExpiresAt). Local callers only see the link.
 	 */
 	remote?: { port: number; tunnel: "quick" | "own" | "none"; url?: string; link?: string; linkExpiresAt?: string };
+	/**
+	 * `$path` folders deleted and recreated under Rojo (pathwatch.ts): those still missing, and the last time serve
+	 * restarted Rojo for it. Absent while nothing happened.
+	 */
+	rojoPaths?: { missing: string[]; lastRestart?: { at: string; paths: string[] } };
 }
 
 /**
