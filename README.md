@@ -352,10 +352,11 @@ and writes nothing.
   `TYPETORCH_DEBUG_MACROS` (`1`/`0`); `@typetorch/transformer` 0.3+ declares the macros itself
   (`@typetorch/transformer/macros`) and strips them when the variable is `0`, so such a project needs no
   `rbxts-transform-debug`. The generated `src/shared/build.ts` imports from whichever of the two is installed (the
-  transformer's when it ships `macros.d.ts`). A project still on `rbxts-transform-debug` has its prod builds compiled
-  with a generated `.tsconfig.typetorch.json` (deleted afterwards) whose first plugin is a CLI transformer doing the same
-  stripping; the CLI appends `-p .tsconfig.typetorch.json` to a build script that ends with `rbxtsc` (else it runs
-  rbxtsc directly).
+  transformer's when it ships `macros.d.ts`). Prod builds compile with a generated `.tsconfig.typetorch.json` (deleted
+  afterwards): once `rbxts-transform-debug` is uninstalled it only adds `debugMacros: false` to the transformer's
+  plugin entry (a different plugin list, so rbxtsc's incremental state never reuses dev outputs for prod); while it is
+  still installed, the first plugin is a CLI transformer doing the same stripping. The CLI appends
+  `-p .tsconfig.typetorch.json` to a build script that ends with `rbxtsc` (else it runs rbxtsc directly).
 
 ### Deploy message
 
