@@ -54,6 +54,7 @@ import { bold, captureJson, debug, dim, emitJson, formatBytes, formatSeconds, in
 import { branchChannel, branchNameError } from "../naming.ts";
 import { ApiError, type OpenCloud } from "../opencloud.ts";
 import { ASSETS_SYNC_LOCK, withStateLock } from "../state.ts";
+import { diffAsset, keepBaselines, readBaseline, type AssetDiff } from "../assetdiff.ts";
 import { KEY_FILE_FLAGS, openCloud, project, projectStateDir } from "./common.ts";
 import { deployCommand } from "./deploy.ts";
 
@@ -187,6 +188,19 @@ function changeJson(change: AssetChange, outcome?: Outcome) {
 	};
 }
 
+/**
+ * A status change's `diff` (the plugin's Diff button): the state dir's copy of the lockfile's version against the
+ * export. Without a copy (synced elsewhere, or before this CLI kept copies) it summarizes the export alone.
+ */
+function diffFor(stateDir: string, change: AssetChange): AssetDiff {
+	const before = change.locked ? readBaseline(stateDir, change.locked.hash) : undefined;
+	const note =
+		change.locked && !before
+			? `no copy of version ${change.locked.n} (${change.locked.hash}) on this machine: it was synced elsewhere or before copies were kept; a sync here keeps one`
+			: undefined;
+	return diffAsset(before, change.exported?.bytes, note);
+}
+
 const MARK: Record<AssetChange["status"], string> = { added: "+", updated: "~", removed: "-", unchanged: "=" };
 
 function printChanges(changes: AssetChange[]) {
@@ -246,6 +260,13 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 	const placed = await watch.stage("export", async () => (studioExport !== undefined ? exportStudio(proj, studioExport) : exportPlace(oc, proj, flagString(args, "place-version"))));
 	const changes = diffAssets(lock, placed.result.assets);
 	const counts = countChanges(changes);
+	// A copy of each export by hash (for the plugin's Diff), dropping the ones no lockfile entry or export refers to.
+	const stateDir = projectStateDir(proj);
+	keepBaselines(
+		stateDir,
+		placed.result.assets,
+		Object.values(lock?.assets ?? {}).map((entry) => entry.hash),
+	);
 	const pending = changes.filter((c) => c.status === "added" || c.status === "updated");
 	const saves = placed.newerSaves ? `; ${placed.newerSaves} newer unpublished save(s) not included` : "";
 	info(
@@ -276,7 +297,15 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 	const lockPlaceVersion = placed.base === "studio" && !entriesChange && lock ? lock.placeVersion : placed.placeVersion;
 	const lockChanges = entriesChange || (lock ? lock.placeVersion !== lockPlaceVersion : placed.result.assets.length > 0);
 	if (dryRun) {
-		if (isJson()) return emitJson({ ...base, mode, dryRun: true, upToDate: !lockChanges, changes: changes.map((c) => changeJson(c)) });
+		if (isJson()) {
+			return emitJson({
+				...base,
+				mode,
+				dryRun: true,
+				upToDate: !lockChanges,
+				changes: changes.map((c) => ({ ...changeJson(c), ...(c.status === "unchanged" ? {} : { diff: diffFor(stateDir, c) }) })),
+			});
+		}
 		info(
 			!lockChanges
 				? dim(`up to date: nothing to upload or write`)
@@ -293,7 +322,6 @@ async function syncCommand(args: ParsedArgs, deps: AssetsDeps, mode: "sync" | "s
 		);
 	}
 
-	const stateDir = projectStateDir(proj);
 	const outcomes = new Map<string, Outcome>();
 	const { next, written, changed } = await withStateLock(
 		stateDir,

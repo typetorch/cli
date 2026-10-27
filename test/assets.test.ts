@@ -4,7 +4,7 @@
  * fetch: no real network, and the API key is a fake.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseArgs, type ParsedArgs } from "../src/args";
@@ -462,6 +462,34 @@ describe("typetorch assets sync --studio-export", () => {
 		const root = gameProject();
 		mockCloud();
 		await expect(run(root, ["status", "--studio-export", studioFile(root, [SHOP], "999")])).rejects.toThrow(/place 999/);
+	});
+	test("status --json: each change carries a diff; a run keeps a copy of each export for the next one's baseline", async () => {
+		const root = gameProject(lockOf({ "ui/shop": { id: 700, hash: hashOf(SHOP), path: "ReplicatedStorage/Assets/UI", className: "ScreenGui" }, "fx/gone": { id: 702 } }, 57));
+		mockCloud();
+		// The first check keeps ui/shop's bytes (the lockfile's version) in .typetorch/hot-assets.
+		const first = await run(root, ["status", "--studio-export", studioFile(root, [SHOP])]);
+		expect(first.changes.find((c: any) => c.key === "ui/shop").diff).toBeUndefined();
+		expect(first.changes.find((c: any) => c.key === "fx/gone").diff).toMatchObject({ baseline: "none", entries: [], note: expect.stringContaining("no copy of version 3 (000000000000)") });
+		expect(existsSync(join(root, ".typetorch", "hot-assets", `${hashOf(SHOP)}.rbxm`))).toBe(true);
+		// The second check compares the edited export with that copy.
+		const edited: FakeAsset = { ...SHOP, children: [{ className: "Frame", name: "Card", parent: 0, attributes: { Big: true } }, { className: "TextButton", name: "Buy", parent: 0 }] };
+		const json = await run(root, ["status", "--studio-export", studioFile(root, [edited, CRATE])]);
+		const shop = json.changes.find((c: any) => c.key === "ui/shop");
+		expect(shop.status).toBe("updated");
+		expect(shop.diff).toMatchObject({
+			baseline: "state",
+			before: { instances: 2 },
+			after: { instances: 3, classes: { ScreenGui: 1, Frame: 1, TextButton: 1 } },
+			entries: [
+				{ kind: "added", path: "Shop/Buy", className: "TextButton" },
+				{ kind: "changed", path: "Shop/Card", className: "Frame", props: [{ name: "Attributes", from: "", to: "Big=true" }] },
+			],
+			more: 0,
+		});
+		expect(json.changes.find((c: any) => c.key === "props/crate").diff).toMatchObject({ baseline: "none", after: { instances: 1, classes: { Model: 1 } } });
+		expect(json.changes.find((c: any) => c.key === "ui/shop").diff.note).toBeUndefined();
+		// Both versions of ui/shop are kept (the lockfile's and the export's); the second run's crate too.
+		expect(readdirSync(join(root, ".typetorch", "hot-assets")).sort()).toEqual([`${hashOf(CRATE)}.rbxm`, `${hashOf(SHOP)}.rbxm`, `${hashOf(edited)}.rbxm`].sort());
 	});
 });
 
