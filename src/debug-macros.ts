@@ -1,8 +1,14 @@
 /**
  * Per-channel debug macros (security audit S-L7). Dev-channel builds compile with the game's tsconfig.json as is, so
- * rbxts-transform-debug's `$print`/`$warn`/`$dbg`/`$assert`/`$error` keep their `[src/file.ts:line]` prefixes.
- * Prod-channel builds compile with a generated copy of it (PROD_TSCONFIG, deleted after the build) whose plugin list
- * starts with a small transformer the CLI writes into `.typetorch/` (STRIP_TRANSFORMER_FILE):
+ * the `$print`/`$warn`/`$dbg`/`$assert`/`$error` macros keep their `[src/file.ts:line]` prefixes.
+ *
+ * The macros come from one of two places. @typetorch/transformer 0.3+ declares them itself
+ * (`@typetorch/transformer/macros`) and strips them on its own when TYPETORCH_DEBUG_MACROS is "0", which every prod
+ * compile sets: nothing below is needed for such a project, and rbxts-transform-debug can be removed from it
+ * (`debugMacroModule` picks the import for the generated build.ts). Projects still on rbxts-transform-debug need the
+ * rest of this file: prod-channel builds compile with a generated copy of the tsconfig (PROD_TSCONFIG, deleted after
+ * the build) whose plugin list starts with a small transformer the CLI writes into `.typetorch/`
+ * (STRIP_TRANSFORMER_FILE):
  *   $print(...), $warn(...)  removed (their arguments are not evaluated)
  *   $dbg(x)                  x (a statement `$dbg(x)` keeps only a call)
  *   $assert(c, m?)           assert(c, m?)      no source path or expression text
@@ -22,10 +28,22 @@ import { isRecord, parseJsonc } from "./json.ts";
 import type { Channel } from "./naming.ts";
 
 export const DEBUG_TRANSFORM = "rbxts-transform-debug";
+export const TYPETORCH_TRANSFORM = "@typetorch/transformer";
+/** Where @typetorch/transformer 0.3+ declares the debug macros (the package ships `macros.d.ts` at its root). */
+export const TRANSFORMER_MACROS = "@typetorch/transformer/macros";
 export const STRIP_TRANSFORMER_FILE = ".typetorch/strip-debug-macros.cjs";
 export const PROD_TSCONFIG = ".tsconfig.typetorch.json";
 /** Bump when the transformer changes: the plugin config is part of rbxtsc's incremental-build hash. */
 export const STRIP_TRANSFORMER_VERSION = 1;
+
+/**
+ * The module the generated build.ts imports `$git`/`$compileTime` from: the transformer's own macros when the
+ * installed @typetorch/transformer declares them (0.3+), else rbxts-transform-debug. A project may have both installed
+ * during a migration; the transformer handles both.
+ */
+export function debugMacroModule(root: string): string {
+	return existsSync(join(root, "node_modules", "@typetorch", "transformer", "macros.d.ts")) ? TRANSFORMER_MACROS : DEBUG_TRANSFORM;
+}
 
 /** Whether a channel's builds keep the debug macros (dev: yes, prod: no). */
 export function debugMacrosFor(channel: Channel): boolean {
@@ -79,20 +97,32 @@ module.exports = function stripDebugMacros(program, _config, extras) {
 };
 `;
 
+/** Whether a project's prod builds need the CLI's strip transformer: only while rbxts-transform-debug is installed. */
+export function needsStripTransformer(root: string): boolean {
+	return existsSync(join(root, "node_modules", DEBUG_TRANSFORM));
+}
+
 /**
- * The prod tsconfig: the game's tsconfig.json (JSONC) with the strip transformer first and rbxts-transform-debug
- * disabled. Everything else (paths are relative to the project root, where the copy is written) stays the same.
+ * The prod tsconfig: the game's tsconfig.json (JSONC) with the debug macros turned off. Everything else (paths are
+ * relative to the project root, where the copy is written) stays the same.
+ *
+ * With rbxts-transform-debug installed (`strip`): the CLI's strip transformer first and rbxts-transform-debug
+ * disabled. Without it, @typetorch/transformer strips its own macros (TYPETORCH_DEBUG_MACROS=0 does that already);
+ * its plugin entry gets `debugMacros: false` so the plugin list differs from the dev one: rbxtsc hashes the plugin
+ * config into its buildinfo, which keeps a non-clean prod build from reusing dev outputs that still hold the macros.
  */
-export function prodTsconfig(original: unknown): Record<string, any> {
+export function prodTsconfig(original: unknown, strip = true): Record<string, any> {
 	const config: Record<string, any> = isRecord(original) ? structuredClone(original) : {};
 	const options: Record<string, any> = isRecord(config.compilerOptions) ? config.compilerOptions : {};
 	const plugins: unknown[] = Array.isArray(options.plugins) ? options.plugins : [];
-	options.plugins = [
-		{ transform: `./${STRIP_TRANSFORMER_FILE}`, version: STRIP_TRANSFORMER_VERSION },
-		...plugins.map((plugin) =>
-			isRecord(plugin) && plugin.transform === DEBUG_TRANSFORM ? { ...plugin, enabled: false } : plugin,
-		),
-	];
+	options.plugins = strip
+		? [
+				{ transform: `./${STRIP_TRANSFORMER_FILE}`, version: STRIP_TRANSFORMER_VERSION },
+				...plugins.map((plugin) =>
+					isRecord(plugin) && plugin.transform === DEBUG_TRANSFORM ? { ...plugin, enabled: false } : plugin,
+				),
+			]
+		: plugins.map((plugin) => (isRecord(plugin) && plugin.transform === TYPETORCH_TRANSFORM ? { ...plugin, debugMacros: false } : plugin));
 	config.compilerOptions = options;
 	return config;
 }
