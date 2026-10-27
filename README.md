@@ -640,7 +640,7 @@ versions without a restart (the framework's `hotAsset`). Guide: [Hot assets](htt
   values cut at 48 characters, the rest counted in `more` / `moreProps`). The lockfile holds only a hash, so the
   previous version's bytes come from the state dir: every `status` and `sync` keeps a copy of each export in
   `.typetorch/hot-assets/<hash>.rbxm` and drops the copies no lockfile entry or export refers to. Without a copy
-  (synced on another machine, or before 0.12.2) `baseline` is `"none"`, the `note` says so and only the export's
+  (synced on another machine, or before 0.15.0) `baseline` is `"none"`, the `note` says so and only the export's
   summary is given; the next sync here fills the gap. **`typetorch assets list`:** the lockfile.
 - **Lockfile** (`typetorch.assets.lock.json`, keys sorted, one line per asset):
 
