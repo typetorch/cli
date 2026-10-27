@@ -394,7 +394,7 @@ export function encodeChunk(name: string, data: Uint8Array, compression: ChunkCo
 	return concatBytes([header, stored]);
 }
 
-function fileHeader(classes: number, instances: number): Uint8Array {
+export function fileHeader(classes: number, instances: number): Uint8Array {
 	const header = new Uint8Array(32);
 	header.set(textBytes(MAGIC), 0);
 	header.set(SIGNATURE, 8);

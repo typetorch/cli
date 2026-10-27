@@ -124,5 +124,18 @@ export interface CommandResult {
 	error?: string;
 }
 
+/**
+ * Hot assets (the panel's Hot assets card; jobs.ts):
+ *   GET /tt/assets   the lockfile's entries: `assets[key] = { className, path, hash }` (`hash` since CLI 0.12.2: the
+ *                    plugin compares it with the last check's to see whether the lockfile moved under it).
+ *   POST /tt/jobs    `{ kind: "assets-status" | "assets-sync" | "assets-deploy-dev", export? }` runs the command on
+ *                    the plugin's export; GET /tt/jobs?id= follows it. A done job's `result` is the command's --json
+ *                    answer: for assets-status, every `changes[]` entry that isn't "unchanged" carries a `diff`
+ *                    (AssetDiff, CLI 0.12.2+): what the plugin's Diff button shows. The plugin's automatic check
+ *                    (every 30 s while the panel is open) posts the same job only when the export or the lockfile
+ *                    changed since the last check.
+ */
+export type { AssetDiff, AssetDiffEntry, AssetDiffProp, TreeSummary } from "../assetdiff.ts";
+
 /** The Luau line that asks a stuck plugin to reconnect (Studio command bar or the Roblox Studio MCP's execute_luau). */
 export const RECONNECT_LUAU = `game:GetService("ServerStorage"):SetAttribute("TypeTorchReconnect", os.time())`;

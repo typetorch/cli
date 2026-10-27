@@ -111,8 +111,8 @@ export function assetsSummary(root: string, devBranch: string) {
 	} catch (error) {
 		return { lockfile: false, error: (error as Error).message, devBranch, assets: {} };
 	}
-	const assets: Record<string, { className: string; path: string }> = {};
-	for (const [key, entry] of Object.entries(lock?.assets ?? {})) assets[key] = { className: entry.className, path: entry.path };
+	const assets: Record<string, { className: string; path: string; hash: string }> = {};
+	for (const [key, entry] of Object.entries(lock?.assets ?? {})) assets[key] = { className: entry.className, path: entry.path, hash: entry.hash };
 	return { lockfile: Boolean(lock), placeVersion: lock?.placeVersion, devBranch, assets };
 }
 

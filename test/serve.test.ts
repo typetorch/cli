@@ -10,6 +10,7 @@ import { handleMessage, TOOLS } from "../src/commands/mcp";
 import { RECONNECT_LUAU, type CommandResult, type Hello, type StudioCommand } from "../src/serve/protocol";
 import { ControlServer } from "../src/serve/server";
 import { JobRunner, STUDIO_EXPORT_FILE, type Job } from "../src/serve/jobs";
+import { assetsSummary } from "../src/serve/run";
 import { assetsTypesSource } from "../src/assets";
 import { Supervisor } from "../src/serve/supervisor";
 import { PathWatch, watchedPaths } from "../src/serve/pathwatch";
@@ -294,6 +295,21 @@ describe("hot asset jobs", () => {
 		expect(text).toContain('\t"box": "Model",\n\t"ui/shop": "Frame",');
 		expect(text).toContain("export type HotAssetKey = keyof typeof HOT_ASSETS;");
 		expect(assetsTypesSource(undefined)).toContain("export type HotAssetKey = never;");
+	});
+
+	test("GET /tt/assets: each lockfile entry's class, path and hash (the plugin's cheap lockfile-changed signal)", () => {
+		const root = mkdtempSync(join(tmpdir(), "tt-assets-summary-"));
+		try {
+			writeFileSync(
+				join(root, "typetorch.assets.lock.json"),
+				JSON.stringify({ v: 1, placeVersion: 3, assets: { "ui/shop": { id: 1, ver: 2, n: 1, hash: "abcdef012345", realm: "replicated", path: "ReplicatedStorage", className: "Frame" } } }),
+			);
+			expect(assetsSummary(root, "dev")).toEqual({ lockfile: true, placeVersion: 3, devBranch: "dev", assets: { "ui/shop": { className: "Frame", path: "ReplicatedStorage", hash: "abcdef012345" } } });
+			rmSync(join(root, "typetorch.assets.lock.json"));
+			expect(assetsSummary(root, "dev")).toEqual({ lockfile: false, placeVersion: undefined, devBranch: "dev", assets: {} });
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 
