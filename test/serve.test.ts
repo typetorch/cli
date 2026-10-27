@@ -12,6 +12,7 @@ import { ControlServer } from "../src/serve/server";
 import { JobRunner, STUDIO_EXPORT_FILE, type Job } from "../src/serve/jobs";
 import { assetsTypesSource } from "../src/assets";
 import { Supervisor } from "../src/serve/supervisor";
+import { PathWatch, watchedPaths } from "../src/serve/pathwatch";
 
 const PORTS = [45880, 45881, 45882];
 
@@ -336,6 +337,77 @@ describe("Supervisor", () => {
 		supervisor.add({ name: "ghost", command: ["definitely-not-a-real-binary-tt"], cwd: process.cwd(), restart: false });
 		expect(supervisor.status()[0].state).toBe("exited");
 		expect(lines[0]).toContain("could not start");
+	});
+});
+
+describe("PathWatch (Rojo and a recreated $path folder)", () => {
+	test("the project's distinct $path values", () => {
+		const tree = { tree: { $className: "DataModel", A: { $path: "out/server" }, B: { $path: "out/server/" }, C: { D: { $path: "include" } } } };
+		expect(watchedPaths(tree)).toEqual(["out/server", "include"]);
+		expect(watchedPaths(undefined)).toEqual([]);
+	});
+
+	test("a folder deleted and recreated is reported once it exists and has settled; a file or a new child is not", () => {
+		const root = mkdtempSync(join(tmpdir(), "tt-pathwatch-"));
+		try {
+			mkdirSync(join(root, "out", "server"), { recursive: true });
+			writeFileSync(join(root, "out", "server", "boot.luau"), "return {}");
+			writeFileSync(join(root, "kernel.luau"), "-- a file $path");
+			let now = 0;
+			const reported: string[][] = [];
+			const watch = new PathWatch({ root, paths: ["out/server", "kernel.luau", "missing"], settleMs: 3000, now: () => now, onRecreated: (paths) => reported.push(paths) });
+			writeFileSync(join(root, "out", "server", "other.luau"), "return {}");
+			writeFileSync(join(root, "kernel.luau"), "-- edited");
+			expect(watch.tick()).toEqual([]);
+
+			rmSync(join(root, "out"), { recursive: true, force: true });
+			now = 1000;
+			expect(watch.tick()).toEqual([]);
+			expect(watch.missing()).toEqual(["out/server"]);
+			now = 10_000;
+			expect(watch.tick()).toEqual([]); // still missing: nothing to restart Rojo for yet
+
+			mkdirSync(join(root, "out", "server"), { recursive: true });
+			now = 11_000;
+			expect(watch.tick()).toEqual([]); // just recreated: waits for the settle
+			expect(watch.missing()).toEqual([]);
+			now = 14_000;
+			expect(watch.tick()).toEqual(["out/server"]);
+			expect(reported).toEqual([["out/server"]]);
+			expect(watch.last?.paths).toEqual(["out/server"]);
+			now = 20_000;
+			expect(watch.tick()).toEqual([]); // the new folder is the baseline now
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	test("a folder recreated between two polls is caught; rebase drops a pending change", () => {
+		const root = mkdtempSync(join(tmpdir(), "tt-pathwatch-"));
+		try {
+			mkdirSync(join(root, "out", "client"), { recursive: true });
+			let now = 0;
+			const reported: string[][] = [];
+			const watch = new PathWatch({ root, paths: ["out/client"], settleMs: 3000, now: () => now, onRecreated: (paths) => reported.push(paths) });
+			rmSync(join(root, "out"), { recursive: true, force: true });
+			Bun.sleepSync(20); // a new birth time even when the inode number is reused
+			mkdirSync(join(root, "out", "client"), { recursive: true });
+			now = 1000;
+			watch.tick();
+			now = 5000;
+			expect(watch.tick()).toEqual(["out/client"]);
+
+			rmSync(join(root, "out"), { recursive: true, force: true });
+			mkdirSync(join(root, "out", "client"), { recursive: true });
+			now = 6000;
+			watch.tick();
+			watch.rebase(); // `serve restart rojo` by hand
+			now = 10_000;
+			expect(watch.tick()).toEqual([]);
+			expect(reported).toHaveLength(1);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
 	});
 });
 

@@ -51,7 +51,8 @@ typetorch serve logs [--studio] [--since <seq>] [--limit <n>] [--follow] [--json
 
   One process for the Studio dev loop, instead of \`bun run watch\` + \`bun run studio\` + more terminals:
     watch  the game's "watch" script (else rbxtsc -w); compile errors are kept for \`serve status\`
-    rojo   rojo serve <project> on Rojo's default port 34872 (or the next free one), so the stock plugin still works
+    rojo   rojo serve <project> on Rojo's default port 34872 (or the next free one), so the stock plugin still works;
+           restarted when a $path folder (out/server, ...) is deleted and recreated, which Rojo can't follow
     live   the game's "live" package.json script, when it has one (on by default; --no-live turns it off)
     --with <a,b>  also runs those package.json scripts (\`bun run <script>\`)
   and a control API on 127.0.0.1:34880-34887. The TypeTorch Studio plugin (\`typetorch studio install-plugin\`) finds
@@ -275,6 +276,11 @@ export function describeStatus(s: ServeStatus): string[] {
 	for (const child of s.children) {
 		lines.push(`  ${child.name.padEnd(8)} ${child.state}${child.restarts ? `, ${child.restarts} restarts` : ""}`);
 	}
+	if (s.rojoPaths?.lastRestart) {
+		const r = s.rojoPaths.lastRestart;
+		lines.push(`  paths    ${r.paths.join(", ")} recreated: Rojo restarted at ${new Date(r.at).toLocaleTimeString()}`);
+	}
+	if (s.rojoPaths?.missing.length) lines.push(`  paths    ${s.rojoPaths.missing.join(", ")} deleted: Rojo restarts once recreated`);
 	const c = s.compile;
 	lines.push(`  compile  ${c.state}${c.errors.length ? `: ${c.errors.length} error${c.errors.length === 1 ? "" : "s"}` : ""}`);
 	for (const e of c.errors.slice(0, 10)) lines.push(`    ${e.file}:${e.line}:${e.column} ${e.code ?? ""} ${e.message}`);
