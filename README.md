@@ -526,7 +526,11 @@ build's channel in brackets when it differs.
   **Upload** and **Publish to dev** run `typetorch assets status`, `assets sync` and `assets sync --deploy <dev
   branch>` inside `serve` on that export (`--studio-export`; its env file and keys; progress in `serve logs`). Check
   needs no key. The dev branch is `dev` (`serve --dev-branch <b>`); a prod-channel branch is refused, and the deploy
-  follows the approval policy like any other (a proposal when it needs approval).
+  follows the approval policy like any other (a proposal when it needs approval). While the panel is open the check
+  also runs by itself every 30 s (skipped while a job runs or nothing is marked; an export equal to the last check's
+  with the lockfile unchanged never reaches serve), and the card says when it last ran. Each new, changed or removed
+  asset gets a **Diff** button: the instances added, removed and changed, with old and new property values (see
+  `assets status --json` under "Hot assets").
 - **An agent can always get Studio back.** The plugin long-polls the control API for commands whatever its sync is
   doing (down, backing off, waiting for a click, paused), so a broken sync doesn't cut the agent off:
   `typetorch studio reconnect` turns auto-connect on, resyncs from scratch and waits to report whether it connected
@@ -606,7 +610,16 @@ versions without a restart (the framework's `hotAsset`). Guide: [Hot assets](htt
      `--moderation-timeout` and the key file flags are passed on) when the Assets attribute changes. A prod-channel
      branch only takes clean builds, so `--deploy` to one is refused while the sync changes the lockfile: sync, commit,
      then deploy.
-- **`typetorch assets status`:** export + diff only (`upToDate` in `--json`). **`typetorch assets list`:** the lockfile.
+- **`typetorch assets status`:** export + diff only (`upToDate` in `--json`). In `--json`, every change that isn't
+  `unchanged` carries a `diff` (`src/assetdiff.ts`, what the plugin's Diff button shows): `entries` of instances
+  `added`, `removed` or `changed` (path inside the asset, class, and for changed ones the properties with their old
+  and new values, decoded for the common binary types; a chunk of another type that differs is named in
+  `undecoded`), `before` / `after` summaries (instances, bytes, classes), bounded (30 entries, 8 properties each,
+  values cut at 48 characters, the rest counted in `more` / `moreProps`). The lockfile holds only a hash, so the
+  previous version's bytes come from the state dir: every `status` and `sync` keeps a copy of each export in
+  `.typetorch/hot-assets/<hash>.rbxm` and drops the copies no lockfile entry or export refers to. Without a copy
+  (synced on another machine, or before 0.12.2) `baseline` is `"none"`, the `note` says so and only the export's
+  summary is given; the next sync here fills the gap. **`typetorch assets list`:** the lockfile.
 - **Lockfile** (`typetorch.assets.lock.json`, keys sorted, one line per asset):
 
   ```json
