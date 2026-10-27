@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
-import { debugMacroModule, debugMacrosFor, prodTsconfig, scriptEndsWithRbxtsc, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "../src/debug-macros";
+import { debugMacroModule, debugMacrosFor, needsStripTransformer, prodTsconfig, scriptEndsWithRbxtsc, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "../src/debug-macros";
 
 /** Runs the generated transformer on `code` the way roblox-ts does (program factory, `{ ts }` extras). */
 function strip(code: string): string {
@@ -92,6 +92,17 @@ describe("prod builds strip debug macros (S-L7)", () => {
 		]);
 		expect(prod.include).toEqual(["./src/**/*.ts"]);
 		expect(original.compilerOptions.plugins).toHaveLength(2); // not mutated
+	});
+
+	test("without rbxts-transform-debug the prod tsconfig only turns the transformer's own macros off", () => {
+		const original = { compilerOptions: { plugins: [{ transform: "@typetorch/transformer" }, { transform: "other" }] } };
+		const prod = prodTsconfig(original, false);
+		expect(prod.compilerOptions.plugins).toEqual([{ transform: "@typetorch/transformer", debugMacros: false }, { transform: "other" }]);
+		expect(original.compilerOptions.plugins[0]).toEqual({ transform: "@typetorch/transformer" }); // not mutated
+		const root = mkdtempSync(join(tmpdir(), "tt-strip-"));
+		expect(needsStripTransformer(root)).toBe(false);
+		mkdirSync(join(root, "node_modules", "rbxts-transform-debug"), { recursive: true });
+		expect(needsStripTransformer(root)).toBe(true);
 	});
 
 	test("-p can be appended only to build scripts that end with rbxtsc", () => {
