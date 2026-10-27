@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import type { Project } from "./config.ts";
-import { debugMacrosFor, prodTsconfig, PROD_TSCONFIG, readTsconfig, scriptEndsWithRbxtsc, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "./debug-macros.ts";
+import { debugMacroModule, debugMacrosFor, prodTsconfig, PROD_TSCONFIG, readTsconfig, scriptEndsWithRbxtsc, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "./debug-macros.ts";
 import { settings } from "./env.ts";
 import { gitInfo, isGeneratedPath, porcelainPaths, type GitInfo } from "./git.ts";
 import { isRecord, parseJsonc } from "./json.ts";
@@ -70,7 +70,7 @@ export interface PayloadMeta {
 	file: string;
 	/** Commits of the game and the @typetorch packages. */
 	sources?: BuildSources;
-	/** False for prod-channel builds: rbxts-transform-debug's logging macros were compiled away. */
+	/** False for prod-channel builds: the `$print`/`$warn`/`$dbg` debug macros were compiled away. */
 	debugMacros?: boolean;
 	/** ModuleScripts in the payload. */
 	modules?: number;
@@ -455,7 +455,9 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 	// 2. build.ts: the only file with $git()/$compileTime(); its text changes every build (timestamp line).
 	const buildFile = join(root, BUILD_FILE);
 	mkdirSync(dirname(buildFile), { recursive: true });
-	writeFileSync(buildFile, buildFileSource({ dirty: git.dirty, channel: target.channel, builtAt, sources }));
+	const macros = debugMacroModule(root);
+	debug(`build.ts imports its macros from ${macros}`);
+	writeFileSync(buildFile, buildFileSource({ dirty: git.dirty, channel: target.channel, builtAt, sources, macros }));
 
 	// 3. rbxtsc. TYPETORCH_SKIP_BUILD_INFO tells a repo build script that writes build.ts itself (the template's
 	// scripts/build-info.ts, for builds without the CLI) to keep ours. Prod: debug macros stripped (S-L7).

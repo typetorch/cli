@@ -128,3 +128,9 @@ test("buildFileSource is the exact generated file (BUILD unchanged, SOURCES adde
 		].join("\n"),
 	);
 });
+
+test("buildFileSource imports the macros from the given module", () => {
+	const source = buildFileSource({ dirty: true, channel: "prod", builtAt: "2026-10-04T12:00:00.000Z", macros: "@typetorch/transformer/macros" });
+	expect(source.split("\n")[1]).toBe('import { $compileTime, $git } from "@typetorch/transformer/macros";');
+	expect(source).toContain('dirty: true, channel: "prod"');
+});

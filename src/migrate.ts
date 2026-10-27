@@ -1476,7 +1476,7 @@ class Codemod {
 		};
 		const tsconfig = read("tsconfig.json") ?? "";
 		if (/node_modules\/@flamework/.test(tsconfig)) this.flagPath("toolchain", "tsconfig.json", "typeRoots: node_modules/@flamework -> node_modules/@typetorch");
-		if (/rbxts-transformer-flamework/.test(tsconfig)) this.flagPath("toolchain", "tsconfig.json", "plugins: replace rbxts-transformer-flamework with rbxts-transform-debug, then @typetorch/transformer");
+		if (/rbxts-transformer-flamework/.test(tsconfig)) this.flagPath("toolchain", "tsconfig.json", "plugins: replace rbxts-transformer-flamework with @typetorch/transformer (0.3+ has the debug macros built in)");
 		else if (!/@typetorch\/transformer/.test(tsconfig)) this.flagPath("toolchain", "tsconfig.json", "plugins: add { \"transform\": \"@typetorch/transformer\" } (guards and DI ids)");
 		const pkg = read("package.json") ?? "";
 		for (const name of ["@flamework/core", "@flamework/networking", "@flamework/components", "rbxts-transformer-flamework"]) {

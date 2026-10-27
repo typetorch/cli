@@ -346,12 +346,16 @@ and writes nothing.
   outDir. `TYPETORCH_BUILD_CACHE=0` turns it off.
 - **Payload check:** the built `.rbxm` must be one `Model` holding only `Folder`s and `ModuleScript`s; anything else
   (Scripts, values from `.txt` files, models from `.rbxm` files...) fails the build with its path.
-- **Debug macros per channel:** dev builds keep `rbxts-transform-debug`'s `$print`/`$warn`/`$dbg` with their
-  `[src/file.ts:line]` prefixes. Prod builds compile with a generated `.tsconfig.typetorch.json` (deleted afterwards)
-  whose first plugin is a CLI transformer: `$print`/`$warn` are removed (arguments not evaluated), `$dbg(x)` becomes `x`,
-  `$assert`/`$error` keep their check without the source path. The CLI appends `-p .tsconfig.typetorch.json` to a build
-  script that ends with `rbxtsc` (else it runs rbxtsc directly). Compiles also get `TYPETORCH_CHANNEL` and
-  `TYPETORCH_DEBUG_MACROS` (`1`/`0`).
+- **Debug macros per channel:** dev builds keep the `$print`/`$warn`/`$dbg` macros with their `[src/file.ts:line]`
+  prefixes. Prod builds drop them: `$print`/`$warn` are removed (arguments not evaluated), `$dbg(x)` becomes `x`,
+  `$assert`/`$error` keep their check without the source path. Every compile gets `TYPETORCH_CHANNEL` and
+  `TYPETORCH_DEBUG_MACROS` (`1`/`0`); `@typetorch/transformer` 0.3+ declares the macros itself
+  (`@typetorch/transformer/macros`) and strips them when the variable is `0`, so such a project needs no
+  `rbxts-transform-debug`. The generated `src/shared/build.ts` imports from whichever of the two is installed (the
+  transformer's when it ships `macros.d.ts`). A project still on `rbxts-transform-debug` has its prod builds compiled
+  with a generated `.tsconfig.typetorch.json` (deleted afterwards) whose first plugin is a CLI transformer doing the same
+  stripping; the CLI appends `-p .tsconfig.typetorch.json` to a build script that ends with `rbxtsc` (else it runs
+  rbxtsc directly).
 
 ### Deploy message
 
