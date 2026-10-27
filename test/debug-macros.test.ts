@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
-import { debugMacrosFor, prodTsconfig, scriptEndsWithRbxtsc, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "../src/debug-macros";
+import { debugMacroModule, debugMacrosFor, prodTsconfig, scriptEndsWithRbxtsc, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "../src/debug-macros";
 
 /** Runs the generated transformer on `code` the way roblox-ts does (program factory, `{ ts }` extras). */
 function strip(code: string): string {
@@ -35,6 +35,14 @@ describe("prod builds strip debug macros (S-L7)", () => {
 	test("dev keeps them, prod drops them", () => {
 		expect(debugMacrosFor("dev")).toBe(true);
 		expect(debugMacrosFor("prod")).toBe(false);
+	});
+
+	test("build.ts imports the transformer's macros once the installed transformer declares them", () => {
+		const root = mkdtempSync(join(tmpdir(), "tt-macros-"));
+		expect(debugMacroModule(root)).toBe("rbxts-transform-debug");
+		mkdirSync(join(root, "node_modules", "@typetorch", "transformer"), { recursive: true });
+		writeFileSync(join(root, "node_modules", "@typetorch", "transformer", "macros.d.ts"), "export function $git(): {};");
+		expect(debugMacroModule(root)).toBe("@typetorch/transformer/macros");
 	});
 
 	test("$print/$warn vanish, $dbg keeps its value, $assert/$error lose the source path", () => {
