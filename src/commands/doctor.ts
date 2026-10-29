@@ -57,6 +57,8 @@ import { withJob } from "../progress.ts";
 import { capture } from "../proc.ts";
 import { hasZstd, isBun, runtimeName } from "../runtime.ts";
 import { rojoBinary } from "../build.ts";
+import { COMPILER_VAR, compilerVersion, GOBLOX_INSTALL, pluginsIgnoredByGoblox, resolveCompiler, type ResolveOptions } from "../compiler.ts";
+import { readTsconfig } from "../debug-macros.ts";
 import { describeFields, readSettings, verifySettingsRecord, type SettingsBody, type SettingsRead } from "../settings.ts";
 import { DS_READ_SCOPE, DS_WRITE_SCOPES, HEADS_KEY, readSharedSeq, SEQ_DATASTORE } from "../seqstore.ts";
 import { defaultBranchHead, liveServerChecks, versionBeforeKernel } from "../livecheck.ts";
@@ -246,8 +248,44 @@ export interface ConfigRow {
 	status?: Status;
 }
 
+/**
+ * The compiler a build would run (compiler.ts) and roblox-ts. goblox: its version, and a warning for tsconfig plugins
+ * it won't run (it runs only @typetorch/transformer, natively). rbxtsc: goblox mentioned as the optional fast compiler.
+ */
+export function compilerChecks(base: string, inProject: boolean, options: ResolveOptions = {}): Check[] {
+	const checks: Check[] = [];
+	const compiler = resolveCompiler(base, options);
+	if (compiler.problem) checks.push({ name: "compiler", status: "fail", detail: compiler.problem });
+	else if (compiler.name === "goblox") {
+		checks.push({ name: "compiler", status: "ok", detail: `goblox ${compilerVersion(base, "goblox")} (${compiler.reason})` });
+		let ignored: string[] = [];
+		try {
+			ignored = pluginsIgnoredByGoblox(readTsconfig(base));
+		} catch {}
+		if (ignored.length > 0) {
+			checks.push({
+				name: "compiler",
+				status: "warn",
+				detail: `goblox ignores JS tsconfig plugins other than @typetorch/transformer, so these won't run: ${ignored.join(", ")} (set "compiler": "rbxtsc" in typetorch.json to keep them)`,
+			});
+		}
+	} else {
+		checks.push({ name: "compiler", status: "ok", detail: `rbxtsc (${compiler.reason}); optional, much faster: \`${GOBLOX_INSTALL}\` (goblox runs no JS tsconfig plugin but @typetorch/transformer)` });
+	}
+	// roblox-ts: rbxtsc itself, and the @rbxts typings goblox compiles against too.
+	const rbxtsPackage = join(base, "node_modules", "roblox-ts", "package.json");
+	if (existsSync(rbxtsPackage)) {
+		const version = JSON.parse(readFileSync(rbxtsPackage, "utf8")).version;
+		checks.push({ name: "rbxtsc", status: "ok", detail: `roblox-ts ${version}` });
+	} else {
+		const needed = inProject && compiler.name === "rbxtsc";
+		checks.push({ name: "rbxtsc", status: needed ? "fail" : "warn", detail: "node_modules/roblox-ts not installed (run `bun install`)" });
+	}
+	return checks;
+}
+
 /** Non-secret variables shown with their value when set. */
-const PLAIN_VARS = ["TYPETORCH_STATE_DIR", "TYPETORCH_PROPOSED_BY", "TYPETORCH_ROJO", "TYPETORCH_LUNE", "TYPETORCH_BUILD_CACHE", "TYPETORCH_DEV_SERVER", CHILD_ENV_VAR, KEY_FILE_VAR, FALLBACK_KEY_FILE_VAR];
+const PLAIN_VARS = ["TYPETORCH_STATE_DIR", "TYPETORCH_PROPOSED_BY", "TYPETORCH_ROJO", "TYPETORCH_LUNE", "TYPETORCH_BUILD_CACHE", COMPILER_VAR, "TYPETORCH_DEV_SERVER", CHILD_ENV_VAR, KEY_FILE_VAR, FALLBACK_KEY_FILE_VAR];
 
 /** Every value the CLI reads, where it came from; secrets only as set / unset. */
 export function configRows(input: { proj?: Project; config: Settings; creds: BackendCredentials; read?: SettingsRead; configFlag?: string }): ConfigRow[] {
@@ -428,14 +466,7 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 	const rokitToml = join(base, "rokit.toml");
 	if (proj && !existsSync(rokitToml)) checks.push({ name: "rokit.toml", status: "warn", detail: "missing: the rojo version isn't pinned for this repo" });
 
-	// roblox-ts
-	const rbxtsPackage = join(base, "node_modules", "roblox-ts", "package.json");
-	if (existsSync(rbxtsPackage)) {
-		const version = JSON.parse(readFileSync(rbxtsPackage, "utf8")).version;
-		checks.push({ name: "rbxtsc", status: "ok", detail: `roblox-ts ${version}` });
-	} else {
-		checks.push({ name: "rbxtsc", status: proj ? "fail" : "warn", detail: "node_modules/roblox-ts not installed (run `bun install`)" });
-	}
+	checks.push(...compilerChecks(base, !!proj, proj ? { configured: proj.config.compiler } : {}));
 
 	// The env file (the Config section lists every value), keys (one per job, else the shared key), approval, state dir
 	const config = settings();

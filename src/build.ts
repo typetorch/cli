@@ -1,7 +1,8 @@
 /**
  * `typetorch build`:
  *   git identity + sources -> (clean: `git clean -fdX` of out/ and include/) -> ignored-source check
- *   -> src/shared/build.ts -> rbxtsc (prod channel: debug macros stripped) -> outputs-from-tracked-sources check
+ *   -> src/shared/build.ts -> rbxtsc or goblox (compiler.ts; prod channel: debug macros stripped)
+ *   -> outputs-from-tracked-sources check
  *   -> rojo build stamped with `<commit7>[-dirty]` -> hash -> rojo build stamped with the final id
  *   -> payload contents check (only Folders and ModuleScripts) -> .typetorch/payload.rbxm + payload.json.
  */
@@ -9,7 +10,8 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import type { Project } from "./config.ts";
-import { debugMacroModule, debugMacrosFor, needsStripTransformer, prodTsconfig, PROD_TSCONFIG, readTsconfig, scriptEndsWithRbxtsc, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "./debug-macros.ts";
+import { debugMacroModule, debugMacrosFor, needsStripTransformer, prodTsconfig, PROD_TSCONFIG, readTsconfig, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "./debug-macros.ts";
+import { compilerVersion, pluginsIgnoredByGoblox, resolveCompiler, scriptCompiler, scriptEndsWith, type CompilerName, type ResolvedCompiler, type ResolveOptions } from "./compiler.ts";
 import { settings } from "./env.ts";
 import { gitInfo, isGeneratedPath, porcelainPaths, type GitInfo } from "./git.ts";
 import { isRecord, parseJsonc } from "./json.ts";
@@ -186,11 +188,11 @@ function inside(root: string, path: string): string | undefined {
 }
 
 /**
- * Checks the compiled build.ts carries the current commit. rbxtsc's incremental compile skips files whose text is
+ * Checks the compiled build.ts carries the current commit. The compiler's incremental compile skips files whose text is
  * unchanged (reproduced 2026-10-04: a new commit with identical build.ts text kept the old commit compiled in); the
  * timestamp line in build.ts prevents that, and this check catches anything that still slips through.
  */
-function checkCompiledBuildFile(layout: TsLayout, root: string, commit: string) {
+function checkCompiledBuildFile(layout: TsLayout, root: string, commit: string, compiler: CompilerName) {
 	const rel = relative(layout.rootDir, resolve(root, BUILD_FILE)).replace(/\.ts$/, "");
 	const compiled = [".luau", ".lua"].map((ext) => join(layout.outDir, rel + ext)).find((p) => existsSync(p));
 	if (!compiled) {
@@ -199,30 +201,42 @@ function checkCompiledBuildFile(layout: TsLayout, root: string, commit: string) 
 	}
 	if (commit && !readFileSync(compiled, "utf8").includes(`"${commit}"`)) {
 		throw new BuildError(
-			`${relative(root, compiled)} does not contain commit ${commit}: rbxtsc kept a stale build.ts. Delete ${relative(root, layout.outDir)} and build again.`,
+			`${relative(root, compiled)} does not contain commit ${commit}: ${compiler} kept a stale build.ts. Delete ${relative(root, layout.outDir)} and build again.`,
 		);
 	}
 }
 
+/** The build's compiler (compiler.ts); a BuildError when goblox was requested but isn't installed, or for an unknown value. */
+export function buildCompiler(root: string, options: ResolveOptions = {}): ResolvedCompiler {
+	const compiler = resolveCompiler(root, options);
+	if (compiler.problem) throw new BuildError(compiler.problem);
+	return compiler;
+}
+
 /**
- * The rbxtsc command: the repo's `build` script when it has one, else the local roblox-ts binary. With `tsconfig`
- * (the generated PROD_TSCONFIG), `-p <tsconfig>` is appended; a build script that doesn't end with rbxtsc can't take it, so rbxtsc
- * then runs directly (with a warning).
+ * The compile command: the repo's `build` script when it has one, else the local compiler binary. With `tsconfig`
+ * (the generated PROD_TSCONFIG), `-p <tsconfig>` is appended; a build script that doesn't end with the compiler can't
+ * take it, and one that ends with the other compiler would run the wrong one, so the compiler then runs directly (with
+ * a warning).
  */
-export function compileCommand(root: string, tsconfig?: string): string[] {
+export function compileCommand(root: string, tsconfig?: string, compiler: ResolvedCompiler = buildCompiler(root)): string[] {
 	let scripts: Record<string, string> = {};
 	try {
 		scripts = JSON.parse(readFileSync(join(root, "package.json"), "utf8"))?.scripts ?? {};
 	} catch {}
+	const name = compiler.name;
 	const extra = tsconfig ? ["-p", tsconfig] : [];
 	if (typeof scripts.build === "string") {
-		if (!tsconfig || scriptEndsWithRbxtsc(scripts.build)) return ["bun", "run", "build", ...extra];
-		warn(`the "build" script doesn't end with rbxtsc, so it can't take -p ${tsconfig}; running rbxtsc directly for this build (the script's other steps are skipped)`);
+		const ends = scriptCompiler(scripts.build);
+		if (ends !== undefined && ends !== name) {
+			warn(`the "build" script ends with ${ends} but the compiler is ${name} (${compiler.reason}); running ${name} directly for this build (the script's other steps are skipped)`);
+		} else if (!tsconfig || scriptEndsWith(scripts.build, name)) return ["bun", "run", "build", ...extra];
+		else warn(`the "build" script doesn't end with ${name}, so it can't take -p ${tsconfig}; running ${name} directly for this build (the script's other steps are skipped)`);
 	}
-	if (!existsSync(join(root, "node_modules", "roblox-ts"))) {
+	if (name === "rbxtsc" && !existsSync(join(root, "node_modules", "roblox-ts"))) {
 		throw new BuildError("roblox-ts is not installed here (no node_modules/roblox-ts): run `bun install`");
 	}
-	return ["bun", "run", "rbxtsc", ...extra];
+	return ["bun", "run", name, ...extra];
 }
 
 export function rojoBinary(): string {
@@ -421,6 +435,10 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 	const projectJson = readJsonc(defaultProjectPath);
 	for (const problem of checkPayloadTree(projectJson)) warn(`default.project.json: ${problem}`);
 	const layout = tsLayout(root);
+	// The compiler (compiler.ts): goblox when requested or installed, else rbxtsc. Resolved before anything is cleaned.
+	const compiler = buildCompiler(root, { configured: project.config.compiler });
+	const compilerKey = { name: compiler.name, version: compilerVersion(root, compiler.name) };
+	debug(`compiler ${compiler.name} ${compilerKey.version} (${compiler.reason})`);
 	// Hot assets (plans/13): the lockfile rides the payload as the Assets attribute, on the root and on Server (the
 	// kernel drops the root; the framework reads Server), always ({"v":1,"assets":{}} without a lockfile). Read
 	// first, so an invalid lockfile stops the build before rbxtsc.
@@ -428,7 +446,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 	const assetsJson = assetsAttribute(assetsLock);
 
 	// 1. Clean state (S-M3): no stale or stray output, and no ignored file in a source dir, can reach a clean id.
-	// The build cache (build-cache.ts) then puts back the last checked out/ of this channel, so rbxtsc compiles only
+	// The build cache (build-cache.ts) then puts back the last checked out/ of this channel, so the compiler compiles only
 	// what changed since. Only after a clean: a plain `typetorch build` keeps out/ as it is.
 	const cache = options.clean && options.cache !== false && buildCacheEnabled() ? (cacheUnsupported(root, layout) ?? "on") : "off";
 	if (options.clean) {
@@ -436,7 +454,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		debug(`cleaned ${cleaned.join(", ") || "nothing"}`);
 		removeStrayBuildInfo(root, layout);
 		if (cache === "on") {
-			const restored = restoreBuildCache(root, layout, target.channel, sourceCandidates);
+			const restored = restoreBuildCache(root, layout, target.channel, sourceCandidates, compilerKey);
 			if (restored.restored) {
 				debug(`build cache (${target.channel}): restored ${restored.files} files${restored.pruned.length ? `, removed ${restored.pruned.length} without a source` : ""}`);
 			} else debug(`build cache (${target.channel}): full compile, ${restored.reason}`);
@@ -459,7 +477,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 	debug(`build.ts imports its macros from ${macros}`);
 	writeFileSync(buildFile, buildFileSource({ dirty: git.dirty, channel: target.channel, builtAt, sources, macros }));
 
-	// 3. rbxtsc. TYPETORCH_SKIP_BUILD_INFO tells a repo build script that writes build.ts itself (the template's
+	// 3. The compiler. TYPETORCH_SKIP_BUILD_INFO tells a repo build script that writes build.ts itself (the template's
 	// scripts/build-info.ts, for builds without the CLI) to keep ours. Prod: debug macros stripped (S-L7).
 	const compileEnv = {
 		TYPETORCH_SKIP_BUILD_INFO: "1",
@@ -467,23 +485,35 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		TYPETORCH_DEBUG_MACROS: debugMacros ? "1" : "0",
 	};
 	// The generated tsconfig (PROD_TSCONFIG): prod's macro stripping (the CLI's strip transformer only while
-	// rbxts-transform-debug is installed; @typetorch/transformer strips its own), and on every channel every transitive
+	// rbxts-transform-debug is installed and the compiler is rbxtsc: goblox runs no JS transformer but its native
+	// @typetorch/transformer, which strips its own, like 0.3+ under rbxtsc), and on every channel every transitive
 	// importer of a changed file recompiled (withFullInvalidation), so an incremental or cached build matches a full one.
 	const prodConfig = join(root, PROD_TSCONFIG);
-	const strip = !debugMacros && needsStripTransformer(root);
-	const baseConfig = debugMacros ? readTsconfig(root) : prodTsconfig(readTsconfig(root), strip);
+	const strip = !debugMacros && compiler.name === "rbxtsc" && needsStripTransformer(root);
+	const tsconfig = readTsconfig(root);
+	const baseConfig = debugMacros ? tsconfig : prodTsconfig(tsconfig, strip);
 	const generatedConfig = withFullInvalidation(baseConfig) ?? (debugMacros ? undefined : baseConfig);
 	if (strip) {
 		mkdirSync(join(root, OUT_DIR), { recursive: true });
 		writeFileSync(join(root, STRIP_TRANSFORMER_FILE), STRIP_TRANSFORMER_SOURCE);
-	} else if (!debugMacros) debug("prod build: @typetorch/transformer strips the debug macros itself (rbxts-transform-debug is not installed)");
+	} else if (!debugMacros) {
+		debug(
+			compiler.name === "goblox"
+				? "prod build: @typetorch/transformer strips the debug macros itself (goblox runs it natively)"
+				: "prod build: @typetorch/transformer strips the debug macros itself (rbxts-transform-debug is not installed)",
+		);
+	}
+	if (compiler.name === "goblox") {
+		const ignored = pluginsIgnoredByGoblox(tsconfig);
+		if (ignored.length > 0) debug(`goblox ignores these tsconfig plugins (it runs only @typetorch/transformer): ${ignored.join(", ")}`);
+	}
 	if (generatedConfig) writeFileSync(prodConfig, JSON.stringify(generatedConfig, null, "\t"));
 	try {
-		await watch.stage("rbxtsc", () => run(compileCommand(root, generatedConfig ? PROD_TSCONFIG : undefined), root, compileEnv));
+		await watch.stage(compiler.name, () => run(compileCommand(root, generatedConfig ? PROD_TSCONFIG : undefined, compiler), root, compileEnv));
 	} finally {
 		rmSync(prodConfig, { force: true });
 	}
-	checkCompiledBuildFile(layout, root, git.commit);
+	checkCompiledBuildFile(layout, root, git.commit, compiler.name);
 	if (git.isRepo) {
 		const unexplained = unexplainedOutputs(root, layout);
 		if (unexplained.length > 0 && !git.dirty) {
@@ -493,7 +523,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		}
 		if (unexplained.length > 0) debug(`outputs without a tracked source (dirty build): ${unexplained.slice(0, 10).join(", ")}`);
 	}
-	if (cache === "on") debug(`build cache (${target.channel}): saved ${saveBuildCache(root, layout, target.channel)} files`);
+	if (cache === "on") debug(`build cache (${target.channel}): saved ${saveBuildCache(root, layout, target.channel, compilerKey)} files`);
 
 	// 4. Notes: the message and what changed since the branch's previous deploy (the dev menu reads this attribute;
 	// asset descriptions get censored by Roblox's text filter).

@@ -35,7 +35,7 @@ What the commands call:
 - **git**, and **Rojo 7.7.x** (plus **Lune** for `kernel deploy`) through [Rokit](https://github.com/rojo-rbx/rokit):
   pin `rojo-rbx/rojo@7.7.0-rc.1` in the game's `rokit.toml`.
 - **Bun** for `typetorch build` / `deploy` / `upload`: the game repo is a Bun project and the build runs
-  `bun run build` (or `bun run rbxtsc`) in it. Commands that don't build (`approve`, `promote`, `rollback`,
+  `bun run build` (or `bun run rbxtsc`, or `bun run goblox`: see "Compiler") in it. Commands that don't build (`approve`, `promote`, `rollback`,
   `deployments`, `keys`, `pin`, `assets status`, `doctor`) don't need it.
 - **zstd** for hot assets (`assets sync` / `status`, which read Roblox-serialized exports): Bun, or Node 22.15+.
   `typetorch doctor` reports the runtime, Bun and zstd.
@@ -136,7 +136,7 @@ get an allowlisted environment without any key. Keys are never printed.
 Old names, read in CLI 0.9 only, with a warning naming the new one: `TYPETORCH_FLEET_TOKEN` (= `TYPETORCH_ADMIN_TOKEN`),
 `TYPETORCH_FLEET_INGEST_TOKEN` (= `TYPETORCH_API_KEY`).
 
-Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_BUILD_CACHE=0` (turns the build cache off), `TYPETORCH_CHILD_ENV=NAME,NAME` (extra
+Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_BUILD_CACHE=0` (turns the build cache off), `TYPETORCH_COMPILER=goblox|rbxtsc` (the compiler; see "Compiler"), `TYPETORCH_CHILD_ENV=NAME,NAME` (extra
 non-secret variables for child processes), `TYPETORCH_KEY_FILE` / `TYPETORCH_FALLBACK_KEY_FILE` (the signing key files;
 read from the real environment only, never from an env file, and never passed to a child process).
 
@@ -211,7 +211,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | Command | Does |
 |---|---|
 | `typetorch init [--dir <folder>] [--phase <name>] [--answers <file>] [--agent] [--teardown]` | the guided setup, from an empty folder to a live game (see "Setup"); `--agent` prints `AGENT_PROMPT.md` again; `--teardown` removes the backend step 6 installed (asks first; its data only when you say so) |
-| `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs rbxtsc (`bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first, then restore the build cache |
+| `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs the compiler (goblox when installed, else rbxtsc; `bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first, then restore the build cache |
 | `typetorch upload [--no-build]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
 | `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: deploy message, durable head, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
 | `typetorch deploy --widen <1-100> [--branch]` | re-send the branch's live deploy (same seq) to more servers; dev-channel branches only (see "Rollouts") |
@@ -254,7 +254,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch mcp` | an MCP server on stdio with `serve` and `studio` as tools, for agents |
 | `typetorch migrate --from flamework [--dry-run] [--net compat\|native] [--report <file>] [--allow-dirty]` | the mechanical part of moving a Flamework 1.x game (see "Migrating from Flamework"); local only, no keys |
 | `typetorch update [<version>] [--check] [--yes]` | updates this CLI to the newest `@typetorch/cli` on npm (or `<version>`) the way it was installed: in the game's `package.json` with its package manager (bun, pnpm, yarn or npm, from the lockfile; a devDependency stays one), or globally (`npm i -g`, `bun add -g`, pnpm, yarn). Asks y/N first (`--yes` skips; without a terminal it prints the command). npx needs nothing (`npx @typetorch/cli@latest`); a git checkout gets the `git pull` to run. `--check` only shows the versions and the command. After any other command at a terminal, the CLI checks npm at most once a day (1.5 s timeout, cached in `~/.typetorch/update-check.json`) and, when a newer version is out, asks once whether to update now; after a no it reminds once a day. Never in CI, `--json` or non-interactive runs; `TYPETORCH_UPDATE_CHECK=off` turns it off |
-| `typetorch doctor [--show-ok]` | prints the **Config** section (every value the CLI reads and where it came from: typetorch.json, the game repo's `.env`, the environment, the settings record; secrets only as set / unset), then checks the runtime, bun, zstd, git, rojo 7.7.x, roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the health window per channel and the auto-rollback threshold, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), the backend (typetorch.json `backend.url` with your keys: url, `/healthz`, the game key's and the admin token's roles; the record's own backend section; a stale tunnel or a wrong key is a FAIL with the fix), the backend's owner list against the signed record, **live servers** (FAIL when the published place has the kernel, the default branch has no verified head in the DataStore heads or the kernel's BootstrapHeads, and the place has no backup build: kernel 0.3.6+ then moves every player out after 15 s and kicks after 3 bounces; the fix names the git branch mapped to the default branch and `kernel restore --version <n>`), **old game build** (warn when a roblox-ts build such as `ServerScriptService.TS` or `ReplicatedStorage.rbxts_include` runs next to the kernel), and probes each key's scopes with harmless calls. Only problems and info lines print; `--show-ok` lists the passed checks too (`--json` always has every check) |
+| `typetorch doctor [--show-ok]` | prints the **Config** section (every value the CLI reads and where it came from: typetorch.json, the game repo's `.env`, the environment, the settings record; secrets only as set / unset), then checks the runtime, bun, zstd, git, rojo 7.7.x, the compiler (goblox or rbxtsc and why; a warning when goblox is selected and the tsconfig lists a JS plugin other than `@typetorch/transformer`, which goblox ignores; with rbxtsc it suggests `bun add -d goblox`), roblox-ts, `typetorch.json`, the env file, each job's key, the approval policy, the state dir, the health window per channel and the auto-rollback threshold, the signing keys (key files vs typetorch.json, the key asset, the place; the place and the key asset's content through one Luau Execution task with the assets key; the same task warns when the place still holds `ServerStorage.TypeTorchDev`, the Studio local payload folder that live servers ignore), the backend (typetorch.json `backend.url` with your keys: url, `/healthz`, the game key's and the admin token's roles; the record's own backend section; a stale tunnel or a wrong key is a FAIL with the fix), the backend's owner list against the signed record, **live servers** (FAIL when the published place has the kernel, the default branch has no verified head in the DataStore heads or the kernel's BootstrapHeads, and the place has no backup build: kernel 0.3.6+ then moves every player out after 15 s and kicks after 3 bounces; the fix names the git branch mapped to the default branch and `kernel restore --version <n>`), **old game build** (warn when a roblox-ts build such as `ServerScriptService.TS` or `ReplicatedStorage.rbxts_include` runs next to the kernel), and probes each key's scopes with harmless calls. Only problems and info lines print; `--show-ok` lists the passed checks too (`--json` always has every check) |
 
 Every command takes `--json` (one JSON document on stdout; human lines go to stderr), `--verbose`, `--config <path>`
 and `--env-file <path>` (`remote-claude` passes everything to the dev-server). Under Node, an `--env-file` naming a
@@ -288,7 +288,8 @@ and writes nothing.
   outside a trove, `@flamework/components`, `Dependency<T>()` before construction, `loadstring`, remotes,
   MessagingService, DataStore / ProfileService code, BindToClose, Scripts left in the source tree, toolchain leftovers.
 - **Output:** `typetorch-migrate-report.md` (`--report`): a summary, every flag by kind with file, line and the fix,
-  and what was rewritten; plus a short summary on the terminal (`--json` for both as data).
+  and what was rewritten; plus a short summary on the terminal (`--json` for both as data). Both suggest the optional
+  fast compiler, `bun add -d goblox` (see "Compiler"; it ignores JS tsconfig plugins other than `@typetorch/transformer`).
 
 `typetorch build` warns while the game still uses `createFlameworkCompat` (its calls are part of the protocol hash).
 
@@ -333,6 +334,28 @@ and writes nothing.
   compile skips unchanged files). Repo build scripts that write build.ts themselves should skip it when
   `TYPETORCH_SKIP_BUILD_INFO=1`.
 
+### Compiler
+
+`typetorch build` (and deploy / upload) compiles with **goblox** when it is installed in the game repo, else with
+**rbxtsc** (roblox-ts), as before. goblox is roblox-ts ported to Go on typescript-go (TypeScript 7): the same CLI flags,
+out/ layout and tsbuildinfo-based incremental builds, several times faster. Optional:
+
+```sh
+bun add -d goblox
+```
+
+(`@typetorch/goblox` is an alias package for the same `goblox` bin.) Which compiler runs, first match wins:
+
+1. `TYPETORCH_COMPILER=goblox|rbxtsc` (environment or `.env`), then `"compiler": "goblox" | "rbxtsc"` in typetorch.json;
+2. goblox when `node_modules/.bin/goblox` (`goblox.exe` / `goblox.cmd` on Windows) exists;
+3. rbxtsc.
+
+goblox asked for explicitly but not installed fails the build (it never falls back silently); any other value is an
+error. `--verbose` shows the compiler and why it was picked, and the timing line names it (`goblox 1.9 s`).
+goblox runs `@typetorch/transformer` natively (a Go port, from the same tsconfig `plugins` entry, debug-macro stripping
+included) and **ignores every other JS tsconfig plugin** (`rbxts-transform-debug` too): `typetorch doctor` warns when
+goblox is selected and the tsconfig lists one. Set `"compiler": "rbxtsc"` to keep such a plugin.
+
 ### Builds
 
 - **Clean deploys:** `deploy` and `upload` run `git clean -fdX` on out/ and include/ (ignored files only) before
@@ -342,7 +365,8 @@ and writes nothing.
   `.typetorch/build-cache/<channel>/` with a sha256 per file. The next clean build cleans out/ as above, puts the cache
   back, and rbxtsc recompiles only what changed (a one-file edit: seconds instead of a full compile). The cache is
   dropped when any file fails its hash or when tsconfig.json, package.json or a lockfile changed; outputs whose source
-  is gone are removed first; dev and prod never share one. Needs `"incremental": true` with the tsbuildinfo inside
+  is gone are removed first; dev and prod never share one. Switching to goblox, or to another goblox version, is a full
+  compile (the compiler is in the cache key; rbxtsc's keys are what they were before goblox). Needs `"incremental": true` with the tsbuildinfo inside
   outDir. `TYPETORCH_BUILD_CACHE=0` turns it off.
 - **Payload check:** the built `.rbxm` must be one `Model` holding only `Folder`s and `ModuleScript`s; anything else
   (Scripts, values from `.txt` files, models from `.rbxm` files...) fails the build with its path.
@@ -355,8 +379,10 @@ and writes nothing.
   transformer's when it ships `macros.d.ts`). Prod builds compile with a generated `.tsconfig.typetorch.json` (deleted
   afterwards): once `rbxts-transform-debug` is uninstalled it only adds `debugMacros: false` to the transformer's
   plugin entry (a different plugin list, so rbxtsc's incremental state never reuses dev outputs for prod); while it is
-  still installed, the first plugin is a CLI transformer doing the same stripping. The CLI appends
-  `-p .tsconfig.typetorch.json` to a build script that ends with `rbxtsc` (else it runs rbxtsc directly).
+  still installed (rbxtsc only: goblox runs no JS transformer), the first plugin is a CLI transformer doing the same
+  stripping. The CLI appends `-p .tsconfig.typetorch.json` to a build script that ends with the compiler (`rbxtsc` or
+  `goblox`), else it runs the compiler directly; a build script that ends with the other compiler is skipped the same
+  way (with a warning).
 
 ### Deploy message
 

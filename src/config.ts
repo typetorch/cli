@@ -25,12 +25,16 @@
  *   "health": { "errors": 3, "window": 30, "rollback": true, "dev": { "rollback": false } }, // stamped on each build
  *   "autoRollback": { "failedPct": 20 },         // deploy --wait rolls the branch back at this % of failed servers
  *   // The backup build in the place (kernel 0.3.6, refreshed by the luau engine; commands/backup.ts):
- *   "backup": { "refresh": "auto", "healthyHours": 3 } // "off": only kernel deploy / typetorch backup refresh
+ *   "backup": { "refresh": "auto", "healthyHours": 3 }, // "off": only kernel deploy / typetorch backup refresh
+ *   // The compiler (compiler.ts), optional: default goblox when it is installed (`bun add -d goblox`), else rbxtsc;
+ *   // TYPETORCH_COMPILER overrides it:
+ *   "compiler": "goblox"                         // "goblox" | "rbxtsc"
  * }
  * Secrets never go here: they live in the game repo's `.env` (env.ts).
  */
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import { compilerValueError, type CompilerName } from "./compiler.ts";
 import { validateAutoRollback, validateHealth, type AutoRollbackConfig, type HealthConfig } from "./health.ts";
 import { isRecord, removeJsonField, setJsonFields } from "./json.ts";
 import { branchNameError, isChannel, type Channel } from "./naming.ts";
@@ -74,6 +78,8 @@ export interface ProjectConfig {
 	autoRollback?: AutoRollbackConfig;
 	/** The backup build's refresh (commands/backup.ts): after a prod deploy, the previous build once proven healthy. */
 	backup?: BackupConfig;
+	/** The compiler (compiler.ts); unset: goblox when installed, else rbxtsc. TYPETORCH_COMPILER overrides it. */
+	compiler?: CompilerName;
 }
 
 /** typetorch.json "backup". */
@@ -135,6 +141,7 @@ const KNOWN_KEYS = new Set([
 	"health",
 	"autoRollback",
 	"backup",
+	"compiler",
 ]);
 
 function positiveInt(value: unknown): number | undefined {
@@ -291,6 +298,10 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 		errors.push(...checked.errors);
 		backup = checked.backup;
 	}
+	if (raw.compiler !== undefined) {
+		const problem = compilerValueError(raw.compiler);
+		if (problem) errors.push(`"compiler" ${problem}`);
+	}
 	if (raw.autoRollback !== undefined) {
 		const checked = validateAutoRollback(raw.autoRollback);
 		errors.push(...checked.errors);
@@ -322,6 +333,7 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			...(health ? { health } : {}),
 			...(autoRollback ? { autoRollback } : {}),
 			...(backup ? { backup } : {}),
+			...(raw.compiler !== undefined ? { compiler: raw.compiler as CompilerName } : {}),
 		},
 	};
 }

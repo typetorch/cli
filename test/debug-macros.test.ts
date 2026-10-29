@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import ts from "typescript";
-import { debugMacroModule, debugMacrosFor, needsStripTransformer, prodTsconfig, scriptEndsWithRbxtsc, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "../src/debug-macros";
+import { debugMacroModule, debugMacrosFor, needsStripTransformer, prodTsconfig, STRIP_TRANSFORMER_FILE, STRIP_TRANSFORMER_SOURCE } from "../src/debug-macros";
 
 /** Runs the generated transformer on `code` the way roblox-ts does (program factory, `{ ts }` extras). */
 function strip(code: string): string {
@@ -105,11 +105,4 @@ describe("prod builds strip debug macros (S-L7)", () => {
 		expect(needsStripTransformer(root)).toBe(true);
 	});
 
-	test("-p can be appended only to build scripts that end with rbxtsc", () => {
-		expect(scriptEndsWithRbxtsc("rbxtsc")).toBe(true);
-		expect(scriptEndsWithRbxtsc("bun scripts/build-info.ts && rbxtsc")).toBe(true);
-		expect(scriptEndsWithRbxtsc("bun x.ts && rbxtsc --verbose")).toBe(true);
-		expect(scriptEndsWithRbxtsc("rbxtsc && bun post.ts")).toBe(false);
-		expect(scriptEndsWithRbxtsc("bun scripts/build.ts")).toBe(false);
-	});
 });

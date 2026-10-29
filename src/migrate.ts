@@ -20,6 +20,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import type * as TS from "typescript";
+import { GOBLOX_INSTALL } from "./compiler.ts";
 
 type TypeScript = typeof TS;
 
@@ -1552,6 +1553,9 @@ export function migrationReport(result: MigrateResult, options: { net: NetMode; 
 	if (options.net === "compat") {
 		lines.push("3. Networking runs through `createFlameworkCompat`; move to `createNetwork` over time (`--net native`, guides/from-flamework.md).");
 	}
+	lines.push(
+		`- Optional, a much faster compiler: \`${GOBLOX_INSTALL}\` (goblox, a Go port of roblox-ts; \`typetorch build\` uses it once installed). It runs @typetorch/transformer natively and ignores every other JS tsconfig plugin.`,
+	);
 	lines.push("");
 	for (const kind of kinds) {
 		lines.push(`## ${FLAG_KINDS[kind].title}`, "", FLAG_KINDS[kind].hint, "");

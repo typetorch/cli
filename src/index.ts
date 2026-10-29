@@ -75,7 +75,8 @@ const COMMANDS: Record<string, Command> = {
 		summary: "compile and pack the payload",
 		usage: `typetorch build [--branch <b>] [--channel prod|dev] [--clean]
 
-  Writes src/shared/build.ts, runs rbxtsc (prod channel: $print/$warn compiled away, no source paths), then
+  Writes src/shared/build.ts, runs the compiler (goblox when installed, else rbxtsc; typetorch.json "compiler" or
+  TYPETORCH_COMPILER picks one) (prod channel: $print/$warn compiled away, no source paths), then
   rojo-builds default.project.json with the identity stamped on the root ($attributes ArtifactId, KernelApi, Channel,
   Commit, BuiltAt, SourceTemplate/Framework/Kernel) into .typetorch/payload.rbxm (only Folders and ModuleScripts
   allowed), plus .typetorch/payload.json. Artifact id: <commit7>-<hash6>, or <commit7>-dirty-<hash6>.

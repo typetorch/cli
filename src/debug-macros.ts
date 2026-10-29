@@ -132,8 +132,3 @@ export function readTsconfig(root: string): unknown {
 	if (!existsSync(path)) return {};
 	return parseJsonc(readFileSync(path, "utf8"));
 }
-
-/** True when a package.json build script ends with an rbxtsc call, so `-p <tsconfig>` can be appended to it. */
-export function scriptEndsWithRbxtsc(script: string): boolean {
-	return /(?:^|&&|\|\||;)\s*(?:bunx\s+|npx\s+)?rbxtsc(?:\s+[^&|;]*)?\s*$/.test(script.trim());
-}
