@@ -10,7 +10,9 @@
  *   - one cache per channel: prod compiles with a different plugin list (debug macros stripped, S-L7) that rbxtsc's
  *     buildinfo does not track, so a dev output must never be reused in a prod build;
  *   - the cache key hashes everything rbxtsc's buildinfo can't see: tsconfig.json, package.json, the lockfiles (the
- *     transformer plugins' code), the strip transformer version and the CLI's cache version; any change = full build;
+ *     transformer plugins' code), the strip transformer version, the CLI's cache version and, for goblox, the
+ *     compiler and its version (compiler.ts; rbxtsc adds nothing, so its keys are what they were before goblox);
+ *     any change = full build. goblox writes the same out/ and tsbuildinfo layout, so the rest applies to it as is;
  *   - every restored file must match its recorded sha256, or the whole cache is dropped;
  *   - restored outputs whose source no longer exists are removed before rbxtsc runs (rbxtsc never deletes them);
  *   - the post-compile checks (compiled build.ts carries the commit, every output has a tracked source) run as before.
@@ -20,6 +22,7 @@
 import { createHash } from "node:crypto";
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import type { CompilerKey } from "./compiler.ts";
 import { STRIP_TRANSFORMER_VERSION } from "./debug-macros.ts";
 import { settings } from "./env.ts";
 import { isRecord, parseJsonc } from "./json.ts";
@@ -117,9 +120,14 @@ export function removeStrayBuildInfo(root: string, layout: CacheLayout) {
 	} catch {}
 }
 
-/** Hash of everything that changes rbxtsc's output but is not in its buildinfo. */
-export function buildCacheKey(root: string, channel: Channel): string {
+/**
+ * Hash of everything that changes the compiler's output but is not in its buildinfo. The compiler is part of it only
+ * when it isn't rbxtsc: switching to goblox (or between goblox versions) is a full compile, and an rbxtsc key is the
+ * same as before goblox existed (roblox-ts's own version is already in the lockfile).
+ */
+export function buildCacheKey(root: string, channel: Channel, compiler?: CompilerKey): string {
 	const parts = [`v${BUILD_CACHE_VERSION}`, `channel ${channel}`, `strip ${STRIP_TRANSFORMER_VERSION}`];
+	if (compiler && compiler.name !== "rbxtsc") parts.push(`compiler ${compiler.name} ${compiler.version}`);
 	for (const file of KEY_FILES) {
 		const path = join(root, file);
 		parts.push(`${file} ${existsSync(path) ? sha256(readFileSync(path)) : "-"}`);
@@ -141,6 +149,7 @@ export function restoreBuildCache(
 	layout: CacheLayout,
 	channel: Channel,
 	candidates: (rel: string) => string[],
+	compiler?: CompilerKey,
 ): RestoreResult {
 	const dir = cacheDir(root, channel);
 	const manifestPath = join(dir, MANIFEST);
@@ -156,7 +165,7 @@ export function restoreBuildCache(
 		return drop("unreadable manifest");
 	}
 	if (manifest?.v !== BUILD_CACHE_VERSION || typeof manifest.files !== "object" || manifest.files === null) return drop("old cache format");
-	if (manifest.key !== buildCacheKey(root, channel)) return drop("tsconfig, package.json, a lockfile or the CLI changed");
+	if (manifest.key !== buildCacheKey(root, channel, compiler)) return drop("tsconfig, package.json, a lockfile, the compiler or the CLI changed");
 	const entries = Object.entries(manifest.files);
 	const files = join(dir, FILES);
 	const onDisk = listFiles(files).map((path) => posix(relative(files, path)));
@@ -177,12 +186,12 @@ export function restoreBuildCache(
 }
 
 /** Replaces the channel's cache with the current outDir (call after a successful, checked build). */
-export function saveBuildCache(root: string, layout: CacheLayout, channel: Channel): number {
+export function saveBuildCache(root: string, layout: CacheLayout, channel: Channel, compiler?: CompilerKey): number {
 	const dir = cacheDir(root, channel);
 	const files = join(dir, FILES);
 	rmSync(dir, { recursive: true, force: true });
 	mkdirSync(files, { recursive: true });
-	const manifest: Manifest = { v: BUILD_CACHE_VERSION, key: buildCacheKey(root, channel), files: {} };
+	const manifest: Manifest = { v: BUILD_CACHE_VERSION, key: buildCacheKey(root, channel, compiler), files: {} };
 	for (const path of listFiles(layout.outDir)) {
 		const rel = posix(relative(layout.outDir, path));
 		const bytes = readFileSync(path);

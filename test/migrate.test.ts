@@ -114,6 +114,7 @@ describe("migrate --from flamework (compat, the default)", () => {
 		expect(report).toContain("## Module-level state");
 		expect(report).toContain("- `src/shared/legacy.ts:3`: top-level let joined");
 		expect(report).toContain("## Rewritten");
+		expect(report).toContain("`bun add -d goblox`");
 		expect(report).toContain("src/server/services/base.ts: BaseService extends Module (base of ShopService)");
 	});
 

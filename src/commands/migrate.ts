@@ -8,6 +8,7 @@ import { flagBool, flagString, UsageError, type ParsedArgs } from "../args.ts";
 import { gitInfo } from "../git.ts";
 import { bold, cyan, dim, emitJson, green, info, isJson, red, warn, yellow } from "../log.ts";
 import { FLAG_KINDS, migrateFlamework, migrationReport, type FlagKind, type NetMode } from "../migrate.ts";
+import { GOBLOX_INSTALL } from "../compiler.ts";
 import { unifiedDiff } from "../textdiff.ts";
 
 export const migrateFlags = {
@@ -109,6 +110,7 @@ export async function migrateCommand(args: ParsedArgs) {
 	} else info(green("nothing flagged"));
 	if (writeReport) info(`report: ${cyan(reportPath)}`);
 	if (!dryRun) info("next: bun run build (what still fails is in the report)");
+	if (!dryRun) info(dim(`optional, a much faster compiler: ${GOBLOX_INSTALL} (goblox ignores JS tsconfig plugins other than @typetorch/transformer)`));
 	if (dryRun && result.changes.length === 0) warn("nothing to rewrite: is this a Flamework project?");
 }
 
