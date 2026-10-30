@@ -377,6 +377,8 @@ export function unexplainedOutputs(root: string, layout: TsLayout = tsLayout(roo
 }
 
 export interface BuildResult {
+	/** The compiler that built it (compiler.ts) and its installed version. */
+	compiler: { name: string; version: string };
 	meta: PayloadMeta;
 	timings: Record<string, number>;
 	target: BuildTarget;
@@ -630,7 +632,7 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		health,
 	};
 	writeFileSync(join(root, PAYLOAD_META), JSON.stringify(meta, null, "\t") + "\n");
-	return { meta, timings: watch.total(), target };
+	return { compiler: compilerKey, meta, timings: watch.total(), target };
 }
 
 /** Reads the last build's metadata and checks the .rbxm still matches it. */
