@@ -215,6 +215,7 @@ export async function deployCommand(args: ParsedArgs) {
 		by = built.target.git.userName;
 		bytes = payloadBytes(proj.root);
 		info(`  build       ${formatSeconds(watch.timings.build)}  ${describeBuild(meta)}  ${formatBytes(meta.bytes)}`);
+		info(dim(`  compiler    ${built.compiler.name} ${built.compiler.version}`));
 	}
 	if (meta.sources) info(dim(`  sources     ${formatSources(meta.sources)}`));
 	if (meta.protocol) info(dim(`  protocol    ${describeProtocol({ hash: meta.protocolHash, status: meta.protocol.status, since: meta.protocol.since })}`));

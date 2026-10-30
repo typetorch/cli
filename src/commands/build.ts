@@ -20,13 +20,14 @@ export function describeBuild(meta: PayloadMeta): string {
 
 export async function buildCommand(args: ParsedArgs) {
 	const proj = project(args);
-	const { meta, timings } = await buildPayload(proj, {
+	const { compiler, meta, timings } = await buildPayload(proj, {
 		branch: flagString(args, "branch"),
 		channel: channelFlag(args),
 		clean: flagBool(args, "clean"),
 	});
 	if (isJson()) return emitJson({ ...meta, timings });
 	info(`built ${describeBuild(meta)}`);
+	info(`  compiler    ${compiler.name} ${compiler.version}`);
 	info(`  ${PAYLOAD_FILE}  ${formatBytes(meta.bytes)}  ${meta.modules ?? "?"} modules  sha256 ${meta.sha256.slice(0, 16)}…`);
 	if (meta.sources) info(`  sources  ${formatSources(meta.sources)}`);
 	info(`  protocol ${describeProtocol({ hash: meta.protocolHash, status: meta.protocol?.status, since: meta.protocol?.since })}`);
@@ -53,9 +54,11 @@ export async function uploadCommand(args: ParsedArgs) {
 	if (flagBool(args, "no-build")) {
 		({ meta, bytes } = readBuiltPayload(proj.root));
 	} else {
-		meta = (await watch.stage("build", () => buildPayload(proj, { branch: flagString(args, "branch"), channel: channelFlag(args), clean: true }))).meta;
+		const built = await watch.stage("build", () => buildPayload(proj, { branch: flagString(args, "branch"), channel: channelFlag(args), clean: true }));
+		meta = built.meta;
 		bytes = payloadBytes(proj.root);
 		info(`  build       ${formatSeconds(watch.timings.build)}  ${describeBuild(meta)}`);
+		info(`  compiler    ${built.compiler.name} ${built.compiler.version}`);
 	}
 	const branch = flagString(args, "branch") ?? meta.branch;
 	if (branchNameError(branch)) throw new UsageError(branchNameError(branch)!);
