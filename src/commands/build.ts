@@ -11,7 +11,7 @@ import { keepPayload } from "../payloads.ts";
 import { fixCensoredName, uploadPayload } from "../upload.ts";
 import { channelFlag, openCloud, project, projectStateDir } from "./common.ts";
 
-export const buildFlags = { branch: "string", channel: "string", clean: "boolean" } as const;
+export const buildFlags = { branch: "string", channel: "string", clean: "boolean", "no-minify": "boolean" } as const;
 
 export function describeBuild(meta: PayloadMeta): string {
 	const state = meta.dirty ? "dirty" : "clean";
@@ -24,6 +24,7 @@ export async function buildCommand(args: ParsedArgs) {
 		branch: flagString(args, "branch"),
 		channel: channelFlag(args),
 		clean: flagBool(args, "clean"),
+		minify: !flagBool(args, "no-minify"),
 	});
 	if (isJson()) return emitJson({ ...meta, timings });
 	info(`built ${describeBuild(meta)}`);
@@ -38,6 +39,7 @@ export async function buildCommand(args: ParsedArgs) {
 }
 
 export const uploadFlags = {
+	"no-minify": "boolean",
 	branch: "string",
 	channel: "string",
 	"no-build": "boolean",
@@ -54,7 +56,7 @@ export async function uploadCommand(args: ParsedArgs) {
 	if (flagBool(args, "no-build")) {
 		({ meta, bytes } = readBuiltPayload(proj.root));
 	} else {
-		const built = await watch.stage("build", () => buildPayload(proj, { branch: flagString(args, "branch"), channel: channelFlag(args), clean: true }));
+		const built = await watch.stage("build", () => buildPayload(proj, { branch: flagString(args, "branch"), channel: channelFlag(args), clean: true, minify: !flagBool(args, "no-minify") }));
 		meta = built.meta;
 		bytes = payloadBytes(proj.root);
 		info(`  build       ${formatSeconds(watch.timings.build)}  ${describeBuild(meta)}`);

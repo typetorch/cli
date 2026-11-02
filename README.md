@@ -211,7 +211,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | Command | Does |
 |---|---|
 | `typetorch init [--dir <folder>] [--phase <name>] [--answers <file>] [--agent] [--teardown]` | the guided setup, from an empty folder to a live game (see "Setup"); `--agent` prints `AGENT_PROMPT.md` again; `--teardown` removes the backend step 6 installed (asks first; its data only when you say so) |
-| `typetorch build [--branch <b>] [--channel prod\|dev] [--clean]` | writes `src/shared/build.ts`, runs the compiler (goblox when installed, else rbxtsc; `bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first, then restore the build cache |
+| `typetorch build [--branch <b>] [--channel prod\|dev] [--clean] [--no-minify]` | writes `src/shared/build.ts`, runs the compiler (goblox when installed, else rbxtsc; `bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first, then restore the build cache |
 | `typetorch upload [--no-build]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
 | `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: deploy message, durable head, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
 | `typetorch deploy --widen <1-100> [--branch]` | re-send the branch's live deploy (same seq) to more servers; dev-channel branches only (see "Rollouts") |
@@ -368,6 +368,16 @@ goblox is selected and the tsconfig lists one. Set `"compiler": "rbxtsc"` to kee
   is gone are removed first; dev and prod never share one. Switching to goblox, or to another goblox version, is a full
   compile (the compiler is in the cache key; rbxtsc's keys are what they were before goblox). Needs `"incremental": true` with the tsbuildinfo inside
   outDir. `TYPETORCH_BUILD_CACHE=0` turns it off.
+- **Production pack (`src/pack.ts`):** `build` and `deploy` pack a transformed copy of the project's `$path` folders
+  (`.typetorch/pack/`), so the artifact id, the signature and the `typetorch test` gate all cover the final bytes:
+  comments and whitespace stripped by darklua's parser (lines stay where they are, so error traces and analytics still
+  match), `__DEV__` set to false with its dead branches removed (skipped with a warning when game code sets it), and
+  `*.story` modules no other module names left out. Packages are never shaken (their folder names aren't the names code
+  requires them by). Needs darklua (`rokit add seaofvoices/darklua`; `TYPETORCH_DARKLUA` picks a binary): without it
+  the build warns and packs unminified. Each module's output is cached by content hash in
+  `.typetorch/build-cache/pack/`, and a darklua failure fails the build. `--no-minify`, or `"minify": false` in
+  typetorch.json, turns it off. `typetorch serve` never packs. On a 1160-module game: about 2-3 s cold, under 0.5 s
+  unchanged, the rbxm 26-27% smaller.
 - **Payload check:** the built `.rbxm` must be one `Model` holding only `Folder`s and `ModuleScript`s; anything else
   (Scripts, values from `.txt` files, models from `.rbxm` files...) fails the build with its path.
 - **Debug macros per channel:** dev builds keep the `$print`/`$warn`/`$dbg` macros with their `[src/file.ts:line]`

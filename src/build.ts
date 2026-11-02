@@ -6,7 +6,9 @@
  *   -> rojo build stamped with `<commit7>[-dirty]` -> hash -> rojo build stamped with the final id
  *   -> payload contents check (only Folders and ModuleScripts) -> .typetorch/payload.rbxm + payload.json.
  */
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { packProject, type PackResult } from "./pack.ts";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import type { Project } from "./config.ts";
@@ -49,7 +51,7 @@ export const PAYLOAD_FILE = `${OUT_DIR}/payload.rbxm`;
 export const PAYLOAD_META = `${OUT_DIR}/payload.json`;
 export { PACKAGES_MANIFEST };
 /** Files TypeTorch writes inside the repo; they never make a build "dirty". */
-export const GENERATED_PATHS = [BUILD_FILE, GEN_PROJECT, PROD_TSCONFIG, `${OUT_DIR}/`];
+export const GENERATED_PATHS = [BUILD_FILE, GEN_PROJECT, PROD_TSCONFIG, `${OUT_DIR}/`, ".typetorch/pack/", ".typetorch/pack-work/"];
 /** File types that can end up in a payload (compiled by rbxtsc, or synced by Rojo). */
 const PAYLOAD_FILE_TYPES = /\.(ts|tsx|lua|luau|json|toml|ya?ml|txt|csv|rbxm|rbxmx|model\.json|meta\.json)$/i;
 
@@ -243,6 +245,19 @@ export function rojoBinary(): string {
 	return settings().get("TYPETORCH_ROJO")?.value || "rojo";
 }
 
+export function darkluaBinary(): string {
+	return process.env.TYPETORCH_DARKLUA || "darklua";
+}
+
+/** The installed darklua's version line, or undefined when it can't run. */
+export function darkluaVersion(): string | undefined {
+	try {
+		return execFileSync(darkluaBinary(), ["--version"], { encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "ignore"] }).trim();
+	} catch {
+		return undefined;
+	}
+}
+
 export function luneBinary(): string {
 	return settings().get("TYPETORCH_LUNE")?.value || "lune";
 }
@@ -385,6 +400,8 @@ export interface BuildResult {
 }
 
 export interface BuildOptions {
+	/** The production stages (pack.ts); false: --no-minify. */
+	minify?: boolean;
 	branch?: string;
 	channel?: Channel;
 	/** `git clean -fdX` out/ and include/ first (deploy and upload always do; `build --clean`). */
@@ -579,10 +596,25 @@ export async function buildPayload(project: Project, options: BuildOptions = {})
 		Object.assign(stamped, healthAttributes(health));
 		return stamped;
 	};
+	// The production stages (pack.ts): rojo packs a transformed copy, so the id and the signature cover the final bytes.
+	let packed: PackResult | undefined;
+	if (options.minify !== false && (project.config as { minify?: boolean }).minify !== false) {
+		const version = darkluaVersion();
+		if (!version) {
+			warn(`darklua not found: this payload isn't minified. Add it with \`rokit add seaofvoices/darklua\`, or set "minify": false in typetorch.json to silence this`);
+		} else {
+			await watch.stage("pack", async () => {
+				packed = await packProject({ root, project: projectJson, paths: projectPaths(projectJson), darklua: darkluaBinary(), darkluaVersion: version, run });
+			});
+			for (const reason of packed!.skipped) warn(`pack: ${reason}`);
+			debug(`pack: ${packed!.modules} modules (${packed!.processed} processed), ${packed!.sourceBytes} -> ${packed!.packedBytes} bytes, ${packed!.dropped.length} dropped`);
+		}
+	}
+	const rojoProject = packed?.project ?? projectJson;
 	const rojoBuild = async (id: string): Promise<Uint8Array> => {
 		debug(`rojo build stamped ArtifactId=${id}`);
 		const children = { [ASSETS_PAYLOAD_FOLDER]: { [ASSETS_PAYLOAD_ATTRIBUTE]: assetsJson } };
-		writeFileSync(genPath, JSON.stringify(stampProject(projectJson, attributes(id), children), null, "\t"));
+		writeFileSync(genPath, JSON.stringify(stampProject(rojoProject, attributes(id), children), null, "\t"));
 		try {
 			await run([rojoBinary(), "build", GEN_PROJECT, "-o", PAYLOAD_FILE], root);
 		} finally {
