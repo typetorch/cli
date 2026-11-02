@@ -210,7 +210,7 @@ export async function deployCommand(args: ParsedArgs) {
 		info(`using ${describeBuild(meta)}`);
 	} else {
 		const notes = async (branch: string) => ({ message: note, previous: withLocal(proj).heads.get(branch) });
-		const built = await watch.stage("build", () => buildPayload(proj, { branch: branchFlag, channel: channelOverride, clean: true, notes }));
+		const built = await watch.stage("build", () => buildPayload(proj, { branch: branchFlag, channel: channelOverride, clean: true, notes, minify: !flagBool(args, "no-minify") }));
 		meta = built.meta;
 		by = built.target.git.userName;
 		bytes = payloadBytes(proj.root);

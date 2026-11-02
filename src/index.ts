@@ -73,7 +73,7 @@ const COMMANDS: Record<string, Command> = {
 		flags: buildFlags,
 		run: buildCommand,
 		summary: "compile and pack the payload",
-		usage: `typetorch build [--branch <b>] [--channel prod|dev] [--clean]
+		usage: `typetorch build [--branch <b>] [--channel prod|dev] [--clean] [--no-minify]
 
   Writes src/shared/build.ts, runs the compiler (goblox when installed, else rbxtsc; typetorch.json "compiler" or
   TYPETORCH_COMPILER picks one) (prod channel: $print/$warn compiled away, no source paths), then
@@ -98,7 +98,7 @@ const COMMANDS: Record<string, Command> = {
 		flags: deployFlags,
 		run: deployCommand,
 		summary: "build, upload, approve and send to live servers",
-		usage: `typetorch deploy [--branch <b>] [--channel prod|dev] [--no-build] [--dry-run] [--message <text>] [--force] [--reupload <build>]
+		usage: `typetorch deploy [--branch <b>] [--channel prod|dev] [--no-build] [--no-minify] [--dry-run] [--message <text>] [--force] [--reupload <build>]
                  [--no-registry] [--moderation-timeout <s>] [--propose] [--proposed-by <who>]
                  [--key-file <path>] [--fallback-key-file <path>]
 

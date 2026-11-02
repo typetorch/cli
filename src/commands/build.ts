@@ -24,6 +24,7 @@ export async function buildCommand(args: ParsedArgs) {
 		branch: flagString(args, "branch"),
 		channel: channelFlag(args),
 		clean: flagBool(args, "clean"),
+		minify: !flagBool(args, "no-minify"),
 	});
 	if (isJson()) return emitJson({ ...meta, timings });
 	info(`built ${describeBuild(meta)}`);
