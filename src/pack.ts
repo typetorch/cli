@@ -4,7 +4,7 @@
  * syncs the project itself and never comes here.
  *
  * Stages, on by default for deploys; `"minify": false` in typetorch.json or --no-minify turns them off:
- *   1. strip: comments and whitespace, with darklua's parser. Lines stay where they are (generator retain_lines), so
+ *   1. strip: comments (but the compiler's header line) and whitespace, with darklua's parser. Lines stay where they are (generator retain_lines), so
  *      error traces and analytics fingerprints still point at the compiled source.
  *   2. define: `__DEV__` becomes false and its dead branches go, like Vite's define. React reads it from _G or
  *      ReactGlobals, defaulting to false; a game that sets it switches this stage off.
@@ -23,6 +23,8 @@ export const PACK_DIR = ".typetorch/pack";
 const CACHE_SUBDIR = "pack";
 const WORK_DIR = ".typetorch/pack-work";
 const SCRIPT = /\.(luau|lua)$/;
+/** darklua's `except` pattern (Rust regex) for the comment rbxtsc and goblox put on line 1. */
+export const COMPILER_HEADER = "^--\\s*Compiled with ";
 /** Below this many changed modules another process doesn't pay for itself. */
 const FILES_PER_PROCESS = 200;
 const MAX_PROCESSES = 4;
@@ -56,7 +58,8 @@ function sha(text: string | Uint8Array): string {
 /** darklua's settings for these stages. */
 export function darkluaConfig(stages: PackStages): object {
 	const rules: unknown[] = [];
-	if (stages.strip) rules.push("remove_comments", "remove_spaces");
+	// The compiler's header line (`-- Compiled with roblox-ts v3.0.0`) stays: it says what produced the module.
+	if (stages.strip) rules.push({ rule: "remove_comments", except: [COMPILER_HEADER] }, "remove_spaces");
 	if (stages.define) {
 		rules.push({ rule: "inject_global_value", identifier: "__DEV__", value: false }, "compute_expression", "remove_unused_if_branch", "remove_unused_while", "remove_empty_do");
 	}

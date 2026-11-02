@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { buildFlags, uploadFlags } from "../src/commands/build.ts";
 import { deployFlags } from "../src/commands/deploy.ts";
-import { darkluaConfig, defineDev, packProject, remapProject, setsDev, shake } from "../src/pack.ts";
+import { COMPILER_HEADER, darkluaConfig, defineDev, packProject, remapProject, setsDev, shake } from "../src/pack.ts";
 
 describe("defineDev", () => {
 	it("empties a whole-line binding, keeping the line", () => {
@@ -107,6 +107,13 @@ describe("packProject", () => {
 		write("out/c.luau", "_G.__DEV__ = true\n");
 		const result = await packProject(options(root, fake().run));
 		expect(result.skipped.length).toBe(1);
+	});
+
+	it("keeps the compiler's header comment", () => {
+		const rule = (darkluaConfig({ strip: true, define: false, shake: false }) as any).rules[0];
+		expect(rule).toEqual({ rule: "remove_comments", except: [COMPILER_HEADER] });
+		expect(new RegExp(COMPILER_HEADER).test("-- Compiled with roblox-ts v3.0.0")).toBe(true);
+		expect(new RegExp(COMPILER_HEADER).test("-- a normal comment")).toBe(false);
 	});
 
 	it("keeps retain_lines whatever the stages", () => {
