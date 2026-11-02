@@ -89,7 +89,7 @@ const COMMANDS: Record<string, Command> = {
 		flags: uploadFlags,
 		run: uploadCommand,
 		summary: "build and upload a payload, no deploy",
-		usage: `typetorch upload [--branch <b>] [--channel prod|dev] [--no-build] [--moderation-timeout <s>]
+		usage: `typetorch upload [--branch <b>] [--channel prod|dev] [--no-minify] [--no-build] [--moderation-timeout <s>]
 
   Uploads the payload as a NEW private Model asset named tt-<branch>-<commit>[-dirty] and waits for moderation.
   Does not touch live servers.`,

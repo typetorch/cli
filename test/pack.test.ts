@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { buildFlags, uploadFlags } from "../src/commands/build.ts";
+import { deployFlags } from "../src/commands/deploy.ts";
 import { darkluaConfig, defineDev, packProject, remapProject, setsDev, shake } from "../src/pack.ts";
 
 describe("defineDev", () => {
@@ -110,5 +112,11 @@ describe("packProject", () => {
 	it("keeps retain_lines whatever the stages", () => {
 		expect((darkluaConfig({ strip: true, define: true, shake: true }) as any).generator).toBe("retain_lines");
 		expect(remapProject({ tree: { a: { $path: "./x" } } }, "d").tree.a.$path).toBe("d/x");
+	});
+});
+
+describe("--no-minify", () => {
+	it("is a known flag wherever a payload is built", () => {
+		for (const flags of [buildFlags, uploadFlags, deployFlags]) expect((flags as Record<string, string>)["no-minify"]).toBe("boolean");
 	});
 });

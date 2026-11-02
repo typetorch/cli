@@ -49,6 +49,7 @@ import type { OpenCloud } from "../opencloud.ts";
 import type { LiveHead } from "../deployments.ts";
 
 export const deployFlags = {
+	"no-minify": "boolean",
 	branch: "string",
 	channel: "string",
 	"no-build": "boolean",
