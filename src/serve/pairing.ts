@@ -21,7 +21,10 @@ export const MAX_BAD_CODES = 5;
 export interface Device {
 	/** What the person called their Studio (the plugin sends the Roblox user name). */
 	name: string;
-	/** Their Roblox user id, which the plugin sends when pairing: whose prompts the Claude tab sends (claude.ts). */
+	/**
+	 * Their Roblox user id: whose prompts the Claude tab sends (claude.ts). The owner fixes it when making the code
+	 * (`serve pair --claude-user <id>`); a device never picks its own (security audit C-1). Absent: no Claude tab.
+	 */
 	userId?: number;
 	/** SHA-256 of the token, hex. */
 	hash: string;
@@ -68,7 +71,7 @@ export class Pairing {
 	private devices: Device[] = [];
 	/** The owner's tunnel URL (`serve pair --url`), remembered so `serve pair` prints one link with the code in it. */
 	url?: string;
-	private code?: { code: string; expiresAt: number };
+	private code?: { code: string; expiresAt: number; userId?: number };
 	private badCodes = 0;
 
 	constructor(
@@ -93,20 +96,26 @@ export class Pairing {
 	/**
 	 * A new one-time code (replaces any earlier one and unlocks pairing). `url`: the owner's tunnel URL, remembered for
 	 * later codes. With a URL, `link` is the one thing to share: `<url>#<code>`, which the plugin's Remote box takes as is.
+	 * `userId`: the Roblox user the owner pairs this device as (the Claude tab's user); without one the device gets none.
 	 */
-	newCode(url?: string): { code: string; expiresAt: string; url?: string; link?: string } {
+	newCode(url?: string, userId?: number): { code: string; expiresAt: string; url?: string; link?: string; userId?: number } {
+		if (userId !== undefined && (!Number.isSafeInteger(userId) || userId <= 0)) throw new Error("userId: expected a Roblox user id");
 		if (url !== undefined) {
 			this.url = normalizeUrl(url);
 			this.save();
 		}
 		const code = newCode();
 		const expiresAt = this.now() + CODE_MINUTES * 60_000;
-		this.code = { code, expiresAt };
+		this.code = { code, expiresAt, ...(userId !== undefined ? { userId } : {}) };
 		this.badCodes = 0;
-		return { code, expiresAt: new Date(expiresAt).toISOString(), ...(this.url ? { url: this.url, link: `${this.url}#${code}` } : {}) };
+		return { code, expiresAt: new Date(expiresAt).toISOString(), ...(this.url ? { url: this.url, link: `${this.url}#${code}` } : {}), ...(userId !== undefined ? { userId } : {}) };
 	}
 
-	/** Trades the current code for a device token; the code works once. Throws a message for the caller. */
+	/**
+	 * Trades the current code for a device token; the code works once. Throws a message for the caller. `userId` (what
+	 * the plugin says its user is) must match the one the owner bound to the code, if any; the device gets the bound
+	 * one, never the caller's (an unbound code pairs without a user).
+	 */
 	pair(code: string, name: string, userId?: number): { token: string; expiresAt: string } {
 		const current = this.code;
 		if (!current || this.now() > current.expiresAt) throw new Error("no pairing code is active: ask the owner to run `typetorch serve pair`");
@@ -116,12 +125,16 @@ export class Pairing {
 			if (this.badCodes >= MAX_BAD_CODES) this.code = undefined;
 			throw new Error("wrong pairing code");
 		}
+		if (current.userId !== undefined && userId !== current.userId) {
+			this.code = undefined;
+			throw new Error("this pairing link is for another Roblox user: ask the owner for one made for you");
+		}
 		this.code = undefined;
 		const token = randomBytes(32).toString("base64url");
 		const createdAt = this.now();
 		const device: Device = {
 			name: name.slice(0, 60) || "Studio",
-			...(userId !== undefined ? { userId } : {}),
+			...(current.userId !== undefined ? { userId: current.userId } : {}),
 			hash: hashOf(token),
 			createdAt: new Date(createdAt).toISOString(),
 			expiresAt: new Date(createdAt + TOKEN_DAYS * 86_400_000).toISOString(),
