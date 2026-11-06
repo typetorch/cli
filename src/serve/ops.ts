@@ -101,9 +101,10 @@ export async function studioSend(
 
 /** `typetorch serve pair`: a new one-time pairing code for a remote Studio (serve must run with --remote). */
 /** A one-time pairing code; `url` (the tunnel's address) is remembered, and with one the result has a shareable `link`. */
-export async function servePairCode(root: string, url?: string): Promise<{ code: string; expiresAt: string; url?: string; link?: string }> {
+/** `userId`: the Roblox user the paired device acts as in the Claude tab (none: no Claude tab for it). */
+export async function servePairCode(root: string, url?: string, userId?: number): Promise<{ code: string; expiresAt: string; url?: string; link?: string; userId?: number }> {
 	const running = await requireRunning(root);
-	return call(running.file.port, "POST", "/tt/remote/code", url === undefined ? {} : { url });
+	return call(running.file.port, "POST", "/tt/remote/code", { ...(url === undefined ? {} : { url }), ...(userId === undefined ? {} : { userId }) });
 }
 
 export async function serveDevices(root: string): Promise<{ devices: { name: string; createdAt: string; expiresAt: string; lastSeen?: string }[] }> {

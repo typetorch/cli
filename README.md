@@ -246,7 +246,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--no-live] [--with <scripts>] [--dev-branch <b>]` | the Studio dev loop in one process: rbxtsc -w, `rojo serve`, the game's `live` script (on by default when package.json has one; `--no-live` off), extra package.json scripts, and the control API the TypeTorch Studio plugin attaches to by itself; `--dev-branch`: where the plugin's "Publish to dev" deploys hot assets (default `dev`); see "Studio: typetorch serve" |
 | `typetorch serve --remote [--remote-port <n>] [--url <your tunnel> \| --no-tunnel]` | also lets a Studio on another machine in: a gateway on `127.0.0.1:34890` behind an automatic Cloudflare quick tunnel (cloudflared installed if missing), and one pairing link to send; see "A Studio on another machine" |
 | `typetorch serve --claude [--claude-users <ids>]` | also runs remote-claude for the plugin's Claude tab; `--claude-users` defaults to the owners in typetorch.json (remembered once given); see "Claude in Studio" |
-| `typetorch serve pair [--url <tunnel URL>]` / `devices` / `unpair (--name <device> \| --all)` | another one-time pairing link (15 min) / the paired devices / revoke them |
+| `typetorch serve pair [--url <tunnel URL>] [--claude-user <id>]` / `devices` / `unpair (--name <device> \| --all)` | another one-time pairing link (15 min) / the paired devices / revoke them |
 | `typetorch serve status` / `stop` / `restart <watch\|rojo\|claude\|<script>>` / `logs [--studio] [--since <seq>] [--limit <n>] [--follow]` | the running server's children, attached Studios, sync state, compile errors and pairing link / stop it / restart one child / its log |
 | `typetorch studio status` / `reconnect [--anyway] [--target <id\|edit>]` / `play [--run]` / `stop` / `logs [--since <seq>] [--limit <n>] [--follow]` | drives the Studio the plugin attached: its sync state / resync from scratch / start / end a playtest / Studio's Output. `--timeout <s>`: how long to wait for Studio (default 20) |
 | `typetorch studio install-plugin [--from <dir>]` | builds the TypeTorch Studio plugin (the game's devDependency `@typetorch/studio-plugin`, or `--from` a checkout) with Rojo into Studio's plugins folder as `TypeTorchSync.rbxm` |
@@ -618,7 +618,8 @@ instead if you don't want the devDependency.
   edits a copy of this branch (Code mode; a prod-channel branch works too, on `remote-claude/<branch>`), then the tab
   shows **Apply** (the change goes into this checkout, uncommitted, so Rojo syncs it to Studio), **Deploy to dev**
   (`--dev-branch`) and **Discard**. Needs `@typetorch/dev-server` 0.3.4 or later. `--claude-users <ids>` lists the Roblox user ids allowed (remembered; before that, the owners in `typetorch.json`),
-  so add a remote helper's id there too: a remote Studio prompts as the Roblox user it paired with, and serve pairs with
+  so add a remote helper's id there too: a remote Studio prompts as the Roblox user you bound to its pairing link
+  (`typetorch serve pair --claude-user <their id>`; the device can't choose it, and without it gets no Claude tab), and serve pairs with
   remote-claude for them (nobody handles a remote-claude code). A remote-claude you start yourself in the repo works the
   same way (serve finds it through `.typetorch/remote-claude.session.json`). The tab sends Code only (the Live / Code
   pill just points you to the in-game DEV > Claude tab for Live) and has the in-game tab's other options: Toolbox,

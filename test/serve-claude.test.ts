@@ -120,7 +120,7 @@ describe("serve --claude", () => {
 	});
 
 	test("a remote Studio prompts as the Roblox user it paired with, whatever it sends", async () => {
-		const { code } = await call<{ code: string }>(controlPort, "POST", "/tt/remote/code");
+		const { code } = await call<{ code: string }>(controlPort, "POST", "/tt/remote/code", { userId: 8 });
 		const remote = (path: string, init: RequestInit = {}, bearer?: string) =>
 			fetch(base + path, { ...init, headers: { "x-typetorch": "1", "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) } });
 		const paired = await remote("/tt/pair", { method: "POST", body: JSON.stringify({ code, name: "asset guy", userId: 8 }) });
@@ -148,6 +148,30 @@ describe("serve --claude", () => {
 		writeFileSync(join(root, CLAUDE_SESSION_FILE), JSON.stringify({ v: 1, sid: "f".repeat(32), branch: "dev", port, url: null, pid: process.pid }));
 		expect(await call<unknown>(controlPort, "GET", "/tt/claude/chat?user=7")).toEqual({ prompts: [] });
 		writeSession(port);
+	});
+
+	test("a device can't claim the owner's user at pairing, nor read a local caller's chat (audit C-1)", async () => {
+		const remote = (path: string, init: RequestInit = {}, bearer?: string) =>
+			fetch(base + path, { ...init, headers: { "x-typetorch": "1", "content-type": "application/json", ...(bearer ? { authorization: `Bearer ${bearer}` } : {}) } });
+		syncCode();
+		await call(controlPort, "POST", "/tt/claude/prompt", { user: 7, prompt: "owner secret" });
+		await call(controlPort, "POST", "/tt/claude/chat", { user: 7, conversationId: "c-owner", prompts: ["p1"] });
+		// a code bound to 8, redeemed claiming the owner's 7: refused
+		const bound = await call<{ code: string }>(controlPort, "POST", "/tt/remote/code", { userId: 8 });
+		expect((await remote("/tt/pair", { method: "POST", body: JSON.stringify({ code: bound.code, name: "helper", userId: 7 }) })).status).toBe(403);
+		// an unbound code, claiming 7: paired, but without a Claude user
+		const free = await call<{ code: string }>(controlPort, "POST", "/tt/remote/code");
+		const { token: freeToken } = (await (await remote("/tt/pair", { method: "POST", body: JSON.stringify({ code: free.code, name: "helper", userId: 7 }) })).json()) as { token: string };
+		expect((await remote("/tt/claude/chat", {}, freeToken)).status).toBe(403);
+		const sent = fake.state.prompts.length;
+		expect((await remote("/tt/claude/prompt", { method: "POST", body: JSON.stringify({ prompt: "x" }) }, freeToken)).status).toBe(403);
+		expect(fake.state.prompts.length).toBe(sent);
+		// even paired as 7 by the owner, the device has its own chat, not the local one
+		const as7 = await call<{ code: string }>(controlPort, "POST", "/tt/remote/code", { userId: 7 });
+		const { token } = (await (await remote("/tt/pair", { method: "POST", body: JSON.stringify({ code: as7.code, name: "laptop", userId: 7 }) })).json()) as { token: string };
+		expect(await (await remote("/tt/claude/chat", {}, token)).json()).toEqual({ prompts: [] });
+		expect((await call<{ conversationId?: string }>(controlPort, "GET", "/tt/claude/chat?user=7")).conversationId).toBe("c-owner");
+		await expect(call(controlPort, "POST", "/tt/remote/code", { userId: "7" })).rejects.toThrow("userId");
 	});
 
 	test("Live mode, Toolbox, screenshots and context reach remote-claude as the in-game tab sends them", async () => {
@@ -187,7 +211,7 @@ describe("serve --claude", () => {
 		const refused = new WebSocket(`ws://127.0.0.1:${controlPort}/tt/claude/stream?user=7`);
 		await expect(first(refused)).rejects.toThrow();
 		// a paired device: its own user, whatever ?user= says
-		const { code } = await call<{ code: string }>(controlPort, "POST", "/tt/remote/code");
+		const { code } = await call<{ code: string }>(controlPort, "POST", "/tt/remote/code", { userId: 8 });
 		const paired = await fetch(base + "/tt/pair", { method: "POST", headers: { "x-typetorch": "1", "content-type": "application/json" }, body: JSON.stringify({ code, name: "asset guy", userId: 8 }) });
 		const { token } = (await paired.json()) as { token: string };
 		const remote = new WebSocket(`${base.replace("http", "ws")}/tt/claude/stream?user=7`, { headers: { "x-typetorch": "1", authorization: `Bearer ${token}` } } as never);

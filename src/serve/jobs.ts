@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { safeText } from "../httphints.ts";
 import { HttpError } from "./server.ts";
 
 export const JOB_KINDS = ["assets-status", "assets-sync", "assets-deploy-dev"] as const;
@@ -131,7 +132,8 @@ export class JobRunner {
 	}
 
 	private line(job: Job, raw: string) {
-		const text = raw.trimEnd();
+		// a job's output can carry text from a paired device (a Studio export's messages): no terminal escapes
+		const text = safeText(raw).trim();
 		if (!text) return;
 		job.tail.push(text);
 		if (job.tail.length > TAIL_LINES) job.tail.splice(0, job.tail.length - TAIL_LINES);
