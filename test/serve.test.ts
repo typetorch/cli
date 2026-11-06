@@ -3,7 +3,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pluginProject } from "../src/commands/serve";
+import { pluginProject, printLine } from "../src/commands/serve";
 import { CompileTracker } from "../src/serve/compile";
 import { call, ServeClientError } from "../src/serve/client";
 import { handleMessage, TOOLS } from "../src/commands/mcp";
@@ -91,6 +91,26 @@ describe("ControlServer", () => {
 		expect(status.studios[0]).toMatchObject({ id: "p1", mode: "edit", placeName: "Cecot", sync: { status: "connected", detail: "synced" } });
 		const logs = await call<{ lines: { text: string; level: string }[] }>(port, "GET", "/tt/logs?source=studio");
 		expect(logs.lines.map((l) => [l.level, l.text])).toEqual([["warn", "hello from Studio"]]);
+	});
+
+	test("a plugin's log lines and names are stored without terminal escapes (audit C-2)", async () => {
+		await call(port, "POST", "/tt/plugin/hello", { id: "p9", mode: "edit", placeId: 2, gameId: 1, placeName: "Evil\u001b]0;title\u0007" });
+		await call(port, "POST", "/tt/plugin/state", { id: "p9", status: "connected", detail: "x\u001b[2Ky" });
+		await call(port, "POST", "/tt/plugin/logs", { id: "p9", lines: [{ text: "\u001b[1A\u001b[2Kfake line\r\nok" }] });
+		const logs = await call<{ lines: { text: string }[] }>(port, "GET", "/tt/logs?source=studio");
+		expect(logs.lines.at(-1)?.text).toBe("fake line ok");
+		expect(server.status().studios.find((s) => s.id === "p9")).toMatchObject({ placeName: "Evil", sync: { detail: "xy" } });
+		const serveLogs = await call<{ lines: { text: string }[] }>(port, "GET", "/tt/logs");
+		expect(JSON.stringify(serveLogs)).not.toContain("\\u001b");
+		const printed: string[] = [];
+		const log = console.log;
+		console.log = (text: string) => void printed.push(text);
+		try {
+			printLine({ source: "studio\u001b[2J", level: "info", text: "a\u001b]0;t\u0007b" });
+		} finally {
+			console.log = log;
+		}
+		expect(printed.join("")).not.toMatch(/\u001b[\]2J]|\u0007/);
 	});
 
 	test("rejects bad plugin bodies and unknown plugins", async () => {
@@ -276,6 +296,17 @@ describe("hot asset jobs", () => {
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
+	});
+
+	test("a job's output reaches the log without terminal escapes (audit C-2)", async () => {
+		const seen: string[] = [];
+		const hostile = () => [process.execPath, "-e", `console.error("\\u001b]0;pwned\\u0007\\u001b[2Kerror: bad\\u001b[31m name\\r"); process.exit(1)`];
+		const runner = new JobRunner({ root: process.cwd(), devBranch: "dev", isProd: () => false, baseArgs: [], log: (_, text) => seen.push(text), command: hostile });
+		const job = runner.start("assets-status");
+		for (let i = 0; i < 100 && job.state === "running"; i++) await Bun.sleep(50);
+		expect(job.tail).toEqual(["error: bad name"]);
+		expect(job.error).toBe("bad name");
+		expect(seen.join("\n")).not.toContain("\u001b");
 	});
 
 	test("never deploys a prod-channel branch from the plugin", () => {

@@ -23,6 +23,7 @@ import { serveClaudeStream } from "./claude-stream.ts";
 import { acceptWebSocket, refuseUpgrade, type WebSocketConnection } from "./ws.ts";
 import type { Socket } from "node:net";
 import type { Pairing } from "./pairing.ts";
+import { safeText } from "../httphints.ts";
 
 /** Lines kept per source group (serve's own children, Studio). */
 const RING_SIZE = 2000;
@@ -318,7 +319,7 @@ export class ControlServer {
 			}
 			const gone = new AbortController();
 			res.on("close", () => gone.abort());
-			const result = await this.route(req.method ?? "GET", url, body as Record<string, unknown> | undefined, gone.signal, remote === undefined ? undefined : { userId: remoteUser });
+			const result = await this.route(req.method ?? "GET", url, body as Record<string, unknown> | undefined, gone.signal, remote === undefined ? undefined : { userId: remoteUser, device: remote });
 			send(res, 200, result);
 		} catch (error) {
 			if (error instanceof HttpError || error instanceof ClaudeError) send(res, error.status, { error: error.message });
@@ -341,9 +342,9 @@ export class ControlServer {
 
 	/**
 	 * `gone`: the caller hung up (a long poll must not hand its commands to a closed connection). `remote`: the paired
-	 * device a remote request came from (absent: a local caller).
+	 * device a remote request came from (absent: a local caller): the user the owner paired it as, and its label.
 	 */
-	protected async route(method: string, url: URL, body: Record<string, unknown> | undefined, gone?: AbortSignal, remote?: { userId?: number }): Promise<unknown> {
+	protected async route(method: string, url: URL, body: Record<string, unknown> | undefined, gone?: AbortSignal, remote?: { userId?: number; device?: string }): Promise<unknown> {
 		const key = `${method} ${url.pathname}`;
 		switch (key) {
 			case "GET /tt/hello":
@@ -421,8 +422,10 @@ export class ControlServer {
 				return this.pluginHello(body ?? {});
 			case "POST /tt/remote/code": {
 				const url = body?.url === undefined ? undefined : str(body.url, "url", 300);
+				const userId = body?.userId;
+				if (userId !== undefined && (typeof userId !== "number" || !Number.isSafeInteger(userId) || userId <= 0)) throw new HttpError(400, "userId: expected a Roblox user id");
 				try {
-					return this.pairing().newCode(url);
+					return this.pairing().newCode(url, userId);
 				} catch (error) {
 					throw new HttpError(400, (error as Error).message);
 				}
@@ -437,7 +440,7 @@ export class ControlServer {
 				const studio = this.touch(str(body?.id, "id", 140));
 				const status = str(body?.status, "status", 20);
 				if (!SYNC_STATES.has(status)) throw new HttpError(400, "status: unknown value");
-				const detail = typeof body?.detail === "string" ? body.detail.slice(0, 500) : undefined;
+				const detail = typeof body?.detail === "string" ? safeText(body.detail.slice(0, 500)) : undefined;
 				const changed = studio.sync.status !== status || studio.sync.detail !== detail;
 				studio.sync = { status: status as StudioInfo["sync"]["status"], detail, at: new Date().toISOString() };
 				if (changed) this.serveLogs.push("studio", "info", `${studio.mode} plugin (${studio.placeName}): ${status}${detail ? ` (${detail})` : ""}`);
@@ -449,7 +452,7 @@ export class ControlServer {
 				for (const entry of lines as Record<string, unknown>[]) {
 					const level = typeof entry?.level === "string" && LEVELS.has(entry.level) ? (entry.level as LogLine["level"]) : "info";
 					if (typeof entry?.text !== "string") continue;
-					this.studioLogs.push(studio.mode, level, entry.text.slice(0, 4000));
+					this.studioLogs.push(studio.mode, level, safeText(entry.text.slice(0, 4000)));
 				}
 				return { ok: true };
 			}
@@ -464,7 +467,7 @@ export class ControlServer {
 				if (body?.attachments !== undefined && attachments === undefined) throw new HttpError(400, "attachments: a list of attachment ids");
 				const context = body?.context === undefined ? undefined : typeof body.context === "object" && body.context !== null && !Array.isArray(body.context) ? (body.context as Record<string, unknown>) : undefined;
 				if (body?.context !== undefined && context === undefined) throw new HttpError(400, "context: an object");
-				return this.claude().prompt(this.claudeUser(remote, body?.user), prompt, conversationId, { mode, toolbox: body?.toolbox === true, attachments, context });
+				return this.claude().prompt(this.claudeUser(remote, body?.user), prompt, conversationId, { mode, toolbox: body?.toolbox === true, attachments, context }, remote?.device);
 			}
 			case "GET /tt/claude/prompt": {
 				const id = str(url.searchParams.get("id") ?? undefined, "id", 64);
@@ -484,12 +487,12 @@ export class ControlServer {
 				return this.claude().passthrough(this.claudeUser(remote, body?.user), method, str(body?.path, "path", 200), body?.body);
 			}
 			case "GET /tt/claude/chat":
-				return this.claude().chat(this.claudeUser(remote, url.searchParams.get("user")));
+				return this.claude().chat(this.claudeUser(remote, url.searchParams.get("user")), remote?.device);
 			case "POST /tt/claude/chat": {
 				const conversationId = body?.conversationId === undefined || body.conversationId === null ? undefined : str(body.conversationId, "conversationId", 64);
 				if (!Array.isArray(body?.prompts) || body.prompts.length > 500) throw new HttpError(400, "prompts: a list of prompt ids");
 				const prompts = (body.prompts as unknown[]).map((id) => str(id, "prompts[]", 64));
-				return this.claude().saveChat(this.claudeUser(remote, body?.user), conversationId, prompts);
+				return this.claude().saveChat(this.claudeUser(remote, body?.user), conversationId, prompts, remote?.device);
 			}
 			default:
 				throw new HttpError(404, `no route ${key}`);
@@ -506,12 +509,12 @@ export class ControlServer {
 	}
 
 	/**
-	 * Whose prompts these are (a Roblox user id, which remote-claude's --users must allow): a remote device's is the one it
-	 * paired with, and can't be changed per request; a local caller names it.
+	 * Whose prompts these are (a Roblox user id, which remote-claude's --users must allow): a remote device's is the one the
+	 * owner bound to its pairing code, and can't be changed per request; a local caller names it.
 	 */
 	private claudeUser(remote: { userId?: number } | undefined, given: unknown): number {
 		if (remote) {
-			if (remote.userId === undefined) throw new HttpError(403, "this Studio paired without its Roblox user: pair it again for the Claude tab");
+			if (remote.userId === undefined) throw new HttpError(403, "this Studio paired without a Roblox user: for the Claude tab, the owner makes a link with `typetorch serve pair --claude-user <your id>` and you pair again");
 			return remote.userId;
 		}
 		const user = typeof given === "string" ? Number(given) : given;
@@ -535,8 +538,8 @@ export class ControlServer {
 			mode: mode as StudioInfo["mode"],
 			placeId: num(body.placeId, "placeId"),
 			gameId: num(body.gameId, "gameId"),
-			placeName: typeof body.placeName === "string" ? body.placeName.slice(0, 100) : "",
-			pluginVersion: typeof body.pluginVersion === "string" ? body.pluginVersion.slice(0, 40) : "",
+			placeName: typeof body.placeName === "string" ? safeText(body.placeName.slice(0, 100)) : "",
+			pluginVersion: typeof body.pluginVersion === "string" ? safeText(body.pluginVersion.slice(0, 40)) : "",
 			sync: existing?.sync ?? { status: "idle" },
 			...(typeof body.remote === "string" ? { remote: body.remote } : {}),
 			firstSeen: existing?.firstSeen ?? now,

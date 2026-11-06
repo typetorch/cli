@@ -67,6 +67,28 @@ describe("pairing", () => {
 		}
 	});
 
+	test("the owner binds the device's Roblox user to the code; the device can't pick its own (audit C-1)", () => {
+		const root = mkdtempSync(join(tmpdir(), "tt-pair-"));
+		try {
+			const pairing = new Pairing(root);
+			// an unbound code: whatever userId the device claims, it gets none
+			const free = pairing.pair(pairing.newCode().code, "helper", 111).token;
+			expect(pairing.check(free)?.userId).toBeUndefined();
+			// a bound code: another or a missing user is refused, and the code is spent
+			const bound = pairing.newCode(undefined, 222);
+			expect(bound.userId).toBe(222);
+			expect(() => pairing.pair(bound.code, "helper", 111)).toThrow("another Roblox user");
+			expect(() => pairing.pair(bound.code, "helper", 222)).toThrow("no pairing code is active");
+			expect(() => pairing.pair(pairing.newCode(undefined, 222).code, "helper")).toThrow("another Roblox user");
+			const ok = pairing.pair(pairing.newCode(undefined, 222).code, "helper", 222).token;
+			expect(pairing.check(ok)?.userId).toBe(222);
+			expect(new Pairing(root).check(ok)?.userId).toBe(222);
+			expect(() => pairing.newCode(undefined, -1)).toThrow("userId");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	test("with the tunnel URL, a code comes as one link; the URL is remembered", () => {
 		const root = mkdtempSync(join(tmpdir(), "tt-pair-"));
 		try {

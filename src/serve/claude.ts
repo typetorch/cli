@@ -83,6 +83,9 @@ const PASSTHROUGH: ["GET" | "POST", RegExp][] = [
 	["POST", /^\/v1\/logs$/],
 ];
 
+/** A chat's key: the device (remote.ts label, "" for a local caller) and the user. */
+const chatKey = (user: number, device?: string) => `${device ?? ""}\u0000${user}`;
+
 /** Prompts kept per chat (older ones drop off the plugin's transcript). */
 const MAX_CHAT_PROMPTS = 100;
 
@@ -98,9 +101,10 @@ export class ClaudeBridge {
 	private readonly tokens = new Map<number, Tokens>();
 	/** One token exchange per user at a time: refresh tokens rotate, and a reused one revokes the pairing. */
 	private readonly pending = new Map<number, Promise<string>>();
-	private readonly chats = new Map<number, ClaudeChat & { sid: string }>();
-	/** Prompt id → its text, per user (the last MAX_CHAT_PROMPTS sent through this serve). */
-	private readonly texts = new Map<number, Map<string, string>>();
+	/** Keyed by chatKey: per device and user, so one paired device never reads another's chat or prompts. */
+	private readonly chats = new Map<string, ClaudeChat & { sid: string }>();
+	/** Prompt id → its text, per device and user (the last MAX_CHAT_PROMPTS sent through this serve). */
+	private readonly texts = new Map<string, Map<string, string>>();
 	private readonly fetch: typeof fetch;
 	private readonly now: () => number;
 	private readonly alive: (pid: number) => boolean;
@@ -212,15 +216,16 @@ export class ClaudeBridge {
 	 * PC), plus the in-game tab's options as remote-claude takes them (toolbox, attachments, context). `conversationId`
 	 * continues a conversation. remote-claude validates the fields.
 	 */
-	async prompt(user: number, prompt: string, conversationId?: string, options: PromptOptions = {}) {
+	async prompt(user: number, prompt: string, conversationId?: string, options: PromptOptions = {}, device?: string) {
 		const started = await this.request(user, "POST", "/v1/prompts", { prompt, mode: options.mode ?? "code", ...(conversationId ? { conversationId } : {}), ...(options.toolbox ? { toolbox: true } : {}), ...(options.attachments?.length ? { attachments: options.attachments } : {}), ...(options.context ? { context: options.context } : {}) });
 		const id = (started as { id?: unknown } | undefined)?.id;
 		if (typeof id === "string") {
 			// what was asked, so another copy of the plugin can show the user's bubble (remote-claude's polls don't carry it)
-			const texts = this.texts.get(user) ?? new Map<string, string>();
+			const key = chatKey(user, device);
+			const texts = this.texts.get(key) ?? new Map<string, string>();
 			texts.set(id, prompt);
 			while (texts.size > MAX_CHAT_PROMPTS) texts.delete(texts.keys().next().value!);
-			this.texts.set(user, texts);
+			this.texts.set(key, texts);
 		}
 		return started;
 	}
@@ -250,13 +255,14 @@ export class ClaudeBridge {
 	/**
 	 * The chat the Claude tab shows, per user: its conversation and prompt ids, so every copy of the plugin (Edit, the
 	 * Play client and server: plugin settings don't cross between them live) picks up the same chat and re-polls it.
-	 * Kept in memory for this session only: a new remote-claude session forgets the prompts.
+	 * Kept in memory for this session only: a new remote-claude session forgets the prompts. `device`: the paired device
+	 * asking (absent: a local caller); each device has its own chat.
 	 */
-	chat(user: number): ClaudeChat {
-		const saved = this.chats.get(user);
+	chat(user: number, device?: string): ClaudeChat {
+		const saved = this.chats.get(chatKey(user, device));
 		const sid = this.session()?.sid;
 		if (!saved || saved.sid !== sid) return { prompts: [] };
-		const known = this.texts.get(user);
+		const known = this.texts.get(chatKey(user, device));
 		const texts: Record<string, string> = {};
 		for (const id of saved.prompts) {
 			const text = known?.get(id);
@@ -265,11 +271,11 @@ export class ClaudeBridge {
 		return { conversationId: saved.conversationId, prompts: [...saved.prompts], texts, updatedAt: saved.updatedAt };
 	}
 
-	saveChat(user: number, conversationId: string | undefined, prompts: string[]): ClaudeChat {
+	saveChat(user: number, conversationId: string | undefined, prompts: string[], device?: string): ClaudeChat {
 		const sid = this.session()?.sid;
 		if (!sid) throw new ClaudeError(503, "Claude isn't running here: the owner starts it with `typetorch serve --claude`");
-		this.chats.set(user, { sid, conversationId, prompts: prompts.slice(-MAX_CHAT_PROMPTS), updatedAt: new Date(this.now()).toISOString() });
-		return this.chat(user);
+		this.chats.set(chatKey(user, device), { sid, conversationId, prompts: prompts.slice(-MAX_CHAT_PROMPTS), updatedAt: new Date(this.now()).toISOString() });
+		return this.chat(user, device);
 	}
 }
 

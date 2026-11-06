@@ -6,7 +6,8 @@
  *   GET  /tt/claude/stream the Claude tab's WebSocket (claude-stream.ts), same token in the Authorization header
  *   GET  /tt/ping          {app: "typetorch-remote"}, no token: serve's tunnel checks it reaches the gateway
  *   POST /tt/pair          {code, name, userId?} -> {token, expiresAt}: a one-time code from `typetorch serve pair`;
- *                          userId (the person's Roblox user) is whose prompts the Claude tab sends
+ *                          the device's Roblox user (whose prompts the Claude tab sends) is the one the owner bound
+ *                          to the code (`serve pair --claude-user <id>`); a userId sent here must match it
  *   /tt/...                the control API, `Authorization: Bearer <token>`, limited to what the plugin needs
  *                          (server.ts REMOTE_ROUTES)
  *   /r/<token>/api/...     Rojo, proxied to its local port. The token sits in the path because Rojo's client sends
