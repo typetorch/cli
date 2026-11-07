@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { flagList, parseArgs } from "../src/args";
 import { notifyScopeProbe } from "../src/commands/doctor";
-import { dashboardUrl, haltedLines, keyFingerprintOf, paramMismatch, templateRows, newNotifyKey, notifyCommand, notifyFlags, parseData, parseParams, parseUserId } from "../src/commands/notify";
+import { dashboardUrl, haltedLines, keyFingerprintOf, kindStub, NOTIFY_KINDS_DOCS, notificationsStub, paramMismatch, templateRows, newNotifyKey, notifyCommand, notifyFlags, parseData, parseParams, parseUserId } from "../src/commands/notify";
 import { changeSettings } from "../src/commands/settings";
 import { templatePlaceholders, validateConfig, validateNotifications, type Project } from "../src/config";
 import { setJsonPath } from "../src/json";
@@ -664,6 +664,34 @@ describe("notify templates", () => {
 		expect((await run(proj, () => notifyCommand(notify(["templates", "set", "streak"])))).error?.message).toContain("templates set <kind> <message_id>");
 		expect((await run(proj, () => notifyCommand(notify(["templates", "bogus"])))).error?.message).toContain("unknown notify templates subcommand");
 		expect(readFileSync(proj.configPath, "utf8")).toBe(before);
+	});
+
+	test("no notifications section / an undeclared kind: the error shows how to start, with a block to paste", async () => {
+		const bare = project({ notifications: undefined });
+		const before = readFileSync(bare.configPath, "utf8");
+		const missing = (await run(bare, () => notifyCommand(notify(["templates", "set", "test", "msg-1"])))).error?.message ?? "";
+		expect(missing).toContain('typetorch.json has no "notifications" section');
+		expect(missing).toContain(NOTIFY_KINDS_DOCS);
+		expect(NOTIFY_KINDS_DOCS).toEndWith("/guides/notifications.md#kinds");
+		// The pasted block is valid as it is, and names the kind the user asked for.
+		const pasted = JSON.parse(`{${missing.slice(missing.indexOf('"notifications": {'), missing.indexOf("\n\nKinds"))}}`);
+		expect(Object.keys(pasted.notifications.kinds)).toEqual(["test"]);
+		expect(pasted.notifications).toMatchObject({ dailyCap: 1, quietAfterLeaveMinutes: 120, unopenedBackoff: { after: 5 } });
+		expect(pasted.notifications.kinds.test).toMatchObject({ priority: 50, repeat: "daily", send: "preferred_hour" });
+		expect(validateNotifications(pasted.notifications).errors).toEqual([]);
+		expect(validateNotifications(notificationsStub("gift_new")).errors).toEqual([]);
+		// push and templates say the same.
+		expect((await run(bare, () => notifyCommand(notify(["templates"])))).error?.message).toContain(NOTIFY_KINDS_DOCS);
+		expect((await run(bare, () => notifyCommand(notify(["push"])))).error?.message).toContain('"notifications": {');
+		expect(readFileSync(bare.configPath, "utf8")).toBe(before);
+
+		const proj = project({ notifications: { kinds } });
+		const unknown = (await run(proj, () => notifyCommand(notify(["templates", "set", "test", "msg-1"])))).error?.message ?? "";
+		expect(unknown).toContain(`"test" isn't a kind in typetorch.json (declared: ${Object.keys(kinds).join(", ")})`);
+		expect(unknown).toContain(`"test": ${JSON.stringify(kindStub())}`);
+		expect(unknown).toContain(NOTIFY_KINDS_DOCS);
+		const withStub = { ...kinds, test: kindStub() };
+		expect(validateNotifications({ kinds: withStub }).errors).toEqual([]);
 	});
 
 	test("push warns about kinds with a text but no template id", async () => {
