@@ -34,6 +34,10 @@
  *                                                             0.3.6+ moves every player out after 15 s, kicks after 3
  *                                                             bounces (livecheck.ts); warn on an old roblox-ts build
  *                                                             running next to the kernel ("old game build")
+ *   notifications POST /cloud/v2/users/1/notifications {}    only with typetorch.json "notifications": OPENCLOUD_NOTIFY_KEY (else the
+ *                                                             shared key) on an EMPTY body, which can't send anything:
+ *                                                             400 = scope ok (body refused), 401/403 = missing
+ *                                                             user.user-notification:write (plans/29)
  *   place download GET the place's Asset Delivery location    200 = ok, 403 = info, as expected: Roblox has no API-key
  *                                                             route for place files (legacy-asset:manage can't be granted;
  *                                                             universe.place:read only covers the version history), so
@@ -43,7 +47,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { type ParsedArgs, flagBool, flagString } from "../args.ts";
 import { CONFIG_FILE, findProjectRoot, loadProject, type Project } from "../config.ts";
-import { ADMIN_TOKEN_VAR, API_KEY_VARS, BACKEND_KEY_VAR, CHILD_ENV_VAR, FALLBACK_KEY_FILE_VAR, JOB_KEY_VARS, JOB_SCOPES, KEY_FILE_VAR, LEGACY_BACKEND_VARS, settings, type KeyJob, type Settings } from "../env.ts";
+import { ADMIN_TOKEN_VAR, API_KEY_VARS, BACKEND_KEY_VAR, NOTIFY_KEY_VAR, CHILD_ENV_VAR, FALLBACK_KEY_FILE_VAR, JOB_KEY_VARS, JOB_SCOPES, KEY_FILE_VAR, LEGACY_BACKEND_VARS, settings, type KeyJob, type Settings } from "../env.ts";
 import { gitInfo } from "../git.ts";
 import { bold, dim, emitJson, green, info, isJson, red, yellow } from "../log.ts";
 import { OpenCloud } from "../opencloud.ts";
@@ -398,6 +402,22 @@ export function placeDownloadProbe(status: number, text: string): [Status, strin
 	return ["warn", `unexpected ${status}${status >= 300 ? ` ${short(text)}` : ""}`];
 }
 
+/** Roblox's scope for sending experience notifications (Open Cloud user-notifications). */
+export const NOTIFY_SCOPE = "user.user-notification:write";
+
+/**
+ * The notifications probe: an EMPTY body to POST /cloud/v2/users/1/notifications (no message id, no universe: nothing
+ * can be sent). Open Cloud checks the key's scopes before the body, so 400 = the scope is there. A 2xx would mean Roblox
+ * accepted an empty notification; it is reported, never expected.
+ */
+export function notifyScopeProbe(status: number, text: string, keyName: string): [Status, string] {
+	if (status === 400) return ["ok", `${NOTIFY_SCOPE} on ${keyName} (an empty request refused with 400 after the scope check; nothing sent)`];
+	if (status === 401 || status === 403) {
+		return ["warn", `missing ${NOTIFY_SCOPE} on ${keyName}: the backend can't send experience notifications with this key (add the scope, or set ${NOTIFY_KEY_VAR} on the backend to a key that has it) (${status} ${short(text)})`];
+	}
+	return ["warn", `unexpected ${status} ${short(text)}`];
+}
+
 /** The lines doctor prints: OK lines only with --show-ok (problems and info always); `hidden` counts the rest. */
 export function visibleChecks(checks: Check[], showOk: boolean): { shown: Check[]; hidden: number } {
 	const shown = showOk ? checks : checks.filter((check) => check.status !== "ok");
@@ -584,6 +604,19 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 		const { universeId, placeId } = proj.config;
 		const scopeMissing = (status: number) => status === 401 || status === 403;
 		const skipped = (name: string, job: KeyJob): Promise<Check> => Promise.resolve({ name, status: "warn", detail: `not probed: no ${job} key` });
+		// Experience notifications (plans/29): the backend sends with OPENCLOUD_NOTIFY_KEY, else OPENCLOUD_API_KEY (its own
+		// environment); the same names are probed here when typetorch.json declares notifications.
+		const notifyKey = config.first([NOTIFY_KEY_VAR]) ?? config.first(API_KEY_VARS);
+		const notifyProbe = (): Promise<Check | Check[]> =>
+			!proj!.config.notifications
+				? Promise.resolve([])
+				: !notifyKey
+					? Promise.resolve({ name: "scope notifications", status: "warn" as Status, detail: `not probed: no ${NOTIFY_KEY_VAR} or ${API_KEY_VARS[0]} here (the backend needs one with ${NOTIFY_SCOPE})` })
+					: probe(
+							"scope notifications",
+							() => new OpenCloud(notifyKey.value).request("POST", "/cloud/v2/users/1/notifications", { json: {}, retry: false }),
+							(status, text) => notifyScopeProbe(status, text, notifyKey.name),
+						);
 		const probes = await Promise.all([
 			!assetsKey ? skipped("scope assets", "assets") : probe(
 				"scope assets",
@@ -672,6 +705,7 @@ export async function doctorCommand(args: ParsedArgs, deps: DoctorDeps = {}) {
 					),
 				(status, text) => placeLuauProbe(status, text, universeId, placeId),
 			),
+			notifyProbe(),
 			!placeKey ? skipped("scope place download", "place") : probe(
 				"scope place download",
 				// Read-only: answers a presigned location for the place file (not fetched, never printed).

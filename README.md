@@ -222,6 +222,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch branch rm <branch>` | removes a dev branch's head from the DataStore heads (y/N or `--yes`; `--dry-run`). Refuses the default and prod-channel branches, a branch live servers run (the fleet API; without it only with `--force`), and a head that changed meanwhile. Servers' MemoryStore copy keeps it until it expires (up to 45 days) |
 | `typetorch settings status` / `get [field\|game.<key>]` / `set game.<key> <json\|->` / `unset <field>` / `push` | the signed settings record (see "Settings"); `push` writes `defaultBranch`, `channels` and dev access from typetorch.json. `--dry-run`, `--force`, `--no-ping` |
 | `typetorch experiment list` / `weights <name> <w1,w2,...>` / `settle <name> <variant>` / `stop <name>` / `resume <name>` / `clear <name>` / `force <name> <player> <variant>` / `unforce <name> <player>` | live analytics experiment overrides in the signed settings record, no deploy (see "Experiments"). `--variants a,b`, `--dry-run`, `--force`, `--no-ping` |
+| `typetorch notify push [--dry-run]` / `status` / `templates` / `templates set <kind> <message_id>` / `test <userId> <kind> [--param k=v]... [--data x]` / `send <userId> <template> [--param k=v]... [--data x]` / `key rotate [--dry-run] [--no-ping]` / `key rotate --backend-only` / `pause [<kind>]` / `resume [<kind>]` | experience notifications on the backend, with `TYPETORCH_ADMIN_TOKEN` (see "Notifications"): push typetorch.json `notifications`, the backend's state (halted kinds stand out), the template texts to make by hand in the Creator Dashboard (and writing their ids back), a test or one-off send, a new launch-data signing key (the settings record's `backend.notify.keys` first, then the backend), and the runtime setting `notify.enabled` (or one kind's) |
 | `typetorch access push [--dry-run]` / `access status` | typetorch.json `members`, `revoked`, `devBadgeId` into the settings record's `access` / compare it with typetorch.json |
 | `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--engine luau\|splice\|lune] [--place-file <file>] [--timeout <s>] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build) into the live place (check, y/N, save, verify); no download: Luau Execution tasks do it (the luau engine), or `--place-file` patches a Studio copy (splice); `--replace-place --yes` for the template/test place only; see below |
 | `typetorch kernel restore --version <n> [--dry-run] [--yes]` | republish place version `n` (a task on it calls SavePlaceAsync): the undo of a kernel deploy |
@@ -424,8 +425,9 @@ one log and one seq. If a deploy stops after the upload, `typetorch deployments`
 Kernel 0.3.8 reads ONE signed record instead of ConfigService (CLI 0.8 removed the ConfigService registry, `config
 push` and every `universe:write` / `universe:read` use): the game's DataStore `TypeTorch`, key `settings`,
 `{ v: 1, seq, at, body, sig, sigF }`. `body` is JSON text with `defaultBranch`, `channels`, `access` (`members`,
-`revoked`, `devBadgeId`), `backend` (`{url, key, analytics?}`; CLI 0.9; `analytics` = `{flushSeconds?, recordShare?,
-experiments?}`), the old `fleet` (`{url, token}`) and `analytics` (the sink settings) derived from it for kernels before 0.4 and `game` (the game's live values,
+`revoked`, `devBadgeId`), `backend` (`{url, key, analytics?, notify?}`; CLI 0.9; `analytics` = `{flushSeconds?, recordShare?,
+experiments?}`; `notify` = `{keys: {current, previous?, since}}`, the launch-data HMAC keys from `typetorch notify key
+rotate`, masked wherever shown and kept by `backend setup`), the old `fleet` (`{url, token}`) and `analytics` (the sink settings) derived from it for kernels before 0.4 and `game` (the game's live values,
 `TypeTorch.liveConfig`); at most 32 KB, `game` at most 16 KB. `sig` and `sigF` are Ed25519 by the main and the fallback
 prod key over the lines `tt1settings`, `<seq>`, `<at>` and `<body>` joined with `\n`: the body is the exact text stored,
 so nothing is re-encoded before verifying.
@@ -504,6 +506,41 @@ state dir.
 
 `--no-registry` (deploy, rollback, promote, approve, kernel deploy) is accepted and prints a one-line note.
 `--require-shared-seq` and `--require-registry` are gone (CLI 0.9).
+
+### Notifications
+
+Experience notifications (plans/29; the guide: docs `guides/notifications.md`). typetorch.json declares the kinds:
+
+```jsonc
+"notifications": {
+  "dailyCap": 1, "quietAfterLeaveMinutes": 120, "lapse": [[14, 7], [30, 2], [60, 1]],
+  "unopenedBackoff": { "after": 5, "factor": 0.5, "days": 14 },
+  "kinds": {
+    "gift_new": { "text": "{sender} sent you {gift}!", "template": "<message_id>", "priority": 10, "repeat": "per_key", "send": "preferred_hour", "maxWaitHours": 48 },
+    "streak":   { "template": "<message_id>", "priority": 60, "repeat": "daily" }
+  }
+}
+```
+
+The CLI checks it with the backend's rules (kind names `[a-z0-9_]{1,24}`, not `custom`; priority 0-1000; perWeek 1-7;
+lapse in ascending days; dailyCap 1-3; template at most 128 characters; `text` at most 99 characters with balanced
+`{placeholders}` named `[a-zA-Z0-9_-]{1,32}`; unknown fields refused) whenever it loads
+typetorch.json, and `typetorch notify push` sends it as-is (`PUT /v1/notify/config`). No API creates Roblox's notification strings, so `typetorch notify templates` prints each kind's `text` to paste in
+the Creator Dashboard (the experience, then Engagement > Notifications) and `notify templates set <kind> <message_id>`
+writes the new id into typetorch.json (only that value changes); `notify push` warns about kinds with a text but no id.
+`--param` names may hold dashes (`{user-streak-remaining}`). `notify status` shows what the
+backend has, including a kind it **halted** because Roblox answered 404 for its template (fix the template id, `notify
+push`, then `notify resume <kind>`) and all sending halted because Roblox refused the backend's Open Cloud key
+(`halted: "auth"`). `notify pause` / `resume` set the backend's runtime setting `notify.enabled` (with a
+kind: `notify.kinds.<kind>.enabled`) through `PATCH /v1/admin/settings`. `notify key rotate` makes a new launch-data key
+(32 random bytes, base64url), signs it into the settings record's `backend.notify.keys` first (game servers are the only
+verifiers, so they learn it before anything is signed with it), pings the servers, and then sends it to the backend
+(`PUT /v1/notify/keys {current, previous, since}`), which signs with it from then on. The old key stays valid as
+`previous` for 14 days (a tap's lifetime). If the backend step fails, the backend keeps signing with the old key (still
+accepted as `previous`): `notify key rotate --backend-only` re-sends the record's keys. With `--no-ping` the backend
+step is left for `--backend-only` once servers have read the record (within about a minute). Keys show only as
+fingerprints (the first 8 hex of their SHA-256). `typetorch doctor` probes the Open Cloud key (`OPENCLOUD_NOTIFY_KEY`,
+else the shared key) for `user.user-notification:write` with an empty request that can't send anything.
 
 ### The shared seq
 
