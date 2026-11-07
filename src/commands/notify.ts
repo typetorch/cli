@@ -37,6 +37,7 @@ import {
 import { NOTIFY_KIND_PATTERN, NOTIFY_PARAM_NAME, NOTIFY_TEMPLATE_MAX, templatePlaceholders, validateConfig, type Project } from "../config.ts";
 import { ADMIN_TOKEN_VAR, registerSecret } from "../env.ts";
 import { setJsonPath } from "../json.ts";
+import { DOCS } from "../tui.ts";
 import { bold, dim, emitJson, info, isJson, red, warn, yellow } from "../log.ts";
 import type { OpenCloud } from "../opencloud.ts";
 import { DS_READ_SCOPE } from "../seqstore.ts";
@@ -210,10 +211,70 @@ export async function notifyCommand(args: ParsedArgs, deps: NotifyDeps = {}) {
 	}
 }
 
+/** Where the docs explain kinds (linked from the "how to start" errors). */
+export const NOTIFY_KINDS_DOCS = `${DOCS}/guides/notifications.md#kinds`;
+
+/** A kind's minimal declaration: valid as it is, the text to be rewritten. */
+export function kindStub(): Record<string, unknown> {
+	return { text: "Your message with a {placeholder}", priority: 50, repeat: "daily", send: "preferred_hour" };
+}
+
+/** A minimal ready-to-paste `notifications` block with one kind (valid as it is). */
+export function notificationsStub(kind: string): Record<string, unknown> {
+	return {
+		dailyCap: 1,
+		quietAfterLeaveMinutes: 120,
+		lapse: [
+			[14, 7],
+			[30, 2],
+			[60, 1],
+		],
+		unopenedBackoff: { after: 5, factor: 0.5, days: 14 },
+		kinds: { [kind]: kindStub() },
+	};
+}
+
+function indent(text: string, by = "  "): string {
+	return text
+		.split("\n")
+		.map((line) => by + line)
+		.join("\n");
+}
+
+/** The error for a typetorch.json with no `notifications`: how to start, with a block to paste. */
+export function noNotificationsError(kind = "my_kind"): Error {
+	// Pretty, with number pairs kept on one line ("lapse": [[14, 7], ...]).
+	const pretty = JSON.stringify(notificationsStub(kind), null, 2).replace(/\[\s*(-?[\d.]+),\s*(-?[\d.]+)\s*\]/g, "[$1, $2]");
+	const block = `"notifications": ${pretty.replace(/\[\s*(\[[^\]]*\](?:,\s*\[[^\]]*\])*)\s*\]/g, (_, inner: string) => `[${inner.replace(/,\s*\[/g, ", [")}]`)}`;
+	return new Error(
+		[
+			`typetorch.json has no "notifications" section. Add one to start (a minimal block, valid as it is; rewrite the text):`,
+			"",
+			indent(block),
+			"",
+			`Kinds (priority, repeat, send, text and {placeholders}): ${NOTIFY_KINDS_DOCS}`,
+		].join("\n"),
+	);
+}
+
+/** The error for a kind that isn't declared: its stub to paste under notifications.kinds. */
+export function unknownKindError(kind: string, declared: string[]): Error {
+	const block = `"${kind}": ${JSON.stringify(kindStub())}`;
+	return new Error(
+		[
+			`"${kind}" isn't a kind in typetorch.json (declared: ${declared.join(", ") || "none"}). Add it under "notifications" > "kinds" first:`,
+			"",
+			indent(block),
+			"",
+			`Kinds (priority, repeat, send, text and {placeholders}): ${NOTIFY_KINDS_DOCS}`,
+		].join("\n"),
+	);
+}
+
 async function notifyPush(args: ParsedArgs, deps: NotifyDeps) {
 	const proj = project(args);
 	const config = proj.config.notifications;
-	if (!config) throw new Error(`typetorch.json has no "notifications" section: declare the kinds first (docs: guides/notifications.md)`);
+	if (!config) throw noNotificationsError();
 	const kinds = Object.entries(config.kinds);
 	const noTemplate = kinds.filter(([, kind]) => !kind.template).map(([name]) => name);
 	if (flagBool(args, "dry-run")) {
@@ -356,7 +417,7 @@ export function templateRows(proj: Pick<Project, "config">): TemplateRow[] {
 
 async function notifyTemplates(args: ParsedArgs) {
 	const proj = project(args);
-	if (!proj.config.notifications) throw new Error(`typetorch.json has no "notifications" section: declare the kinds first (docs: guides/notifications.md)`);
+	if (!proj.config.notifications) throw noNotificationsError();
 	const rows = templateRows(proj);
 	const url = dashboardUrl(proj.config.universeId);
 	if (isJson()) return emitJson({ dashboard: url, menu: "Engagement > Notifications", kinds: rows });
@@ -388,8 +449,8 @@ async function notifyTemplateSet(args: ParsedArgs, kindArg: string | undefined, 
 	if (id.length > NOTIFY_TEMPLATE_MAX || !/^[^\s{}"]+$/.test(id)) throw new UsageError(`"${id}" isn't a message id (1-${NOTIFY_TEMPLATE_MAX} characters, no spaces)`);
 	const proj = project(args);
 	const config = proj.config.notifications;
-	if (!config) throw new Error(`typetorch.json has no "notifications" section`);
-	if (!(kind in config.kinds)) throw new Error(`"${kind}" isn't a kind in typetorch.json (${Object.keys(config.kinds).join(", ") || "none"})`);
+	if (!config) throw noNotificationsError(kind);
+	if (!(kind in config.kinds)) throw unknownKindError(kind, Object.keys(config.kinds));
 	const before = config.kinds[kind].template;
 	if (before === id) {
 		if (isJson()) return emitJson({ kind, template: id, changed: false });
