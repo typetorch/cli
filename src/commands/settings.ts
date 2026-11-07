@@ -90,7 +90,8 @@ export type EndpointSection = (typeof ENDPOINT_SECTIONS)[number];
 
 /**
  * A section as the endpoint check sees it: the experiment overrides left out (`backend.analytics.experiments`, the old
- * `analytics.experiments`), since they hold no address or key and `typetorch experiment` changes them on their own.
+ * `analytics.experiments`), since they hold no address or key and `typetorch experiment` changes them on their own; so
+ * are the notify keys (`backend.notify`, `typetorch notify key rotate`).
  */
 function endpointPart(body: SettingsBody, field: EndpointSection): string {
 	const value = JSON.parse(JSON.stringify(body[field] ?? null)) as Record<string, any> | null;
@@ -98,6 +99,8 @@ function endpointPart(body: SettingsBody, field: EndpointSection): string {
 		delete value.analytics.experiments;
 		if (Object.keys(value.analytics).length === 0) delete value.analytics;
 	}
+	// The notify HMAC keys (notify key rotate) hold no address and no backend key either.
+	if (value && field === "backend") delete value.notify;
 	if (value && field === "analytics") delete value.experiments;
 	return encodeBody({ [field]: value ?? undefined });
 }

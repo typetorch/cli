@@ -61,6 +61,12 @@ export const ENV_FILE_VAR = "TYPETORCH_ENV_FILE";
 /** Extra variable names (comma-separated) that child processes may inherit; keys are never passed. */
 export const CHILD_ENV_VAR = "TYPETORCH_CHILD_ENV";
 
+/**
+ * The Open Cloud key the backend sends experience notifications with, when it isn't OPENCLOUD_API_KEY (plans/29; needs
+ * the user-notifications scope). The CLI only reads it for doctor's scope probe.
+ */
+export const NOTIFY_KEY_VAR = "OPENCLOUD_NOTIFY_KEY";
+
 /** The TypeTorch backend's game key (write-only; what game servers hold in the settings record). */
 export const BACKEND_KEY_VAR = "TYPETORCH_API_KEY";
 /** The TypeTorch backend's admin token (reads, the owner list). */
@@ -77,6 +83,7 @@ export const LEGACY_SIGNING_KEY_VAR = "TYPETORCH_SIGNING_KEY";
 export const SECRET_VARS: readonly string[] = [
 	...API_KEY_VARS,
 	...Object.values(JOB_KEY_VARS),
+	NOTIFY_KEY_VAR,
 	BACKEND_KEY_VAR,
 	ADMIN_TOKEN_VAR,
 	...Object.keys(LEGACY_BACKEND_VARS),
