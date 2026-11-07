@@ -44,6 +44,7 @@ import { promoteCommand, promoteFlags } from "./commands/promote.ts";
 import { REMOTE_CLAUDE_USAGE, remoteClaudeCommand } from "./commands/remote-claude.ts";
 import { rollbackCommand, rollbackFlags } from "./commands/rollback.ts";
 import { MCP_USAGE, mcpServe } from "./commands/mcp.ts";
+import { NOTIFY_USAGE, notifyCommand, notifyFlags } from "./commands/notify.ts";
 import { SERVE_USAGE, serveCommand, serveFlags, STUDIO_USAGE, studioCommand, studioFlags } from "./commands/serve.ts";
 import { UPDATE_USAGE, updateCommandRun, updateFlags } from "./commands/update.ts";
 import { gameDirFor, redact, Settings, useSettings } from "./env.ts";
@@ -328,6 +329,12 @@ ${ROLLOUT_USAGE}`,
 		summary: "moved: typetorch backend setup",
 		usage: FLEET_USAGE,
 		hidden: true,
+	},
+	notify: {
+		flags: notifyFlags,
+		run: (args) => notifyCommand(args),
+		summary: "experience notifications: push the kinds, status, test / one-off sends, key rotate, pause / resume",
+		usage: NOTIFY_USAGE,
 	},
 	pin: {
 		flags: pinFlags,
