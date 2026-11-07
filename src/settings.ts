@@ -4,8 +4,9 @@
  *
  *   { v: 1, seq, at, body, sig, sigF }
  *   body = JSON text: { defaultBranch?, channels?, access?, backend?, fleet?, analytics?, game? }
- *   backend = { url, key, analytics?: { flushSeconds?, recordShare?, experiments? } } (CLI 0.9, plans/21; `typetorch
- *   backend setup`; experiments: `typetorch experiment`, experiments.ts).
+ *   backend = { url, key, analytics?: { flushSeconds?, recordShare?, experiments? }, notify?: { keys: { current, previous?,
+ *   since } } } (CLI 0.9, plans/21; `typetorch backend setup`; experiments: `typetorch experiment`, experiments.ts;
+ *   notify: the launch-data HMAC keys, `typetorch notify key rotate`, plans/29).
  *   For one release the CLI also writes the old `fleet` = { url, token } and `analytics` = { backend: "duckdb", events,
  *   token, ... } derived from it (`withLegacySections`): kernels 0.3.8/0.3.9 and their frameworks read only those.
  *   sig / sigF = Ed25519 by the main and the fallback prod key over  tt1settings \n seq \n at \n body
@@ -65,7 +66,23 @@ export interface BackendSection {
 	/** The backend's write-only game key (TYPETORCH_API_KEY). Never the admin token. */
 	key: string;
 	analytics?: BackendAnalytics;
+	/** Experience notifications (plans/29): the launch-data HMAC keys (`typetorch notify key rotate`). Server only. */
+	notify?: BackendNotify;
 }
+
+/** The launch-data HMAC keys: 43-character base64url strings (32 random bytes), `since` = unix seconds of the rotation. */
+export interface NotifyKeys {
+	current: string;
+	previous?: string;
+	since: number;
+}
+
+export interface BackendNotify {
+	keys: NotifyKeys;
+}
+
+/** A notify key as `notify key rotate` makes it: base64url (no padding) of 32 random bytes. */
+export const NOTIFY_KEY_PATTERN = /^[A-Za-z0-9_-]{43}$/;
 
 export interface SettingsBody {
 	defaultBranch?: string;
@@ -86,7 +103,14 @@ export interface SettingsBody {
  */
 export function withBackend(body: SettingsBody, backend: BackendSection): SettingsBody {
 	const url = backend.url.replace(/\/+$/, "");
-	const section: BackendSection = { url, key: backend.key, ...(backend.analytics && Object.keys(backend.analytics).length ? { analytics: { ...backend.analytics } } : {}) };
+	// The notify keys (notify key rotate) stay unless the caller sets them: `backend setup` must not drop them.
+	const notify = backend.notify ?? body.backend?.notify;
+	const section: BackendSection = {
+		url,
+		key: backend.key,
+		...(backend.analytics && Object.keys(backend.analytics).length ? { analytics: { ...backend.analytics } } : {}),
+		...(notify ? { notify: JSON.parse(JSON.stringify(notify)) as BackendNotify } : {}),
+	};
 	const previous = { ...(body.analytics ?? {}) };
 	for (const sink of ["backend", "events", "recordings", "token", "identity"]) delete previous[sink];
 	return {
@@ -116,6 +140,20 @@ export function backendProblems(value: unknown): string[] {
 			if (a.experiments !== undefined) problems.push(...experimentsProblems(a.experiments, "backend.analytics.experiments"));
 		}
 	}
+	if (raw.notify !== undefined) problems.push(...notifyProblems(raw.notify));
+	return problems;
+}
+
+/** `backend.notify`'s problems (never naming a key's value), or []. */
+export function notifyProblems(value: unknown): string[] {
+	const raw = plainObject(value);
+	const keys = plainObject(raw?.keys);
+	if (!raw || !keys) return ["backend.notify must be { keys: { current, previous?, since } }"];
+	const problems: string[] = [];
+	if (typeof keys.current !== "string" || !NOTIFY_KEY_PATTERN.test(keys.current)) problems.push("backend.notify.keys.current must be 43 base64url characters (typetorch notify key rotate)");
+	if (keys.previous !== undefined && (typeof keys.previous !== "string" || !NOTIFY_KEY_PATTERN.test(keys.previous))) problems.push("backend.notify.keys.previous must be 43 base64url characters");
+	if (keys.previous !== undefined && keys.previous === keys.current) problems.push("backend.notify.keys.previous must differ from current");
+	if (typeof keys.since !== "number" || !Number.isSafeInteger(keys.since) || keys.since < 0) problems.push("backend.notify.keys.since must be unix seconds");
 	return problems;
 }
 
@@ -221,7 +259,11 @@ export function maskSecrets(value: unknown, key = ""): unknown {
 	const object = plainObject(value);
 	if (object) {
 		const out: Record<string, unknown> = {};
-		for (const [name, inner] of Object.entries(object)) out[name] = maskSecrets(inner, name);
+		for (const [name, inner] of Object.entries(object)) {
+			// The notify HMAC keys (backend.notify.keys: current, previous) are secrets whatever their names.
+			const keyBag = name === "keys" && key === "notify" ? plainObject(inner) : undefined;
+			out[name] = keyBag ? Object.fromEntries(Object.entries(keyBag).map(([k, v]) => [k, typeof v === "string" ? `<hidden, ${v.length} characters>` : v])) : maskSecrets(inner, name);
+		}
 		return out;
 	}
 	if (typeof value === "string" && SECRET_KEY.test(key) && key !== "devBadgeId") return `<hidden, ${value.length} characters>`;
@@ -253,6 +295,8 @@ export function describeFields(body: SettingsBody): string[] {
 			dials?.recordShare !== undefined ? `record ${Math.round(dials.recordShare * 100)}%` : undefined,
 		].filter(Boolean);
 		lines.push(`backend        ${hostOf(body.backend.url)} (key hidden)${extra.length ? `, analytics ${extra.join(", ")}` : ""}`);
+		const keys = body.backend.notify?.keys;
+		if (keys) lines.push(`notify keys    set (hidden) since ${typeof keys.since === "number" ? new Date(keys.since * 1000).toISOString() : "?"}${keys.previous ? ", previous kept" : ""}`);
 	}
 	if (body.fleet) {
 		const same = body.backend && body.fleet.url === body.backend.url && body.fleet.token === body.backend.key;

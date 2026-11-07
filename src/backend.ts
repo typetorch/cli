@@ -148,7 +148,7 @@ export interface BackendRequestOptions {
 	timeoutMs?: number;
 }
 
-async function adminRequest(options: BackendRequestOptions, method: "GET" | "PUT" | "POST", path: string, body?: unknown, maxText = 4000): Promise<{ status: number; json?: Record<string, unknown>; text: string }> {
+async function adminRequest(options: BackendRequestOptions, method: "GET" | "PUT" | "POST" | "PATCH", path: string, body?: unknown, maxText = 4000): Promise<{ status: number; json?: Record<string, unknown>; text: string }> {
 	const base = options.url.replace(/\/+$/, "");
 	const host = new URL(base).host;
 	let response: Response;
@@ -308,4 +308,136 @@ export async function blessChallenge(url: string, fetcher: typeof fetch = fetch)
 		throw new BackendError(`GET /auth/bless/challenge answered ${response.status} ${shortBody(text)}`, response.status, json);
 	}
 	return { challenge: json.challenge, fingerprint: json.fingerprint, expiresIn: typeof json.expires_in === "number" ? json.expires_in : 300 };
+}
+
+// Runtime settings and experience notifications (plans/29) -------------------------------------------------------------
+
+/** The backend's error text from a reply (its `error` field, else a short body). Never a request value. */
+function replyError(reply: { json?: Record<string, unknown>; text: string }): string {
+	return typeof reply.json?.error === "string" ? reply.json.error : shortBody(reply.text);
+}
+
+/** One admin call that must answer 200 with a JSON object (else a BackendError naming the route and the status). */
+async function adminJson(options: BackendRequestOptions, method: "GET" | "PUT" | "POST" | "PATCH", path: string, body?: unknown): Promise<Record<string, unknown>> {
+	const reply = await adminRequest(options, method, path, body, 200_000);
+	if (reply.status === 404 && !reply.json?.error) throw new BackendError(`${method} ${path} answered 404: the backend predates this route (update it)`, 404, reply.json);
+	if (reply.status !== 200 || !reply.json) throw new BackendError(`${method} ${path} answered ${reply.status}: ${replyError(reply)}`, reply.status, reply.json);
+	return reply.json;
+}
+
+export interface RuntimeSettingsChange {
+	/** The keys the backend changed (empty: they already held these values). */
+	changed: string[];
+}
+
+/**
+ * PATCH /v1/admin/settings { key: value | null } (admin): the backend's runtime settings (its Settings page), checked,
+ * audited and applied at once. null = back to the environment's value.
+ */
+export async function patchRuntimeSettings(options: BackendRequestOptions, changes: Record<string, unknown>): Promise<RuntimeSettingsChange> {
+	const json = await adminJson(options, "PATCH", "/v1/admin/settings", changes);
+	return { changed: Array.isArray(json.changed) ? json.changed.filter((k): k is string => typeof k === "string") : [] };
+}
+
+/** GET /v1/notify/config (admin): the pushed notifications config. */
+export async function notifyGetConfig(options: BackendRequestOptions): Promise<{ config: unknown; updatedAt: string | null; by: string | null }> {
+	const json = await adminJson(options, "GET", "/v1/notify/config");
+	return { config: json.config ?? null, updatedAt: typeof json.updatedAt === "string" ? json.updatedAt : null, by: typeof json.by === "string" ? json.by : null };
+}
+
+/** PUT /v1/notify/config (admin): typetorch.json `notifications`, as-is; the backend validates (authoritative) and audits. */
+export async function notifyPutConfig(options: BackendRequestOptions, config: unknown): Promise<Record<string, unknown>> {
+	return adminJson(options, "PUT", "/v1/notify/config", config);
+}
+
+export interface NotifyKindStatus {
+	kind: string;
+	enabled: boolean;
+	template: boolean;
+	pending: number;
+	/** Set when the backend stopped the kind on its own (S1b: Roblox answered 404 for its template). */
+	halted?: string;
+}
+
+export interface NotifyStatus {
+	enabled: boolean;
+	dryRun: boolean;
+	rate: number | null;
+	clock: string | null;
+	keys: { current: boolean; previous: boolean; since: number | null };
+	kinds: NotifyKindStatus[];
+	queue: { pending: number; due1h: number; sending: number };
+	bucket: { rate: number | null; tokens: number | null; last429At: string | number | null };
+	sends24h: { sent: number; failed: number; dry: number };
+	/**
+	 * All sending halted by the backend (e.g. "auth": Roblox answered 401/403 for the Open Cloud key). Read from a
+	 * top-level `halted` string, an object with `why`, or a `halted` list entry without a kind.
+	 */
+	halted?: string;
+	/** The reply as sent (for --json). */
+	raw: Record<string, unknown>;
+}
+
+/** GET /v1/notify/status (admin). Missing fields read as 0 / false / null, never invented. */
+export async function notifyStatus(options: BackendRequestOptions): Promise<NotifyStatus> {
+	const json = await adminJson(options, "GET", "/v1/notify/status");
+	const obj = (value: unknown): Record<string, unknown> => (typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : {});
+	const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+	const numOrNull = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+	const keys = obj(json.keys);
+	const queue = obj(json.queue);
+	const bucket = obj(json.bucket);
+	const sends = obj(json.sends24h);
+	const kinds = (Array.isArray(json.kinds) ? json.kinds : []).map(obj).map(
+		(kind): NotifyKindStatus => ({
+			kind: String(kind.kind ?? "?"),
+			enabled: kind.enabled !== false,
+			template: kind.template === true,
+			pending: num(kind.pending),
+			...(typeof kind.halted === "string" && kind.halted ? { halted: kind.halted } : kind.halted === true ? { halted: "halted" } : {}),
+		}),
+	);
+	let halted: string | undefined;
+	if (typeof json.halted === "string" && json.halted) halted = json.halted;
+	else if (obj(json.halted).why !== undefined && obj(json.halted).kind === undefined) halted = String(obj(json.halted).why);
+	else if (Array.isArray(json.halted)) {
+		const all = json.halted.map(obj).find((h) => h.kind === undefined || h.kind === null || h.kind === "*");
+		if (all) halted = String(all.why ?? "halted");
+	}
+	return {
+		...(halted ? { halted } : {}),
+		enabled: json.enabled !== false,
+		dryRun: json.dryRun === true,
+		rate: numOrNull(json.rate),
+		clock: typeof json.clock === "string" ? json.clock : null,
+		keys: { current: keys.current === true, previous: keys.previous === true, since: numOrNull(keys.since) },
+		kinds,
+		queue: { pending: num(queue.pending), due1h: num(queue.due1h), sending: num(queue.sending) },
+		bucket: { rate: numOrNull(bucket.rate), tokens: numOrNull(bucket.tokens), last429At: typeof bucket.last429At === "string" || typeof bucket.last429At === "number" ? bucket.last429At : null },
+		sends24h: { sent: num(sends.sent), failed: num(sends.failed), dry: num(sends.dry) },
+		raw: json,
+	};
+}
+
+/** PUT /v1/notify/keys { current, previous?, since } (admin). The backend stores them and never returns them. */
+export async function notifyPutKeys(options: BackendRequestOptions, keys: { current: string; previous?: string; since: number }): Promise<void> {
+	await adminJson(options, "PUT", "/v1/notify/keys", { current: keys.current, ...(keys.previous !== undefined ? { previous: keys.previous } : {}), since: keys.since });
+}
+
+export type NotifySendResult = { nid: string; status: string } | { skipped: string };
+
+function sendResult(json: Record<string, unknown>, route: string): NotifySendResult {
+	if (typeof json.skipped === "string") return { skipped: json.skipped };
+	if (typeof json.nid === "string") return { nid: json.nid, status: typeof json.status === "string" ? json.status : "?" };
+	throw new BackendError(`${route} answered 200 without nid or skipped`, 200, json);
+}
+
+/** POST /v1/notify/test { userId, kind, params?, data? } (admin): one send now, bypassing the caps, marked `test`. */
+export async function notifyTest(options: BackendRequestOptions, input: { userId: number; kind: string; params?: Record<string, string>; data?: string }): Promise<NotifySendResult> {
+	return sendResult(await adminJson(options, "POST", "/v1/notify/test", input), "POST /v1/notify/test");
+}
+
+/** POST /v1/notify/send { userId, template, params?, data? } (admin): kind `custom`; respects the 1 / day and mutes. */
+export async function notifySend(options: BackendRequestOptions, input: { userId: number; template: string; params?: Record<string, string>; data?: string }): Promise<NotifySendResult> {
+	return sendResult(await adminJson(options, "POST", "/v1/notify/send", input), "POST /v1/notify/send");
 }

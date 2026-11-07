@@ -28,7 +28,9 @@
  *   "backup": { "refresh": "auto", "healthyHours": 3 }, // "off": only kernel deploy / typetorch backup refresh
  *   // The compiler (compiler.ts), optional: default goblox when it is installed (`bun add -d goblox`), else rbxtsc;
  *   // TYPETORCH_COMPILER overrides it:
- *   "compiler": "goblox"                         // "goblox" | "rbxtsc"
+ *   "compiler": "goblox",                        // "goblox" | "rbxtsc"
+ *   // Experience notifications (plans/29; validateNotifications), pushed as-is by `typetorch notify push`:
+ *   "notifications": { "dailyCap": 1, "kinds": { "gift_new": { "template": "<message_id>", "priority": 10, "repeat": "per_key" } } }
  * }
  * Secrets never go here: they live in the game repo's `.env` (env.ts).
  */
@@ -80,6 +82,159 @@ export interface ProjectConfig {
 	backup?: BackupConfig;
 	/** The compiler (compiler.ts); unset: goblox when installed, else rbxtsc. TYPETORCH_COMPILER overrides it. */
 	compiler?: CompilerName;
+	/** Experience notifications (plans/29): the kinds and caps `typetorch notify push` sends to the backend as-is. */
+	notifications?: NotificationsConfig;
+}
+
+// Experience notifications (plans/29, plans/29-contract.md "Config") ---------------------------------------------------
+
+export const NOTIFY_REPEATS = ["once_ever", "per_key", "daily"] as const;
+export const NOTIFY_SENDS = ["asap", "preferred_hour"] as const;
+/** A kind name (also the launch token's `k`). `custom` is reserved for one-offs (`typetorch notify send`). */
+export const NOTIFY_KIND_PATTERN = /^[a-z0-9_]{1,24}$/;
+export const NOTIFY_RESERVED_KIND = "custom";
+export const NOTIFY_TEMPLATE_MAX = 128;
+/** Roblox's limit for a notification string's text. */
+export const NOTIFY_TEXT_MAX = 99;
+/** A template placeholder / param name (Roblox templates use dashes: `{user-streak-remaining}`). */
+export const NOTIFY_PARAM_NAME = /^[a-zA-Z0-9_-]{1,32}$/;
+
+/**
+ * A template text's placeholders in order of first use (`{name}`), or why the text isn't usable: over 99 characters,
+ * an empty or invalid name, a `{` without its `}` (or nested), a `}` without its `{`.
+ */
+export function templatePlaceholders(text: string): { names: string[]; problem?: string } {
+	const length = [...text].length;
+	if (length === 0) return { names: [], problem: "is empty" };
+	if (length > NOTIFY_TEXT_MAX) return { names: [], problem: `is ${length} characters; Roblox allows ${NOTIFY_TEXT_MAX}` };
+	const names: string[] = [];
+	let open = -1;
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i];
+		if (ch === "{") {
+			if (open !== -1) return { names: [], problem: `has a "{" inside another placeholder (at ${i + 1})` };
+			open = i;
+		} else if (ch === "}") {
+			if (open === -1) return { names: [], problem: `has a "}" without its "{" (at ${i + 1})` };
+			const name = text.slice(open + 1, i);
+			if (!NOTIFY_PARAM_NAME.test(name)) return { names: [], problem: `has the placeholder {${name}}: names are 1-32 characters of a-z A-Z 0-9 _ -` };
+			if (!names.includes(name)) names.push(name);
+			open = -1;
+		}
+	}
+	if (open !== -1) return { names: [], problem: `has a "{" without its "}" (at ${open + 1})` };
+	return { names };
+}
+
+export interface NotifyKindConfig {
+	/** The template's text (at most 99 characters, `{placeholders}`): what you paste into the Creator Dashboard. */
+	text?: string;
+	/** The notification string's message id (Creator Dashboard, Engagement -> Notifications). None: planned, never sent. */
+	template?: string;
+	/** Lower wins when several are due for one user on one day (0-1000). */
+	priority: number;
+	repeat: (typeof NOTIFY_REPEATS)[number];
+	/** Default preferred_hour. */
+	send?: (typeof NOTIFY_SENDS)[number];
+	perWeek?: number;
+	maxWaitHours?: number;
+	/** Roblox's dashboard groups by it; default the kind name. */
+	category?: string;
+	/** `want(user, kind, { template })` may name another template. */
+	allowTemplate?: boolean;
+	/** Outranks these kinds only within its last `withinHours` (off by default). */
+	beats?: { kinds: string[]; withinHours: number };
+}
+
+export interface NotificationsConfig {
+	dailyCap?: number;
+	quietAfterLeaveMinutes?: number;
+	/** [days since last seen, max sends per week], ascending days; past the last = stop. */
+	lapse?: [number, number][];
+	unopenedBackoff?: { after: number; factor: number; days: number };
+	kinds: Record<string, NotifyKindConfig>;
+}
+
+const NOTIFY_TOP_KEYS = ["dailyCap", "quietAfterLeaveMinutes", "lapse", "unopenedBackoff", "kinds"];
+const NOTIFY_KIND_KEYS = ["text", "template", "priority", "repeat", "send", "perWeek", "maxWaitHours", "category", "allowTemplate", "beats"];
+
+/**
+ * Validates typetorch.json "notifications" with the contract's rules (plans/29-contract.md "Config"; the backend's copy of
+ * these rules is authoritative, this one refuses a bad push before it leaves the PC): kind names [a-z0-9_]{1,24} and not
+ * "custom"; priority an integer 0-1000; perWeek an integer 1-7; lapse ascending days; dailyCap an integer 1-3; template
+ * at most 128 characters; text at most 99 characters with valid, balanced {placeholders} (names [a-zA-Z0-9_-]{1,32});
+ * repeat / send from their lists; unknown fields refused (a typo would silently change nothing).
+ * The value is returned unchanged (it is pushed as-is).
+ */
+export function validateNotifications(raw: unknown): { notifications?: NotificationsConfig; errors: string[] } {
+	const at = (path: string) => `"notifications${path}"`;
+	if (!isRecord(raw)) return { errors: [`${at("")} must be an object like { "kinds": { "gift_new": { "template": "<message_id>", "priority": 10, "repeat": "per_key" } } }`] };
+	const errors: string[] = [];
+	const isInt = (value: unknown, low: number, high: number) => typeof value === "number" && Number.isInteger(value) && value >= low && value <= high;
+	const isPositive = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0;
+	for (const key of Object.keys(raw)) if (!NOTIFY_TOP_KEYS.includes(key)) errors.push(`${at(`.${key}`)} is not a setting (${NOTIFY_TOP_KEYS.join(", ")})`);
+	if (raw.dailyCap !== undefined && !isInt(raw.dailyCap, 1, 3)) errors.push(`${at(".dailyCap")} must be a whole number from 1 to 3 (Roblox allows 1 a day)`);
+	if (raw.quietAfterLeaveMinutes !== undefined && !(typeof raw.quietAfterLeaveMinutes === "number" && Number.isFinite(raw.quietAfterLeaveMinutes) && raw.quietAfterLeaveMinutes >= 0)) {
+		errors.push(`${at(".quietAfterLeaveMinutes")} must be a number of minutes >= 0`);
+	}
+	if (raw.lapse !== undefined) {
+		if (!Array.isArray(raw.lapse)) errors.push(`${at(".lapse")} must be a list of [days, perWeek] pairs, like [[14, 7], [30, 2], [60, 1]]`);
+		else {
+			let last = -Infinity;
+			raw.lapse.forEach((pair, i) => {
+				if (!Array.isArray(pair) || pair.length !== 2 || !isInt(pair[0], 0, 100_000) || !isInt(pair[1], 0, 7)) {
+					errors.push(`${at(`.lapse[${i}]`)} must be [days, perWeek]: whole days >= 0 and 0-7 sends a week`);
+					return;
+				}
+				if (pair[0] <= last) errors.push(`${at(".lapse")} must be in ascending days (${pair[0]} after ${last})`);
+				last = pair[0];
+			});
+		}
+	}
+	if (raw.unopenedBackoff !== undefined) {
+		const b = raw.unopenedBackoff;
+		if (!isRecord(b)) errors.push(`${at(".unopenedBackoff")} must be { "after": 5, "factor": 0.5, "days": 14 }`);
+		else {
+			for (const key of Object.keys(b)) if (!["after", "factor", "days"].includes(key)) errors.push(`${at(`.unopenedBackoff.${key}`)} is not a setting (after, factor, days)`);
+			if (!isInt(b.after, 1, 1000)) errors.push(`${at(".unopenedBackoff.after")} must be a whole number >= 1 (unopened sends in a row)`);
+			if (!(typeof b.factor === "number" && b.factor > 0 && b.factor <= 1)) errors.push(`${at(".unopenedBackoff.factor")} must be a number above 0, at most 1`);
+			if (!isInt(b.days, 1, 365)) errors.push(`${at(".unopenedBackoff.days")} must be a whole number of days from 1 to 365`);
+		}
+	}
+	if (!isRecord(raw.kinds)) errors.push(`${at(".kinds")} must map kind names to { template, priority, repeat, ... }`);
+	else
+		for (const [name, kind] of Object.entries(raw.kinds)) {
+			const path = (field = "") => at(`.kinds.${name}${field}`);
+			if (!NOTIFY_KIND_PATTERN.test(name)) errors.push(`${path()}: a kind name is 1-24 characters of a-z 0-9 _`);
+			else if (name === NOTIFY_RESERVED_KIND) errors.push(`${path()}: "custom" is reserved (one-offs: typetorch notify send)`);
+			if (!isRecord(kind)) {
+				errors.push(`${path()} must be { template, priority, repeat, ... }`);
+				continue;
+			}
+			for (const key of Object.keys(kind)) if (!NOTIFY_KIND_KEYS.includes(key)) errors.push(`${path(`.${key}`)} is not a setting (${NOTIFY_KIND_KEYS.join(", ")})`);
+			if (kind.template !== undefined && !(typeof kind.template === "string" && kind.template.length >= 1 && kind.template.length <= NOTIFY_TEMPLATE_MAX)) {
+				errors.push(`${path(".template")} must be the notification's message id (1-${NOTIFY_TEMPLATE_MAX} characters)`);
+			}
+			if (kind.text !== undefined) {
+				const problem = typeof kind.text === "string" ? templatePlaceholders(kind.text).problem : "must be a string";
+				if (problem) errors.push(`${path(".text")} ${problem}`);
+			}
+			if (!isInt(kind.priority, 0, 1000)) errors.push(`${path(".priority")} must be a whole number from 0 to 1000 (lower wins)`);
+			if (!NOTIFY_REPEATS.includes(kind.repeat as never)) errors.push(`${path(".repeat")} must be one of ${NOTIFY_REPEATS.join(", ")}`);
+			if (kind.send !== undefined && !NOTIFY_SENDS.includes(kind.send as never)) errors.push(`${path(".send")} must be one of ${NOTIFY_SENDS.join(", ")}`);
+			if (kind.perWeek !== undefined && !isInt(kind.perWeek, 1, 7)) errors.push(`${path(".perWeek")} must be a whole number from 1 to 7`);
+			if (kind.maxWaitHours !== undefined && !isPositive(kind.maxWaitHours)) errors.push(`${path(".maxWaitHours")} must be a number of hours above 0`);
+			if (kind.category !== undefined && !(typeof kind.category === "string" && kind.category.length > 0)) errors.push(`${path(".category")} must be a non-empty string`);
+			if (kind.allowTemplate !== undefined && typeof kind.allowTemplate !== "boolean") errors.push(`${path(".allowTemplate")} must be true or false`);
+			if (kind.beats !== undefined) {
+				const beats = kind.beats;
+				if (!isRecord(beats) || !Array.isArray(beats.kinds) || !beats.kinds.every((k) => typeof k === "string" && NOTIFY_KIND_PATTERN.test(k)) || !isPositive(beats.withinHours)) {
+					errors.push(`${path(".beats")} must be { "kinds": ["<kind>", ...], "withinHours": <hours above 0> }`);
+				} else for (const key of Object.keys(beats)) if (key !== "kinds" && key !== "withinHours") errors.push(`${path(`.beats.${key}`)} is not a setting (kinds, withinHours)`);
+			}
+		}
+	if (errors.length) return { errors };
+	return { notifications: raw as unknown as NotificationsConfig, errors };
 }
 
 /** typetorch.json "backup". */
@@ -142,6 +297,7 @@ const KNOWN_KEYS = new Set([
 	"autoRollback",
 	"backup",
 	"compiler",
+	"notifications",
 ]);
 
 function positiveInt(value: unknown): number | undefined {
@@ -307,6 +463,12 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 		errors.push(...checked.errors);
 		autoRollback = checked.autoRollback;
 	}
+	let notifications: NotificationsConfig | undefined;
+	if (raw.notifications !== undefined) {
+		const checked = validateNotifications(raw.notifications);
+		errors.push(...checked.errors);
+		notifications = checked.notifications;
+	}
 
 	if (errors.length > 0) return { errors, warnings };
 	return {
@@ -334,6 +496,7 @@ export function validateConfig(raw: unknown): { config?: ProjectConfig; errors: 
 			...(autoRollback ? { autoRollback } : {}),
 			...(backup ? { backup } : {}),
 			...(raw.compiler !== undefined ? { compiler: raw.compiler as CompilerName } : {}),
+			...(notifications ? { notifications } : {}),
 		},
 	};
 }

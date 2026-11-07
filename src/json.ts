@@ -202,3 +202,40 @@ export function setJsonFields(text: string, updates: Record<string, unknown>): s
 	}
 	return next;
 }
+
+/**
+ * Sets one nested field (`path` of object keys) in a JSON object's text, keeping everything else as written: only the
+ * value at the end of the path is replaced (compact JSON), or added after the object's last entry with that entry's
+ * indentation. Every object on the way must exist.
+ */
+export function setJsonPath(text: string, path: string[], value: unknown): string {
+	const next = setPathIn(text, path, value);
+	let parsed: unknown = JSON.parse(next);
+	for (const key of path) parsed = isRecord(parsed) ? parsed[key] : undefined;
+	if (!jsonEqual(parsed, value)) throw new Error(`could not set "${path.join(".")}"`);
+	return next;
+}
+
+function setPathIn(text: string, path: string[], value: unknown): string {
+	const [key, ...rest] = path;
+	if (key === undefined) throw new Error("empty path");
+	const entries = topLevelEntries(text);
+	const entry = entries.find((e) => e.key === key);
+	if (rest.length > 0) {
+		if (!entry) throw new Error(`"${key}" doesn't exist`);
+		const inner = text.slice(entry.valueStart, entry.valueEnd);
+		if (!inner.startsWith("{")) throw new Error(`"${key}" isn't an object`);
+		return text.slice(0, entry.valueStart) + setPathIn(inner, rest, value) + text.slice(entry.valueEnd);
+	}
+	if (entry) return text.slice(0, entry.valueStart) + JSON.stringify(value) + text.slice(entry.valueEnd);
+	const pair = `${JSON.stringify(key)}: ${JSON.stringify(value)}`;
+	const last = entries[entries.length - 1];
+	if (!last) {
+		const open = text.indexOf("{");
+		return `${text.slice(0, open + 1)} ${pair} ${text.slice(open + 1).replace(/^\s*/, "")}`;
+	}
+	const lineStart = text.lastIndexOf("\n", last.keyStart);
+	const indent = lineStart === -1 ? null : text.slice(lineStart + 1, last.keyStart);
+	const separator = indent !== null && /^[ \t]*$/.test(indent) ? `,\n${indent}` : ", ";
+	return text.slice(0, last.valueEnd) + separator + pair + text.slice(last.valueEnd);
+}
