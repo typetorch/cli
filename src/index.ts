@@ -39,6 +39,7 @@ import { kernelCommand, kernelFlags } from "./commands/kernel.ts";
 import { backupCommand, backupFlags } from "./commands/backup.ts";
 import { MIGRATE_USAGE, migrateCommand, migrateFlags } from "./commands/migrate.ts";
 import { keysCommand, keysFlags } from "./commands/keys.ts";
+import { API_KEYS_USAGE } from "./commands/apikeys.ts";
 import { pinCommand, pinFlags } from "./commands/pin.ts";
 import { promoteCommand, promoteFlags } from "./commands/promote.ts";
 import { REMOTE_CLAUDE_USAGE, remoteClaudeCommand } from "./commands/remote-claude.ts";
@@ -354,7 +355,7 @@ typetorch pin --unpin --branch <b> (--servers <jobId,...> | --all) [<artifact>] 
 	keys: {
 		flags: keysFlags,
 		run: (args) => keysCommand(args),
-		summary: "prod signing keys: init, rotate, resign",
+		summary: "prod signing keys (init, rotate, resign) and the backend's API keys with roles (create, list, revoke)",
 		usage: `typetorch keys init [--key-file <path>]
 typetorch keys init --fallback [--force] [--yes] [--fallback-key-file <path>]
 typetorch keys rotate [--yes] [--key-file <path>] [--fallback-key-file <path>]
@@ -378,7 +379,9 @@ typetorch keys resign [--key-file <path>] [--fallback-key-file <path>]
   resign           republish each prod-channel branch's live head as a fresh signed message: same artifact and asset,
                    a new seq, r = "resign" (servers update the head, no swap). Follows the approval policy.
   --yes            skip the y/N (rotate, init --fallback --force)
-  \`typetorch doctor\` checks both key files against typetorch.json, the key asset and the place.`,
+  \`typetorch doctor\` checks both key files against typetorch.json, the key asset and the place.
+
+${API_KEYS_USAGE}`,
 	},
 	reject: {
 		flags: rejectFlags,
