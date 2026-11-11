@@ -15,6 +15,7 @@
  *                           main key(s), the key file is replaced, typetorch.json updated, the rekey hint
  *                           (TypeTorch/rekey) is published, and every prod-channel branch's CURRENT head is re-signed
  *                           (`keys resign`). For a lost or leaked main key; no restart.
+ *   keys create|list|revoke named API keys with roles on the backend (plans/31): commands/apikeys.ts
  *   keys resign             republishes each prod-channel branch's current head as a fresh signed deploy message:
  *                           same artifact and asset, a NEW seq, r = "resign" (kernels update the head, no swap). Under
  *                           the strict rule a head signed by a revoked main key is no longer valid, so this keeps new
@@ -36,6 +37,7 @@ import { KEY_FILE_FLAGS, noteRegistryFlags, openCloud, project, readHistory } fr
 import { loadSigner } from "../keyfiles.ts";
 import { readSettings } from "../settings.ts";
 import { changeSettings } from "./settings.ts";
+import { apiKeysCommand, type ApiKeysDeps } from "./apikeys.ts";
 
 export const keysFlags = {
 	fallback: "boolean",
@@ -46,6 +48,11 @@ export const keysFlags = {
 	propose: "boolean",
 	"proposed-by": "string",
 	...KEY_FILE_FLAGS,
+	// API keys on the backend (keys create / list / revoke, commands/apikeys.ts)
+	name: "string",
+	role: "string",
+	expires: "string",
+	all: "boolean",
 } as const;
 
 /** Open Cloud clients and the terminal, injectable for tests. */
@@ -418,9 +425,11 @@ export async function resignCommand(ctx: KeysContext) {
 	if (failed) process.exitCode = 1;
 }
 
-export async function keysCommand(args: ParsedArgs, deps: KeysDeps = {}) {
+export async function keysCommand(args: ParsedArgs, deps: KeysDeps & ApiKeysDeps = {}) {
 	const sub = args.positionals[0];
-	if (sub !== "init" && sub !== "rotate" && sub !== "resign") throw new UsageError(`unknown keys subcommand "${sub ?? ""}" (init, init --fallback, rotate, resign)`);
+	if (sub === "create" || sub === "list" || sub === "revoke") return apiKeysCommand(sub, args, { fetch: deps.fetch });
+	if (sub !== "init" && sub !== "rotate" && sub !== "resign") throw new UsageError(`unknown keys subcommand "${sub ?? ""}" (init, init --fallback, rotate, resign; API keys: create, list, revoke)`);
+	for (const flag of ["name", "role", "expires", "all"]) if (args.flags[flag] !== undefined) throw new UsageError(`--${flag} belongs to \`typetorch keys create\` / \`keys list\``);
 	const proj = project(args);
 	const ctx: KeysContext = {
 		proj,

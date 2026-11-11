@@ -148,7 +148,7 @@ export interface BackendRequestOptions {
 	timeoutMs?: number;
 }
 
-async function adminRequest(options: BackendRequestOptions, method: "GET" | "PUT" | "POST" | "PATCH", path: string, body?: unknown, maxText = 4000): Promise<{ status: number; json?: Record<string, unknown>; text: string }> {
+async function adminRequest(options: BackendRequestOptions, method: "GET" | "PUT" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown, maxText = 4000): Promise<{ status: number; json?: Record<string, unknown>; text: string }> {
 	const base = options.url.replace(/\/+$/, "");
 	const host = new URL(base).host;
 	let response: Response;
@@ -318,7 +318,7 @@ function replyError(reply: { json?: Record<string, unknown>; text: string }): st
 }
 
 /** One admin call that must answer 200 with a JSON object (else a BackendError naming the route and the status). */
-async function adminJson(options: BackendRequestOptions, method: "GET" | "PUT" | "POST" | "PATCH", path: string, body?: unknown): Promise<Record<string, unknown>> {
+async function adminJson(options: BackendRequestOptions, method: "GET" | "PUT" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown): Promise<Record<string, unknown>> {
 	const reply = await adminRequest(options, method, path, body, 200_000);
 	if (reply.status === 404 && !reply.json?.error) throw new BackendError(`${method} ${path} answered 404: the backend predates this route (update it)`, 404, reply.json);
 	if (reply.status !== 200 || !reply.json) throw new BackendError(`${method} ${path} answered ${reply.status}: ${replyError(reply)}`, reply.status, reply.json);
@@ -440,4 +440,79 @@ export async function notifyTest(options: BackendRequestOptions, input: { userId
 /** POST /v1/notify/send { userId, template, params?, data? } (admin): kind `custom`; respects the 1 / day and mutes. */
 export async function notifySend(options: BackendRequestOptions, input: { userId: number; template: string; params?: Record<string, string>; data?: string }): Promise<NotifySendResult> {
 	return sendResult(await adminJson(options, "POST", "/v1/notify/send", input), "POST /v1/notify/send");
+}
+
+// API keys with roles (plans/31) -----------------------------------------------------------------------------------------
+
+export const API_KEY_ROLES = ["game", "lookup", "support", "analyst", "admin"] as const;
+export type ApiKeyRole = (typeof API_KEY_ROLES)[number];
+
+export interface CreatedApiKey {
+	id: string;
+	/** The whole key (`ttk_<id>_<secret>`): shown once, registered with the scrubber the moment it arrives. */
+	key: string;
+	name: string;
+	role: string;
+	scopes: string[];
+	createdAt: string | number | null;
+	expiresAt: string | number | null;
+}
+
+export interface ApiKeyInfo {
+	id: string;
+	name: string;
+	role: string;
+	scopes: string[];
+	createdAt: string | number | null;
+	createdBy: string | null;
+	expiresAt: string | number | null;
+	lastUsedAt: string | number | null;
+	revokedAt: string | number | null;
+	builtIn: boolean;
+}
+
+const stamp = (value: unknown): string | number | null => (typeof value === "string" || typeof value === "number" ? value : null);
+const strings = (value: unknown): string[] => (Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : []);
+
+/**
+ * POST /v1/admin/keys { name, role, expiresDays? } (admin) -> 201 with the key, once. The key is registered with the
+ * scrubber before anything else is done with the reply, and no error built here ever quotes a successful reply's body.
+ */
+export async function createApiKey(options: BackendRequestOptions, input: { name: string; role: ApiKeyRole; expiresDays?: number }): Promise<CreatedApiKey> {
+	const reply = await adminRequest(options, "POST", "/v1/admin/keys", { name: input.name, role: input.role, ...(input.expiresDays !== undefined ? { expiresDays: input.expiresDays } : {}) });
+	const key = typeof reply.json?.key === "string" ? reply.json.key : undefined;
+	if (key) registerSecret(key);
+	if (reply.status === 200 || reply.status === 201) {
+		const json = reply.json ?? {};
+		if (!key || typeof json.id !== "string") throw new BackendError(`POST /v1/admin/keys answered ${reply.status} without an id and a key (the backend is older or broken); if a key was made, revoke it with \`typetorch keys list\` / \`keys revoke\``, reply.status);
+		return { id: json.id, key, name: typeof json.name === "string" ? json.name : input.name, role: typeof json.role === "string" ? json.role : input.role, scopes: strings(json.scopes), createdAt: stamp(json.createdAt), expiresAt: stamp(json.expiresAt) };
+	}
+	if (reply.status === 404 && !reply.json?.error) throw new BackendError("POST /v1/admin/keys answered 404: the backend predates API keys (update it)", 404);
+	throw new BackendError(`POST /v1/admin/keys answered ${reply.status}: ${key ? "(reply hidden)" : replyError(reply)}`, reply.status);
+}
+
+/** GET /v1/admin/keys[?all=1] (admin): the keys (no hash, no secret), built-in env tokens included. */
+export async function listApiKeys(options: BackendRequestOptions, all = false): Promise<ApiKeyInfo[]> {
+	const json = await adminJson(options, "GET", `/v1/admin/keys${all ? "?all=1" : ""}`);
+	const keys = Array.isArray(json.keys) ? json.keys : [];
+	return keys
+		.filter((k): k is Record<string, unknown> => typeof k === "object" && k !== null && !Array.isArray(k))
+		.map((k) => ({
+			id: String(k.id ?? "?"),
+			name: typeof k.name === "string" ? k.name : "",
+			role: typeof k.role === "string" ? k.role : "?",
+			scopes: strings(k.scopes),
+			createdAt: stamp(k.createdAt),
+			createdBy: typeof k.createdBy === "string" ? k.createdBy : null,
+			expiresAt: stamp(k.expiresAt),
+			lastUsedAt: stamp(k.lastUsedAt),
+			revokedAt: stamp(k.revokedAt),
+			builtIn: k.builtIn === true,
+		}));
+}
+
+/** DELETE /v1/admin/keys/{id} (admin) -> { ok, id, revokedAt }. */
+export async function revokeApiKey(options: BackendRequestOptions, id: string): Promise<{ id: string; revokedAt: string | number | null }> {
+	const json = await adminJson(options, "DELETE", `/v1/admin/keys/${encodeURIComponent(id)}`);
+	return { id: typeof json.id === "string" ? json.id : id, revokedAt: stamp(json.revokedAt) };
 }
