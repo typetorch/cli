@@ -135,7 +135,7 @@ export async function migrateCommand(args: ParsedArgs, deps: MigrateDeps = {}) {
 
 	if (action === "status") {
 		if (!flagBool(args, "watch")) return show(await migrationStatus(options));
-		if (isJson()) throw new UsageError("--watch and --json don't mix");
+		if (isJson() || flagBool(args, "json")) throw new UsageError("--watch and --json don't mix");
 		return watch(options, host, deps);
 	}
 	if (action === "pause" || action === "resume" || action === "cancel") {

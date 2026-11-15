@@ -122,7 +122,7 @@ Keys are read from, highest priority first: the real environment; the **game rep
 `--config`'s folder, else the nearest folder with typetorch.json at or above the working directory). No other `.env`
 is read (before CLI 0.9 every parent folder's `.env` counted). `--env-file <path>` or `TYPETORCH_ENV_FILE` (real
 environment) is an override: that file is read **instead of** `.env`. A `TYPETORCH_ENV_FILE=` line inside the game's
-`.env` (the CLI 0.8 layout) is still followed (through 0.18.1), with a warning: move the keys into `.env`. Values Bun
+`.env` (the CLI 0.8 layout) is still followed (through 0.19.0), with a warning: move the keys into `.env`. Values Bun
 auto-loads from `.env*` files count as that file, not as the environment. Nothing read from a file is copied into
 `process.env`, a key goes only into the client for its job, and child processes (rbxtsc, rojo, lune, bun scripts, git)
 get an allowlisted environment without any key. Keys are never printed.
@@ -134,9 +134,12 @@ get an allowlisted environment without any key. Keys are never printed.
 | `OPENCLOUD_PLACE_KEY` | `kernel deploy`, `kernel restore` (manual only) | `universe.place.luau-execution-session:read` + `:write` (the default luau engine: Luau Execution tasks patch and save the place) and `asset:read` (place versions); `universe.place:write` only to publish files (`--place-file`, `kernel restore <file>`, `--replace-place`). **Roblox has no API-key route for downloading place files**: Asset Delivery needs `legacy-asset:manage`, which can't be granted to API keys, and `universe.place:read` shipped but only covers the place version history (`/place-version-history-api/v1/{placeId}/history`, `/contributors`; a key limited to one experience even gets 403 "Scope must be configured to allow all resources" there) |
 | `OPENCLOUD_API_KEY` (alias `ROBLOX_API_KEY`) | any job without its own key | all of the above |
 | `TYPETORCH_API_KEY` | the TypeTorch backend's **game key** (write-only): `backend setup` checks it and writes it into the settings record (game servers post heartbeats, events and errors with it); the CLI posts alerts and chart marks with it. **Since CLI 0.9 never a Roblox key**: an old value that still looks like one (the same as an Open Cloud variable, or the CLI 0.8 layout next to `TYPETORCH_FLEET_INGEST_TOKEN`) is refused with the rename to do | - |
-| `TYPETORCH_ADMIN_TOKEN` | the backend's **admin token**: `servers`, `report`, `alerts`, `--wait`, the owner list (`PUT /v1/access`), `notify`, `experiment list`, `keys create` / `list` / `revoke`; never goes into the record | - |
+| `TYPETORCH_ADMIN_TOKEN` | the backend's **admin token**: `servers`, `report`, `alerts`, `--wait`, the owner list (`PUT /v1/access`), `notify`, `experiment list`, `keys create` / `list` / `revoke`, `backend migrate`; never goes into the record | - |
+| `BASIN_SEND_TOKEN` | (CLI 0.19) the Cloudflare API token that may send to the Basin streams: `backend setup --analytics basin` signs it into the record's `analytics` sink (game servers post with it); `backend migrate --to-basin` hands it to the backend's job | Pipelines Send |
+| `TYPETORCH_OLD_ADMIN_TOKEN` | (CLI 0.19) the OLD server's admin token for `backend migrate --from` (with the old keys reused, the same value as `TYPETORCH_ADMIN_TOKEN`); sent only to the new server, which stores it encrypted | - |
+| `BASIN_SQL_TOKEN`, with `CLOUDFLARE_ACCOUNT_ID`, `BASIN_BUCKET`, `BASIN_NAMESPACE` (default `typetorch`) | (CLI 0.19) `backend migrate --from-basin`: what the backend reads Basin's Iceberg tables in R2 with (the names the backend's Basin store uses); only the token is a secret | R2 Data Catalog read |
 
-Old names, still read (through 0.18.1) with a warning naming the new one: `TYPETORCH_FLEET_TOKEN` (= `TYPETORCH_ADMIN_TOKEN`),
+Old names, still read (through 0.19.0) with a warning naming the new one: `TYPETORCH_FLEET_TOKEN` (= `TYPETORCH_ADMIN_TOKEN`),
 `TYPETORCH_FLEET_INGEST_TOKEN` (= `TYPETORCH_API_KEY`).
 
 Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_BUILD_CACHE=0` (turns the build cache off), `TYPETORCH_COMPILER=goblox|rbxtsc` (the compiler; see "Compiler"), `TYPETORCH_DARKLUA` (darklua's path for the
@@ -237,12 +240,13 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
 | `typetorch servers [--branch] [--watch]` | live servers from the fleet API (see "Fleet") |
 | `typetorch alerts [--follow] [--level] [--since <min>]` | the fleet's alerts (see "Fleet") |
-| `typetorch backend setup [--url <url>] [--flush-seconds <s>] [--record-share <0-1>] [--dry-run] [--force] [--no-ping]` | point game servers at the TypeTorch backend: checks, then the record's `backend` section (and the old `fleet`/`analytics` from it), ping, owner list, typetorch.json `backend.url` (see "Fleet") |
+| `typetorch backend setup [--url <url>] [--analytics basin\|duckdb] [--events <url> --recordings <url>] [--ingest <url>\|none] [--flush-seconds <s>] [--record-share <0-1>] [--dry-run] [--force] [--no-ping]` | point game servers at the TypeTorch backend: checks, then the record's `backend` section (and the old `fleet`/`analytics` from it), ping, owner list, typetorch.json `backend.url` (see "Fleet"). CLI 0.19: `--analytics basin` sends analytics to Basin's streams (`BASIN_SEND_TOKEN`; the backend keeps the fleet API and may run fleet-only), `--analytics duckdb` back to the backend; without the flag the record's sink is kept. `--ingest` sets / removes separate ingest servers (`backend.ingest`), kept without the flag (see "Moving the backend") |
+| `typetorch backend migrate --from <url>\|--from-basin\|--to-basin [--events <url> --recordings <url>] [--rows-per-second <n>] [--force]` / `status [--json] [--watch]` / `pause` / `resume` / `cancel` / `resolve <page> resend\|skip` | (CLI 0.19) moves history page by page through the servers' APIs, never files: starts and follows the migration job on the typetorch.json `backend.url` server with `TYPETORCH_ADMIN_TOKEN` (see "Moving the backend") |
 | `typetorch backend run [--backend-dir <checkout>] [--port <n>] [--cloudflared <path>]` | the backend on this PC behind a Cloudflare quick tunnel (no account): starts the backend checkout's server (default port 8787) with the two backend keys, opens the tunnel and runs `backend setup --url <tunnel>` each time the tunnel's address changes; restarts either when it drops. `init` sets it up (`.typetorch/backend.json`) and registers it as a login task; the current address is in `.typetorch/backend-run.json` |
 | `typetorch backend bless [--url <url>] [--no-open]` | trusts one browser for admin when you sign in with typetorch.dev: sends the public signing keys to the backend, signs its one-time challenge with the main prod key (it never leaves this PC) and opens the single-use link (5 minutes) |
 | `typetorch report <seq\|artifact\|latest> [--branch]` | what the servers did with one deploy; exits 1 when one failed or rolled back (see "Fleet") |
 | `typetorch keys init [--key-file]` / `keys init --fallback [--force] [--yes]` / `keys rotate [--yes]` / `keys resign` | the signing keys: see "Signing prod deploys" |
-| `typetorch keys create --name <name> --role <game\|lookup\|support\|analyst\|admin> [--expires 365d\|90d\|1y]` / `keys list [--all]` / `keys revoke <id>` | (the next release after 0.18.1) named API keys with roles on the backend (plans/31), with `TYPETORCH_ADMIN_TOKEN`: for tools that must not hold the admin token (a support bot reading one player's rows). `create` prints the key `ttk_<id>_<secret>` ONCE (`--json`: in `key`) and never writes it anywhere; `list` shows id, name, role, scopes, expiry, last use, built-in / revoked; `revoke` ends one at once (built-in `env:*` keys, the env tokens, are rotated in the backend's environment instead) |
+| `typetorch keys create --name <name> --role <game\|lookup\|support\|analyst\|admin> [--expires 365d\|90d\|1y]` / `keys list [--all]` / `keys revoke <id>` | (CLI 0.19.0) named API keys with roles on the backend (plans/31), with `TYPETORCH_ADMIN_TOKEN`: for tools that must not hold the admin token (a support bot reading one player's rows). `create` prints the key `ttk_<id>_<secret>` ONCE (`--json`: in `key`) and never writes it anywhere; `list` shows id, name, role, scopes, expiry, last use, built-in / revoked; `revoke` ends one at once (built-in `env:*` keys, the env tokens, are rotated in the backend's environment instead) |
 | `typetorch pin <artifact> --branch <b> (--servers <ids> \| --pct <1-99>)` / `pin --unpin --branch <b> (--servers <ids> \| --all)` | A/B experiment pins, signed on prod-channel branches; `--by`, `--dry-run` |
 | `typetorch reject <id> [--reason]` / `typetorch proposals [--all]` | drop a proposal / list them |
 | `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n> \| --studio-export <file>]` | hot assets: export the instances marked `TypeTorchAsset` from the place's latest published version (or the Studio plugin's export), upload new and changed ones, write `typetorch.assets.lock.json`; see "Hot assets" |
@@ -431,10 +435,10 @@ one log and one seq. If a deploy stops after the upload, `typetorch deployments`
 Kernel 0.3.8 reads ONE signed record instead of ConfigService (CLI 0.8 removed the ConfigService registry, `config
 push` and every `universe:write` / `universe:read` use): the game's DataStore `TypeTorch`, key `settings`,
 `{ v: 1, seq, at, body, sig, sigF }`. `body` is JSON text with `defaultBranch`, `channels`, `access` (`members`,
-`revoked`, `devBadgeId`), `backend` (`{url, key, analytics?, notify?}`; CLI 0.9; `analytics` = `{flushSeconds?, recordShare?,
+`revoked`, `devBadgeId`), `backend` (`{url, key, ingest?, analytics?, notify?}`; CLI 0.9; `ingest`: CLI 0.19, separate ingest servers' address, `backend setup --ingest`; `analytics` = `{flushSeconds?, recordShare?,
 experiments?}`, plus dials no CLI command writes yet that the framework reads (`techEvery`, `recordSeconds`, `positions`,
 `joinData`, `joinLaunchPrefix`) and `backend setup` keeps; `notify` = `{keys: {current, previous?, since}}`, the launch-data HMAC keys from `typetorch notify key
-rotate`, masked wherever shown and kept by `backend setup`), the old `fleet` (`{url, token}`) and `analytics` (the sink settings) derived from it for kernels before 0.4 and `game` (the game's live values,
+rotate`, masked wherever shown and kept by `backend setup`), the old `fleet` (`{url, token}`) and `analytics` (the sink settings) derived from it for kernels before 0.4 (or, with `backend setup --analytics basin`, the Basin sink `{backend: "basin", events, recordings, token, ...dials}`, which every framework reads) and `game` (the game's live values,
 `TypeTorch.liveConfig`); at most 32 KB, `game` at most 16 KB. `sig` and `sigF` are Ed25519 by the main and the fallback
 prod key over the lines `tt1settings`, `<seq>`, `<at>` and `<body>` joined with `\n`: the body is the exact text stored,
 so nothing is re-encoded before verifying.
@@ -452,15 +456,18 @@ fresh write fixes it).
 
 **Endpoint checks (the backend never reaches the record broken).** A wrong address or key in the record is not
 rejected by anything else: game servers just fail every request ("NetFail", HTTP 401 or 530) until someone looks at the
-dev menu. So `typetorch backend setup` tests the value BEFORE reading the record or signing, and `typetorch doctor` runs
+dev menu. So `typetorch backend setup` tests the value BEFORE signing (since CLI 0.19 it reads the record first, only to see which
+analytics sink and ingest address it keeps and so which checks apply), and `typetorch doctor` runs
 the same tests against the live record:
 
 | Step | What is checked | Typical fix it prints |
 |---|---|---|
 | `url` | parses; https (the kernel's Fleet module and Roblox servers only use https); no user info; the base address, not an endpoint path, and only the characters the kernel accepts | give the public https address |
 | `healthz` | `GET <base>/healthz` answers 200 `{"ok":true}` within 5 s; redirects are reported, not followed | a dead quick tunnel: start `bun run local` again; a stopped server; a wrong host |
-| `key` | `GET <base>/v1/auth/check` (no side effects) with `TYPETORCH_API_KEY` says role `game` (write-only) and that the fleet and analytics parts run | put the backend's API key in the game repo's `.env` |
+| `key` | `GET <base>/v1/auth/check` (no side effects) with `TYPETORCH_API_KEY` says role `game` (write-only) and that the fleet and analytics parts run (only fleet when analytics goes to Basin: a `TYPETORCH_PARTS=fleet` backend passes) | put the backend's API key in the game repo's `.env` |
 | `admin` | the same with `TYPETORCH_ADMIN_TOKEN` says role `admin` | put the backend's admin token in `.env` |
+| `ingest` | (with `backend.ingest`) `<ingest>/healthz`, and the game key says role `game` there | start the ingest servers, or `--ingest none` |
+| `analytics` | (with a Basin sink) both stream URLs answer any HTTP status and don't refuse `BASIN_SEND_TOKEN` (401/403); Basin has no side-effect-free token check | copy the stream URLs from the Basin dashboard; a token with Pipelines Send |
 
 A failure prints each failing step with a `fix:` line in red, writes nothing (no record, no ping, no typetorch.json
 change) and exits 1; `--force` writes anyway and prints the failures as warnings, **except** when the value in the key's
@@ -802,7 +809,7 @@ you host. The CLI reads it:
 - **Setup:** `typetorch backend setup --url https://<host>` (see "Settings > Endpoint checks") writes the record's
   `backend` = `{url, key, analytics?: {flushSeconds, recordShare}}` and, for kernels before 0.4 and frameworks before 0.4,
   the old `fleet` = `{url, token}` and `analytics` (DuckDB ingest at `<url>/v1/ingest`, the same key; an existing
-  section keeps its experiments) derived from it, with the game key from `TYPETORCH_API_KEY`, pings the servers, sends
+  section keeps its experiments; a Basin sink is kept, see "Moving the backend") derived from it, with the game key from `TYPETORCH_API_KEY`, pings the servers, sends
   the owner list (`PUT /v1/access`) and sets typetorch.json `"backend": { "url": ... }` (dropping CLI 0.8's `"fleet"`,
   which is still read with a warning). Reads use the admin token in `TYPETORCH_ADMIN_TOKEN`; alerts the CLI posts use the
   game key (the backend refuses the admin token on its game routes). Both come from the environment or the game repo's
@@ -833,6 +840,56 @@ you host. The CLI reads it:
   - failures below the threshold: a red summary, the rollback command, exit 1;
   - **stalled servers alone never roll back:** their JobIds are listed, a `server_stuck` warning alert is posted, and
     the command exits 0 with a warning.
+
+### Moving the backend (CLI 0.19, plans/35)
+
+**Analytics to Basin or back.** `backend setup --analytics basin --events <stream url> --recordings <stream url>`
+writes the record's `analytics` = `{backend: "basin", events, recordings, token, ...dials}` with the send token from
+`BASIN_SEND_TOKEN` (env / `.env`, never a flag, never printed) and keeps `backend` = `{url, key, analytics?}` for the
+fleet API, error logs and identities (frameworks 0.4+ use the `analytics` section whenever it names Basin). The key
+check then only needs the backend's fleet part, so a `TYPETORCH_PARTS=fleet` backend passes; both stream URLs are
+checked too. `--events` / `--recordings` default to the record's streams (to change only the token). `--analytics duckdb`
+moves analytics back to the backend. **Without `--analytics` the record's sink is kept** (CLI 0.18 and older replaced
+a Basin sink with the backend's, so Basin games had to avoid `backend setup`; they no longer do). The dials
+(`--flush-seconds`, `--record-share`) and the experiment overrides land in both sections either way. If another
+machine switches the sink between the checks and the write, nothing is written (run it again).
+
+**Separate ingest servers (optional).** `backend setup --ingest https://ingest.example.com` sets `backend.ingest`:
+framework 0.7.2+ posts events there with the same key, everything else stays on `backend.url` (the kernel ignores the
+field). Checked first: `/healthz` and that the game key answers role `game` there (`--force` writes it anyway).
+`--ingest none` removes it; without the flag it is kept (and checked again). Most games run one server and never set it.
+
+**Moving history: `typetorch backend migrate`.** A job on the backend that typetorch.json `backend.url` names copies
+history page by page through the servers' APIs (no file copies), verifies every day and survives restarts on either
+side; the CLI only starts and watches it, with `TYPETORCH_ADMIN_TOKEN`:
+
+```sh
+typetorch backend migrate --from https://old.example.com   # the old server's history into this one (TYPETORCH_OLD_ADMIN_TOKEN)
+typetorch backend migrate --from-basin                      # Basin's Iceberg tables (CLOUDFLARE_ACCOUNT_ID, BASIN_BUCKET, BASIN_SQL_TOKEN, BASIN_NAMESPACE)
+typetorch backend migrate --to-basin                        # this backend's history into the record's Basin streams (BASIN_SEND_TOKEN)
+typetorch backend migrate status --watch                    # every 5 s; Ctrl+C stops watching, the job keeps running
+typetorch backend migrate pause | resume | cancel
+typetorch backend migrate resolve <page> resend|skip        # --to-basin: a page cut off mid-send
+```
+
+- `--from` checks the old server first (`/healthz`, and that `TYPETORCH_OLD_ADMIN_TOKEN` is admin there; `--force`
+  starts anyway), refuses `--from` = typetorch.json `backend.url` (the job runs on the NEW server) and warns when the
+  signed record still sends game servers to the old URL. `--rows-per-second <n>` caps the job (default: the backend's
+  `TYPETORCH_MIGRATE_ROWS_PER_SECOND`, 20,000). Tokens go only into the start body (`POST /v1/admin/migrate`); the
+  backend stores them encrypted and never echoes them.
+- `status` shows the state and direction, the steps (erased, identities, fleet, events, recordings, live, rollups,
+  verify), a progress bar with the percent, rows/s (measured between `--watch` polls, else the average), the cap, the
+  days to go and a time estimate, the per-day report per table (`match`, `missing`, `differs`, `duplicates`,
+  `importing`, `pending`) with each problem day listed, what the job waits for, a pending decision with the two
+  `resolve` commands, and an error. `--json` prints the backend's status as-is. Each call times out after 10 s.
+- Basin can't delete or dedupe, so `--to-basin` can't be repeated safely: a page cut off mid-send stops the job
+  (`needs_decision`) until `resolve <page> resend` (Basin may hold that page twice) or `skip`.
+- A backend that answers 501 for a direction doesn't support it yet: update it.
+
+Runbook for a move to a new server (the new one reuses the old keys): deploy the backend on the new machine (its own
+URL); `typetorch backend setup --url <new>` (game servers follow within a minute); point the Roblox erasure webhook at
+`<new>/v1/erasure`; `typetorch backend migrate --from <old>` and watch `status`; when every day says `match`, keep a
+last backup of the old server and turn it off.
 
 ### Rollouts
 

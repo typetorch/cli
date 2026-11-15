@@ -17,6 +17,10 @@
  *   admin    (backend) GET /v1/auth/check with TYPETORCH_ADMIN_TOKEN says role "admin" (the CLI's reads and the owner
  *            list need it); the game key in its place is refused.
  *
+ * With a Basin analytics sink (plans/35 B) the backend's key only needs the fleet part (`parts: ["fleet"]`). The
+ * optional ingest address (`backend.ingest`, plans/35 C) gets url, healthz and the game key (role "game", no parts);
+ * the OLD server of a move (`backend migrate --from`) url, healthz and its admin token (`checkOldBackend`).
+ *
  * Basin analytics has no /healthz and no documented side-effect-free authenticated call, so there the stream URLs must
  * answer any HTTP status and a 401/403 for the token is a failure; whether the token is right is otherwise unknown.
  *

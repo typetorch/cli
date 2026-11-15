@@ -81,7 +81,9 @@ export const BACKEND_USAGE = `typetorch backend setup [--url <https url>] [--ana
     url      parses, https, the server's base address, only the characters the kernel accepts
     healthz  GET <url>/healthz answers {"ok":true} within 5 s
     key      GET <url>/v1/auth/check with ${BACKEND_KEY_VAR} says role "game" (write-only) and that the fleet and
-             analytics parts run
+             analytics parts run (just fleet when analytics goes to Basin)
+    ingest   with --ingest (or one in the record): <ingest>/healthz, and the game key says role "game" there
+    basin    with a Basin sink: both stream URLs answer and don't refuse ${BASIN_SEND_TOKEN_VAR}
     admin    GET <url>/v1/auth/check with ${ADMIN_TOKEN_VAR} says role "admin" (the CLI's reads, the owner list)
   A failure prints what is wrong and how to fix it, writes nothing and exits 1; --force writes it anyway (the failures
   print as warnings). Then it writes the signed settings record's backend = {url, key, analytics?} and, for kernels
