@@ -14,7 +14,8 @@ import { bold, cyan, dim, green, red, yellow } from "./log.ts";
 export const MIGRATE_PATH = "/v1/admin/migrate";
 export const MIGRATE_STATES = ["idle", "running", "paused", "waiting", "done", "failed", "cancelled", "needs_decision"] as const;
 export const MIGRATE_DIRECTIONS = ["from-backend", "from-basin", "to-basin"] as const;
-export const DAY_STATES = ["pending", "importing", "match", "missing", "differs", "duplicates"] as const;
+/** `sent` (to-basin): posted to Basin but not counted there (the server has no Basin read settings). */
+export const DAY_STATES = ["pending", "importing", "match", "sent", "missing", "differs", "duplicates"] as const;
 /** States after which nothing changes by itself (--watch stops there). */
 export const FINAL_STATES: ReadonlySet<string> = new Set(["idle", "done", "failed", "cancelled"]);
 
@@ -272,8 +273,14 @@ export function formatMigration(status: MigrationStatus, view: ViewOptions): str
 		}
 	}
 	if (status.error) lines.push(`  ${red("error")} ${status.error}`);
-	if (status.state === "done" && status.direction === "from-backend" && status.days.length && status.days.every((d) => d.state === "match")) {
-		lines.push(green(`  every day matches: keep a last backup of the source, then turn it off`));
+	const allMatch = status.days.length > 0 && status.days.every((d) => d.state === "match");
+	if (status.state === "done" && allMatch) {
+		if (status.direction === "from-backend") lines.push(green(`  every day matches: keep a last backup of the source, then turn it off`));
+		if (status.direction === "from-basin") lines.push(green(`  every day matches Basin's counts: the Basin tables can stay as a backup (the move only read them)`));
+		if (status.direction === "to-basin") lines.push(green(`  every day is in Basin: keep a last backup, then TYPETORCH_PARTS=fleet turns this server's analytics off`));
+	}
+	if (status.state === "done" && status.direction === "to-basin" && status.days.some((d) => d.state === "sent")) {
+		lines.push(`  ${dim("sent = posted but not counted in Basin: set CLOUDFLARE_ACCOUNT_ID, BASIN_BUCKET and BASIN_SQL_TOKEN on the server to check")}`);
 	}
 	return lines;
 }

@@ -508,6 +508,14 @@ describe("backend migrate status: the view", () => {
 		expect(done).toContain("events     5 days 2026-11-11..2026-11-15: 5 match");
 		expect(done).toContain("every day matches: keep a last backup of the source, then turn it off");
 		expect(done).not.toContain("rows/s");
+		// The Basin directions: their own finish line; `sent` (to-basin without read settings) is a known state.
+		const toBasin = view({ ...RUNNING, direction: "to-basin", state: "done", steps: [], days: RUNNING.days.map((d, i) => ({ ...d, state: i ? "match" : "sent", rowsTarget: d.rowsSource })), waitingFor: null });
+		expect(toBasin).toContain("sent = posted but not counted in Basin");
+		expect(toBasin).not.toContain("every day is in Basin");
+		const toBasinDone = view({ ...RUNNING, direction: "to-basin", state: "done", steps: [], days: RUNNING.days.map((d) => ({ ...d, state: "match", rowsTarget: d.rowsSource })), waitingFor: null });
+		expect(toBasinDone).toContain("every day is in Basin");
+		const fromBasin = view({ ...RUNNING, direction: "from-basin", state: "done", steps: [], days: RUNNING.days.map((d) => ({ ...d, state: "match", rowsTarget: d.rowsSource })), waitingFor: null });
+		expect(fromBasin).toContain("every day matches Basin's counts");
 		const failed = view({ ...RUNNING, state: "failed", error: "the old server answered 401: its admin token changed" });
 		expect(failed).toContain("error the old server answered 401");
 		expect(view({ state: "idle", direction: null, steps: [], days: [] })).toContain("no move has run on new.example.com");
