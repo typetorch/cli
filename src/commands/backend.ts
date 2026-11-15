@@ -218,6 +218,11 @@ export async function backendCommand(args: ParsedArgs, deps: { oc?: Pick<OpenClo
 			raced = true;
 			return undefined;
 		}
+		// So must a kept ingest address: one that appeared meanwhile would be written unchecked.
+		if (ingestFlag === undefined && (body.backend?.ingest ?? null) !== (current.backend?.ingest ?? null)) {
+			raced = true;
+			return undefined;
+		}
 		return withBackend(body, { url, key, analytics: analyticsDials(body, flags) }, { sink: plan.sink, ingest: ingestFlag });
 	};
 	const sinkLine = plan.sink === "duckdb" ? `analytics: the backend (DuckDB)${request === "duckdb" && basinSinkOf(current) ? ", moved back from Basin" : ""}` : `analytics: Basin (${hostOf(plan.sink.events)})${plan.keep ? ", kept" : ""}`;
@@ -245,7 +250,7 @@ export async function backendCommand(args: ParsedArgs, deps: { oc?: Pick<OpenClo
 		fetch: deps.fetch,
 		mutate,
 	});
-	if (raced) throw new Error("the settings record's analytics sink changed while the checks ran (another machine wrote it): nothing was written. Run it again");
+	if (raced) throw new Error("the settings record's analytics sink or ingest address changed while the checks ran (another machine wrote it): nothing was written. Run it again");
 	const configChanged = setConfigUrl(proj, url);
 	if (isJson()) {
 		return emitJson({ field: "backend", url, analytics: plan.sink === "duckdb" ? "duckdb" : "basin", ingest: ingest ?? null, settingsSeq: result.seq ?? null, outcome: result.outcome ?? null, pinged: result.pinged ?? false, owners: result.owners ?? null, configChanged, checks: reportsJson(reports) });

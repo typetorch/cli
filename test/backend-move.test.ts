@@ -203,8 +203,20 @@ describe("backend setup: the analytics sink (plans/35 B)", () => {
 			return signSettings(signer, value.seq + 1, "2026-11-15T00:00:00.000Z", body);
 		});
 		const raced = await setup(["--record-share", "0.5"], { proj, cloud, signer, fetch: net.fetch });
-		expect(raced.error?.message).toContain("analytics sink changed while the checks ran");
+		expect(raced.error?.message).toContain("analytics sink or ingest address changed while the checks ran");
 		expect(bodyOf(cloud).analytics?.backend).toBe("basin");
+		// An ingest address that appears meanwhile isn't written unchecked either.
+		const proj2 = project();
+		const cloud2 = fakeDataStoreCloud();
+		expect((await setup([], { proj: proj2, cloud: cloud2, signer, fetch: net.fetch })).error).toBeUndefined();
+		cloud2.serverWrites("settings", (value: SettingsRecord) => {
+			const body = JSON.parse(value.body) as SettingsBody;
+			body.backend!.ingest = "https://unchecked.example.com";
+			return signSettings(signer, value.seq + 1, "2026-11-15T00:00:00.000Z", body);
+		});
+		const raced2 = await setup(["--record-share", "0.5"], { proj: proj2, cloud: cloud2, signer, fetch: net.fetch });
+		expect(raced2.error?.message).toContain("changed while the checks ran");
+		expect(bodyOf(cloud2).backend?.analytics).toBeUndefined();
 	});
 });
 
