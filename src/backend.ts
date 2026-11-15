@@ -146,9 +146,12 @@ export interface BackendRequestOptions {
 	adminToken: string;
 	fetch?: typeof fetch;
 	timeoutMs?: number;
+	/** Ends the request early (Ctrl+C in a --watch loop), on top of the timeout. */
+	signal?: AbortSignal;
 }
 
-async function adminRequest(options: BackendRequestOptions, method: "GET" | "PUT" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown, maxText = 4000): Promise<{ status: number; json?: Record<string, unknown>; text: string }> {
+/** One admin call (the admin token as a bearer, no redirects, the timeout). 401/403 and 3xx throw; other statuses return. */
+export async function adminRequest(options: BackendRequestOptions, method: "GET" | "PUT" | "POST" | "PATCH" | "DELETE", path: string, body?: unknown, maxText = 4000): Promise<{ status: number; json?: Record<string, unknown>; text: string }> {
 	const base = options.url.replace(/\/+$/, "");
 	const host = new URL(base).host;
 	let response: Response;
@@ -159,9 +162,10 @@ async function adminRequest(options: BackendRequestOptions, method: "GET" | "PUT
 			...(body !== undefined ? { body: JSON.stringify(body) } : {}),
 			// A redirect would carry the admin token to wherever it points.
 			redirect: "manual",
-			signal: AbortSignal.timeout(options.timeoutMs ?? 10_000),
+			signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(options.timeoutMs ?? 10_000)]) : AbortSignal.timeout(options.timeoutMs ?? 10_000),
 		});
 	} catch (error) {
+		if ((error as Error).name === "TimeoutError") throw new BackendError(`the backend at ${host} didn't answer within ${Math.round((options.timeoutMs ?? 10_000) / 1000)} s`);
 		throw new BackendError(fleetNetworkHint(error as Error, host) ?? `the backend at ${host} didn't answer: ${(error as Error).message}`);
 	}
 	const text = (await response.text()).slice(0, maxText);

@@ -3,11 +3,17 @@
  * (endpoints.ts: the URL, GET /healthz, the game key answers role "game" with the fleet and analytics parts running, the
  * admin token answers role "admin") and refuses a broken one unless --force, then writes the signed settings record's
  *
- *   backend   = { url, key, analytics?: { flushSeconds, recordShare, experiments } }
+ *   backend   = { url, key, ingest?, analytics?: { flushSeconds, recordShare, experiments } }
  *   fleet     = { url, token: key }                                   (kernels 0.3.8/0.3.9 read this one)
  *   analytics = { backend: "duckdb", events: url/v1/ingest, token: key, ... }   (frameworks before 0.4; other fields kept)
+ *            or { backend: "basin", events, recordings, token: BASIN_SEND_TOKEN, ... }   (every framework: plans/35 B)
  *
  * (the experiment overrides, `typetorch experiment`'s, are kept: backend.analytics' or else the old section's, in both)
+ * The sink: `--analytics basin --events <url> --recordings <url>` writes a Basin sink (the key check then accepts a
+ * fleet-only backend), `--analytics duckdb` moves analytics back to the backend, and without `--analytics` the record's
+ * sink is kept (CLI 0.18 replaced a Basin sink). `--ingest <url>` / `--ingest none` sets / removes `backend.ingest`
+ * (separate ingest servers, plans/35 C; checked: /healthz and the game key there); without it, it is kept.
+ * `backend migrate` (commands/migrate-backend.ts) moves history between servers and Basin.
  * with both prod keys, pings servers, sends the owner list to the backend (PUT /v1/access) and sets typetorch.json
  * `backend.url` (dropping CLI 0.8's `fleet`). The key is TYPETORCH_API_KEY and the admin token TYPETORCH_ADMIN_TOKEN,
  * from the environment or the game repo's .env (backend.ts); neither is printed or passed on a command line.
@@ -24,23 +30,27 @@ import { backendCredentialsWarned, blessChallenge, blessMessage, syncBlessKeys }
 import { capture } from "../proc.ts";
 import { experimentsOf } from "../experiments.ts";
 import { backendUrlError, updateProjectConfig, type Project } from "../config.ts";
-import { checkBackendEndpoint, enforceEndpoints, reportsJson } from "../endpoints.ts";
-import { ADMIN_TOKEN_VAR, BACKEND_KEY_VAR, childEnv, settings } from "../env.ts";
+import { checkAnalyticsEndpoint, checkBackendEndpoint, checkIngestEndpoint, enforceEndpoints, reportsJson, type EndpointReport } from "../endpoints.ts";
+import { ADMIN_TOKEN_VAR, BACKEND_KEY_VAR, BASIN_SEND_TOKEN_VAR, childEnv, registerSecret, settings } from "../env.ts";
 import { bold, dim, emitJson, info, isJson } from "../log.ts";
 import type { OpenCloud } from "../opencloud.ts";
 import {
 	describeFields,
 	encodeBody,
 	FLUSH_SECONDS_BOUNDS,
+	basinSinkOf,
 	maskSecrets,
 	readSettings,
 	RECORD_SHARE_BOUNDS,
 	withBackend,
 	type BackendAnalytics,
+	type BasinSink,
 	type SettingsBody,
 } from "../settings.ts";
 import type { DualSigner } from "../signing.ts";
 import { KEY_FILE_FLAGS, openCloud, project } from "./common.ts";
+import { streamUrlError } from "../migration.ts";
+import { MIGRATE_FLAGS, MIGRATE_ONLY_FLAGS, MIGRATE_USAGE, migrateCommand, type MigrateDeps } from "./migrate-backend.ts";
 import { changeSettings, ENDPOINT_SECTIONS, reportChange, settingsSigner } from "./settings.ts";
 
 export const backendFlags = {
@@ -54,11 +64,17 @@ export const backendFlags = {
 	"backend-dir": "string",
 	port: "string",
 	cloudflared: "string",
+	analytics: "string",
+	events: "string",
+	recordings: "string",
+	ingest: "string",
+	...MIGRATE_FLAGS,
 	...KEY_FILE_FLAGS,
 } as const;
 
-export const BACKEND_USAGE = `typetorch backend setup [--url <https url>] [--flush-seconds <5-300>] [--record-share <0-1>] [--dry-run] [--force]
-                        [--no-ping] [--key-file <path>] [--fallback-key-file <path>]
+export const BACKEND_USAGE = `typetorch backend setup [--url <https url>] [--analytics basin|duckdb] [--events <url> --recordings <url>]
+                        [--ingest <https url>|none] [--flush-seconds <5-300>] [--record-share <0-1>] [--dry-run]
+                        [--force] [--no-ping] [--key-file <path>] [--fallback-key-file <path>]
 
   Points game servers at the TypeTorch backend (fleet status, analytics, error logs; one URL, one key). Checked first
   (--dry-run too), so a broken address or key never reaches game servers:
@@ -72,6 +88,14 @@ export const BACKEND_USAGE = `typetorch backend setup [--url <https url>] [--flu
   before 0.4, the fleet and analytics sections derived from it (experiment overrides are kept, in both sections),
   pings servers, sends the owner list to the backend (PUT /v1/access) and sets typetorch.json backend.url.
   --url            the backend's public https address (default: typetorch.json backend.url)
+  --analytics      where analytics goes. basin: the record's analytics = {backend: "basin", events, recordings, token}
+                   with the send token from ${BASIN_SEND_TOKEN_VAR} (env / .env, never on the command line); the
+                   backend keeps the fleet API, error logs and identities, and the key check accepts a fleet-only
+                   backend (TYPETORCH_PARTS=fleet). duckdb: back to the backend. Without it the record's sink is kept
+  --events, --recordings  the two Basin stream URLs (https://<stream id>.ingest.cloudflare.com; default: the record's)
+  --ingest         separate ingest servers' https address (backend.ingest: framework 0.7.2+ posts events there with the
+                   same key; checked: /healthz and the game key answers role "game" there); none removes it; without
+                   it the record's is kept
   --flush-seconds  seconds between analytics sends (default: the record's, else the framework's ~15)
   --record-share   share (0-1) of new players whose first session is recorded in detail (default: the record's)
   Keys: ${BACKEND_KEY_VAR} (the backend's game key) and ${ADMIN_TOKEN_VAR} (its admin token), from the environment
@@ -98,7 +122,9 @@ typetorch backend bless [--url <https url>] [--no-open] [--key-file <path>] [--f
   one-time challenge, signs it with the main prod key (it never leaves this PC) and opens the single-use link
   <url>/auth/bless?challenge=...&sig=... in your browser; open it in the browser you want to trust within 5 minutes.
   --url       the backend (default: typetorch.json backend.url)
-  --no-open   print the link instead of opening it`;
+  --no-open   print the link instead of opening it
+
+${MIGRATE_USAGE}`;
 
 function dial(args: ParsedArgs, flag: string, [low, high]: readonly [number, number]): number | undefined {
 	const raw = flagString(args, flag);
@@ -125,7 +151,7 @@ export function analyticsDials(body: SettingsBody, flags: BackendAnalytics): Bac
 	return Object.keys(dials).length ? dials : undefined;
 }
 
-export async function backendCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; fetch?: typeof fetch; open?: (url: string) => Promise<void> } = {}) {
+export async function backendCommand(args: ParsedArgs, deps: { oc?: Pick<OpenCloud, "request" | "publishMessage">; signer?: DualSigner; fetch?: typeof fetch; open?: (url: string) => Promise<void> } & Omit<MigrateDeps, "oc" | "fetch"> = {}) {
 	const [sub, extra] = args.positionals;
 	if (sub === "bless") {
 		if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
@@ -135,9 +161,11 @@ export async function backendCommand(args: ParsedArgs, deps: { oc?: Pick<OpenClo
 		if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
 		return backendRun(args);
 	}
-	if (sub !== "setup") throw new UsageError(`unknown backend subcommand "${sub ?? ""}" (setup, run, bless)`);
+	if (sub === "migrate") return migrateCommand(args, deps);
+	if (sub !== "setup") throw new UsageError(`unknown backend subcommand "${sub ?? ""}" (setup, run, bless, migrate)`);
 	for (const flag of ["backend-dir", "port", "cloudflared"]) if (flagString(args, flag) !== undefined) throw new UsageError(`--${flag} belongs to \`backend run\``);
 	if (flagBool(args, "no-open")) throw new UsageError("--no-open belongs to `backend bless`");
+	for (const flag of MIGRATE_ONLY_FLAGS) if (args.flags[flag] !== undefined) throw new UsageError(`--${flag} belongs to \`backend migrate\``);
 	if (extra !== undefined) throw new UsageError(`unexpected argument "${extra}"`);
 	const proj = project(args);
 	const url = (flagString(args, "url") ?? proj.config.backend?.url)?.replace(/\/+$/, "");
@@ -151,6 +179,8 @@ export async function backendCommand(args: ParsedArgs, deps: { oc?: Pick<OpenClo
 	if (share !== undefined) flags.recordShare = share;
 	const dryRun = flagBool(args, "dry-run");
 	const force = flagBool(args, "force");
+	const request = sinkRequest(args);
+	const ingestFlag = ingestRequest(args);
 
 	// The Open Cloud deploy key first: without it nothing can be written (and a CLI 0.8 env, where TYPETORCH_API_KEY was
 	// the Roblox key, gets the rename hint here before anything is sent to the backend).
@@ -162,22 +192,43 @@ export async function backendCommand(args: ParsedArgs, deps: { oc?: Pick<OpenClo
 		);
 	}
 	const key = creds.key.value;
-	// Game servers will post to this address with this key: test it before anything is signed or written.
-	const report = await checkBackendEndpoint({ url, key, admin: creds.admin?.value, requireAdmin: true, kernelRules: true, fetch: deps.fetch });
-	enforceEndpoints({ reports: [report], what: "settings.backend", force });
+	// The record as it is now: which sink and ingest address it keeps when no flag changes them (plans/35 B, C). Only
+	// to choose the checks: the write itself starts from the record verified with your keys, and refuses when that
+	// one's sink isn't the one checked here.
+	const read = await readSettings(oc, proj.config.universeId);
+	if (read.error) throw new Error(`reading the settings record failed: ${read.error}. Nothing was written`);
+	const current = read.body ?? {};
+	const plan = sinkPlan(request, current);
+	const ingest = ingestFlag === undefined ? current.backend?.ingest : (ingestFlag ?? undefined);
 
-	const mutate = (body: SettingsBody): SettingsBody => withBackend(body, { url, key, analytics: analyticsDials(body, flags) });
+	// Game servers will post to these addresses with these keys: test them before anything is signed or written.
+	const reports: EndpointReport[] = [
+		await checkBackendEndpoint({ url, key, admin: creds.admin?.value, requireAdmin: true, kernelRules: true, fetch: deps.fetch, parts: plan.sink === "duckdb" ? ["fleet", "analytics"] : ["fleet"] }),
+	];
+	if (plan.sink !== "duckdb") reports.push(await checkAnalyticsEndpoint(plan.sink, { fetch: deps.fetch }));
+	if (ingest) reports.push(await checkIngestEndpoint({ url: ingest, key, fetch: deps.fetch }));
+	enforceEndpoints({ reports, what: "settings.backend", force });
+
+	let raced = false;
+	const mutate = (body: SettingsBody): SettingsBody | undefined => {
+		// The verified record's sink must be the one checked above (another machine may have switched it meanwhile).
+		if (plan.keep && encodeBody({ analytics: basinSinkOf(body) as Record<string, unknown> | undefined }) !== encodeBody({ analytics: plan.keptFrom as Record<string, unknown> | undefined })) {
+			raced = true;
+			return undefined;
+		}
+		return withBackend(body, { url, key, analytics: analyticsDials(body, flags) }, { sink: plan.sink, ingest: ingestFlag });
+	};
+	const sinkLine = plan.sink === "duckdb" ? `analytics: the backend (DuckDB)${request === "duckdb" && basinSinkOf(current) ? ", moved back from Basin" : ""}` : `analytics: Basin (${hostOf(plan.sink.events)})${plan.keep ? ", kept" : ""}`;
+	const ingestLine = ingest ? `ingest: ${hostOf(ingest)}${ingestFlag === undefined ? " (kept)" : ""}` : ingestFlag === null && current.backend?.ingest ? "ingest: removed (events go to the backend)" : undefined;
 	if (dryRun) {
-		const read = await readSettings(oc, proj.config.universeId);
-		if (read.error) throw new Error(`reading the settings record failed: ${read.error}`);
-		const before = read.body ?? {};
-		const next = mutate(JSON.parse(JSON.stringify(before)) as SettingsBody);
+		const before = current;
+		const next = mutate(JSON.parse(JSON.stringify(before)) as SettingsBody)!;
 		const changed = encodeBody(next) !== encodeBody(before);
 		if (isJson()) {
-			return emitJson({ dryRun: true, url, changed, seq: read.record ? read.record.seq + (changed ? 1 : 0) : 1, after: maskSecrets(next), checks: reportsJson([report]) });
+			return emitJson({ dryRun: true, url, changed, analytics: plan.sink === "duckdb" ? "duckdb" : "basin", ingest: ingest ?? null, seq: read.record ? read.record.seq + (changed ? 1 : 0) : 1, after: maskSecrets(next), checks: reportsJson(reports) });
 		}
 		info(bold(`dry run: ${changed ? `would write settings #${read.record ? read.record.seq + 1 : 1} (backend ${new URL(url).host}, key from ${creds.key.name})` : "the record already holds this backend"}; then ping servers, send the owner list, set typetorch.json backend.url`));
-		if (before.analytics?.backend === "basin") info(dim("  replaces the Basin analytics sink: events go to the backend (experiments and the other dials stay)"));
+		info(dim(`  ${sinkLine}${ingestLine ? `; ${ingestLine}` : ""}`));
 		for (const line of describeFields(next)) info(`  ${line}`);
 		return;
 	}
@@ -192,12 +243,83 @@ export async function backendCommand(args: ParsedArgs, deps: { oc?: Pick<OpenClo
 		fetch: deps.fetch,
 		mutate,
 	});
+	if (raced) throw new Error("the settings record's analytics sink changed while the checks ran (another machine wrote it): nothing was written. Run it again");
 	const configChanged = setConfigUrl(proj, url);
 	if (isJson()) {
-		return emitJson({ field: "backend", url, settingsSeq: result.seq ?? null, outcome: result.outcome ?? null, pinged: result.pinged ?? false, owners: result.owners ?? null, configChanged, checks: reportsJson([report]) });
+		return emitJson({ field: "backend", url, analytics: plan.sink === "duckdb" ? "duckdb" : "basin", ingest: ingest ?? null, settingsSeq: result.seq ?? null, outcome: result.outcome ?? null, pinged: result.pinged ?? false, owners: result.owners ?? null, configChanged, checks: reportsJson(reports) });
 	}
 	reportChange(result, `backend setup: game servers use ${new URL(url).host}`);
-	info(dim(`  typetorch.json backend.url = ${url}${configChanged ? "" : " (unchanged)"}. The key sits in the signed settings record, never printed.`));
+	info(dim(`  ${sinkLine}${ingestLine ? `; ${ingestLine}` : ""}`));
+	info(dim(`  typetorch.json backend.url = ${url}${configChanged ? "" : " (unchanged)"}. The keys sit in the signed settings record, never printed.`));
+}
+
+function hostOf(url: string): string {
+	try {
+		return new URL(url).host;
+	} catch {
+		return "?";
+	}
+}
+
+type SinkRequest = undefined | "duckdb" | { events?: string; recordings?: string };
+
+/** --analytics basin|duckdb with --events / --recordings (Basin only). undefined: keep the record's sink. */
+function sinkRequest(args: ParsedArgs): SinkRequest {
+	const analytics = flagString(args, "analytics");
+	const events = flagString(args, "events");
+	const recordings = flagString(args, "recordings");
+	if (analytics === undefined) {
+		if (events !== undefined || recordings !== undefined) throw new UsageError("--events and --recordings go with --analytics basin");
+		return undefined;
+	}
+	if (analytics === "duckdb") {
+		if (events !== undefined || recordings !== undefined) throw new UsageError("--events and --recordings go with --analytics basin, not duckdb");
+		return "duckdb";
+	}
+	if (analytics !== "basin") throw new UsageError(`--analytics must be basin or duckdb, got "${analytics}"`);
+	for (const [flag, value] of [["events", events], ["recordings", recordings]] as const) {
+		if (value === undefined) continue;
+		const problem = streamUrlError(value);
+		if (problem) throw new UsageError(`--${flag} ${problem}`);
+	}
+	return { events, recordings };
+}
+
+/** --ingest <url> | none: a URL, null (remove), or undefined (keep the record's). */
+function ingestRequest(args: ParsedArgs): string | null | undefined {
+	const raw = flagString(args, "ingest");
+	if (raw === undefined) return undefined;
+	if (raw === "none") return null;
+	const value = raw.replace(/\/+$/, "");
+	const problem = backendUrlError(value);
+	if (problem) throw new UsageError(`--ingest ${problem}`);
+	if (!value.startsWith("https://")) throw new UsageError("--ingest must be https (game servers post events there)");
+	return value;
+}
+
+interface SinkPlan {
+	sink: "duckdb" | BasinSink;
+	/** No --analytics: the record's own sink is kept (keptFrom: the one the checks ran on, re-compared at write time). */
+	keep: boolean;
+	keptFrom?: BasinSink;
+}
+
+/**
+ * Which analytics sink to write. --analytics basin: the flags' streams (else the record's Basin streams) and
+ * BASIN_SEND_TOKEN; --analytics duckdb: the backend; no flag: what the record has (plans/35 B: a Basin sink is kept).
+ */
+function sinkPlan(request: SinkRequest, body: SettingsBody): SinkPlan {
+	const existing = basinSinkOf(body);
+	if (request === undefined) return existing ? { sink: existing, keep: true, keptFrom: existing } : { sink: "duckdb", keep: true };
+	if (request === "duckdb") return { sink: "duckdb", keep: false };
+	const events = request.events ?? existing?.events;
+	const recordings = request.recordings ?? existing?.recordings;
+	if (!events || !recordings) throw new UsageError("--analytics basin needs the two stream URLs: --events <url> --recordings <url> (Basin dashboard, or wrangler pipelines streams get)");
+	const token = settings().get(BASIN_SEND_TOKEN_VAR);
+	if (!token) throw new Error(`--analytics basin needs ${BASIN_SEND_TOKEN_VAR} (a Cloudflare API token with Pipelines Send) in ${settings().dotEnv} or the environment: never on the command line. Nothing was written`);
+	registerSecret(token.value);
+	if (token.value.length > 4096 || /\s/.test(token.value)) throw new Error(`${BASIN_SEND_TOKEN_VAR} must be one token without spaces or line breaks. Nothing was written`);
+	return { sink: { backend: "basin", events, recordings, token: token.value }, keep: false };
 }
 
 /** typetorch.json backend.url (and CLI 0.8's `fleet` dropped). Returns whether the file changed. */

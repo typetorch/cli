@@ -77,6 +77,19 @@ export const LEGACY_BACKEND_VARS: Readonly<Record<string, typeof BACKEND_KEY_VAR
 	TYPETORCH_FLEET_INGEST_TOKEN: BACKEND_KEY_VAR,
 };
 
+/**
+ * Moving analytics and history (plans/35, CLI 0.19). Secrets: the Basin stream send token (`backend setup --analytics
+ * basin`, `backend migrate --to-basin`), Basin's R2 SQL token and the OLD server's admin token (`backend migrate
+ * --from-basin` / `--from`). Not secrets: the Cloudflare account, the R2 bucket and the Iceberg namespace.
+ */
+export const BASIN_SEND_TOKEN_VAR = "BASIN_SEND_TOKEN";
+export const BASIN_SQL_TOKEN_VAR = "BASIN_SQL_TOKEN";
+export const OLD_ADMIN_TOKEN_VAR = "TYPETORCH_OLD_ADMIN_TOKEN";
+export const CLOUDFLARE_ACCOUNT_VAR = "CLOUDFLARE_ACCOUNT_ID";
+export const BASIN_BUCKET_VAR = "BASIN_BUCKET";
+export const BASIN_NAMESPACE_VAR = "BASIN_NAMESPACE";
+export const BASIN_NAMESPACE_DEFAULT = "typetorch";
+
 /** CLI 0.2's plaintext signing seed variable: no longer read, but still a secret wherever it is left. */
 export const LEGACY_SIGNING_KEY_VAR = "TYPETORCH_SIGNING_KEY";
 /** Variables holding secrets: never passed to a child, always redacted. */
@@ -88,6 +101,9 @@ export const SECRET_VARS: readonly string[] = [
 	ADMIN_TOKEN_VAR,
 	...Object.keys(LEGACY_BACKEND_VARS),
 	LEGACY_SIGNING_KEY_VAR,
+	BASIN_SEND_TOKEN_VAR,
+	BASIN_SQL_TOKEN_VAR,
+	OLD_ADMIN_TOKEN_VAR,
 ];
 
 /** The signing key files (keyfiles.ts). Read from the real environment only; never passed to a child process. */
