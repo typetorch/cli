@@ -33,7 +33,8 @@ devDependencies and the script `"typetorch": "typetorch"`: after `bun install`, 
 
 What the commands call:
 - **git**, and **Rojo 7.7.x** (plus **Lune** for `kernel deploy`) through [Rokit](https://github.com/rojo-rbx/rokit):
-  pin `rojo-rbx/rojo@7.7.0-rc.1` in the game's `rokit.toml`.
+  pin `rojo-rbx/rojo@7.7.0-rc.1` in the game's `rokit.toml`. **darklua** (`rokit add seaofvoices/darklua`) for the
+  production pack of `build` / `deploy` / `upload` (see "Builds"); without it payloads go up unminified, with a warning.
 - **Bun** for `typetorch build` / `deploy` / `upload`: the game repo is a Bun project and the build runs
   `bun run build` (or `bun run rbxtsc`, or `bun run goblox`: see "Compiler") in it. Commands that don't build (`approve`, `promote`, `rollback`,
   `deployments`, `keys`, `pin`, `assets status`, `doctor`) don't need it.
@@ -88,7 +89,9 @@ By hand, a game repo has `typetorch.json` next to `default.project.json`:
   "health": { "errors": 3, "window": 30, "rollback": true, "dev": { "rollback": false } },
   "autoRollback": { "failedPct": 20 },
   // optional: the place's backup build (see "Backup build"); these are the defaults
-  "backup": { "refresh": "auto", "healthyHours": 3 }
+  "backup": { "refresh": "auto", "healthyHours": 3 },
+  // optional: "goblox" (needs `bun add -d goblox`) | "rbxtsc"; unset: goblox when installed, else rbxtsc (see "Compiler")
+  "compiler": "goblox"
 }
 ```
 
@@ -119,7 +122,7 @@ Keys are read from, highest priority first: the real environment; the **game rep
 `--config`'s folder, else the nearest folder with typetorch.json at or above the working directory). No other `.env`
 is read (before CLI 0.9 every parent folder's `.env` counted). `--env-file <path>` or `TYPETORCH_ENV_FILE` (real
 environment) is an override: that file is read **instead of** `.env`. A `TYPETORCH_ENV_FILE=` line inside the game's
-`.env` (the CLI 0.8 layout) is still followed for CLI 0.9 only, with a warning: move the keys into `.env`. Values Bun
+`.env` (the CLI 0.8 layout) is still followed (through 0.18.1), with a warning: move the keys into `.env`. Values Bun
 auto-loads from `.env*` files count as that file, not as the environment. Nothing read from a file is copied into
 `process.env`, a key goes only into the client for its job, and child processes (rbxtsc, rojo, lune, bun scripts, git)
 get an allowlisted environment without any key. Keys are never printed.
@@ -130,14 +133,15 @@ get an allowlisted environment without any key. Keys are never printed.
 | `OPENCLOUD_DEPLOY_KEY` | deploy messages and the shared seq (`deploy`, `rollback`, `promote`, `keys resign`); the signed settings record (`settings`, `access push`, `backend setup`, `keys rotate` / `resign`) | `universe-messaging-service:publish`; `universe-datastores.objects:read` (+ `:create` and `:update` to claim seqs, store the durable head and write the settings; see "The shared seq", "The durable head" and "Settings"). No `universe:write` / `universe:read`: nothing is kept in ConfigService since CLI 0.8 / kernel 0.3.8 |
 | `OPENCLOUD_PLACE_KEY` | `kernel deploy`, `kernel restore` (manual only) | `universe.place.luau-execution-session:read` + `:write` (the default luau engine: Luau Execution tasks patch and save the place) and `asset:read` (place versions); `universe.place:write` only to publish files (`--place-file`, `kernel restore <file>`, `--replace-place`). **Roblox has no API-key route for downloading place files**: Asset Delivery needs `legacy-asset:manage`, which can't be granted to API keys, and `universe.place:read` shipped but only covers the place version history (`/place-version-history-api/v1/{placeId}/history`, `/contributors`; a key limited to one experience even gets 403 "Scope must be configured to allow all resources" there) |
 | `OPENCLOUD_API_KEY` (alias `ROBLOX_API_KEY`) | any job without its own key | all of the above |
-| `TYPETORCH_API_KEY` | the TypeTorch backend's **game key** (write-only): `backend setup` checks it and writes it into the settings record (game servers post heartbeats, events and errors with it); the CLI posts alerts with it. **Since CLI 0.9 never a Roblox key**: an old value that still looks like one (the same as an Open Cloud variable, or the CLI 0.8 layout next to `TYPETORCH_FLEET_INGEST_TOKEN`) is refused with the rename to do | - |
-| `TYPETORCH_ADMIN_TOKEN` | the backend's **admin token**: `servers`, `report`, `alerts`, `--wait`, the owner list (`PUT /v1/access`); never goes into the record | - |
+| `TYPETORCH_API_KEY` | the TypeTorch backend's **game key** (write-only): `backend setup` checks it and writes it into the settings record (game servers post heartbeats, events and errors with it); the CLI posts alerts and chart marks with it. **Since CLI 0.9 never a Roblox key**: an old value that still looks like one (the same as an Open Cloud variable, or the CLI 0.8 layout next to `TYPETORCH_FLEET_INGEST_TOKEN`) is refused with the rename to do | - |
+| `TYPETORCH_ADMIN_TOKEN` | the backend's **admin token**: `servers`, `report`, `alerts`, `--wait`, the owner list (`PUT /v1/access`), `notify`, `experiment list`, `keys create` / `list` / `revoke`; never goes into the record | - |
 
-Old names, read in CLI 0.9 only, with a warning naming the new one: `TYPETORCH_FLEET_TOKEN` (= `TYPETORCH_ADMIN_TOKEN`),
+Old names, still read (through 0.18.1) with a warning naming the new one: `TYPETORCH_FLEET_TOKEN` (= `TYPETORCH_ADMIN_TOKEN`),
 `TYPETORCH_FLEET_INGEST_TOKEN` (= `TYPETORCH_API_KEY`).
 
-Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_BUILD_CACHE=0` (turns the build cache off), `TYPETORCH_COMPILER=goblox|rbxtsc` (the compiler; see "Compiler"), `TYPETORCH_CHILD_ENV=NAME,NAME` (extra
-non-secret variables for child processes), `TYPETORCH_KEY_FILE` / `TYPETORCH_FALLBACK_KEY_FILE` (the signing key files;
+Other settings: `TYPETORCH_STATE_DIR` (where the logs live, default `.typetorch/`), `TYPETORCH_PROPOSED_BY`, `TYPETORCH_ROJO` / `TYPETORCH_LUNE` (tool paths), `TYPETORCH_BUILD_CACHE=0` (turns the build cache off), `TYPETORCH_COMPILER=goblox|rbxtsc` (the compiler; see "Compiler"), `TYPETORCH_DARKLUA` (darklua's path for the
+production pack; real environment only), `TYPETORCH_DEBUG=1` (= `--verbose`), `TYPETORCH_UPDATE_CHECK=off` (no daily
+update check), `TYPETORCH_CHILD_ENV=NAME,NAME` (extra non-secret variables for child processes), `TYPETORCH_KEY_FILE` / `TYPETORCH_FALLBACK_KEY_FILE` (the signing key files;
 read from the real environment only, never from an env file, and never passed to a child process).
 
 The signing keys are not environment variables: they are key files (see "Signing prod deploys").
@@ -212,11 +216,11 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 |---|---|
 | `typetorch init [--dir <folder>] [--phase <name>] [--answers <file>] [--agent] [--teardown]` | the guided setup, from an empty folder to a live game (see "Setup"); `--agent` prints `AGENT_PROMPT.md` again; `--teardown` removes the backend step 6 installed (asks first; its data only when you say so) |
 | `typetorch build [--branch <b>] [--channel prod\|dev] [--clean] [--no-minify]` | writes `src/shared/build.ts`, runs the compiler (goblox when installed, else rbxtsc; `bun run build` if the repo has a build script), and rojo-builds `.typetorch/payload.rbxm` with the identity stamped on the root; checks it holds only Folders and ModuleScripts; writes `.typetorch/payload.json`. `--clean`: `git clean -fdX` out/ and include/ first, then restore the build cache |
-| `typetorch upload [--no-build]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
-| `typetorch deploy [--branch] [--channel] [--no-build] [--dry-run] [--message <text>] [--force] [--propose] [--proposed-by <who>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: deploy message, durable head, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
+| `typetorch upload [--branch <b>] [--channel prod\|dev] [--no-build] [--no-minify] [--moderation-timeout <s>]` | clean build, upload as a new Model asset, wait for moderation; no deploy (then `promote` it) |
+| `typetorch deploy [--branch] [--channel] [--no-build] [--no-minify] [--dry-run] [--message <text>] [--force] [--propose] [--proposed-by <who>] [--moderation-timeout <s>] [--test] [--skip-test <reason>] [--wait [s]] [--no-wait] [--no-auto-rollback] [--rollback-at <pct>] [--rollout <1-99>]` | clean build, upload, wait until Approved, log "uploaded"; the cloud test (always for prod-channel branches); then approve here (a person at a terminal) or write a proposal; on approval: deploy message, durable head, log "published"; then (prod: by default) wait for the servers' reports. Per-stage timings |
 | `typetorch deploy --widen <1-100> [--branch]` | re-send the branch's live deploy (same seq) to more servers; dev-channel branches only (see "Rollouts") |
 | `typetorch promote <branch> <artifactId\|assetId\|#seq\|commit> [--force] [--dry-run] [--test] [--skip-test <reason>] [--wait [s]] [--rollout <1-99>]` | point a branch at an already uploaded, approved payload (from the deployments or `uploads.jsonl`) with a new seq; no rebuild. A prod-channel branch only takes prod-channel artifacts, even with `--force` ("rebuild for prod"). `promote <artifact> <branch>` works too when only the second is a known branch |
-| `typetorch rollback [--branch] [--to <commit\|artifactId\|assetId\|#seq>] [--force] [--dry-run] [--test] [--wait [s]]` | point the branch at an earlier, already approved asset (no build or upload) and tell its servers; no cloud test unless `--test` (it is an earlier build) |
+| `typetorch rollback [--branch] [--to <commit\|artifactId\|assetId\|#seq>] [--force] [--dry-run] [--message <text>] [--propose] [--test] [--wait [s]]` | point the branch at an earlier, already approved asset (no build or upload) and tell its servers; no cloud test unless `--test` (it is an earlier build) |
 | `typetorch deployments [--branch] [--limit n]` | deployment history with git identity; `*` = each branch's live head; lists uploads that never went out |
 | `typetorch branch ls` | branches (the kernel's DataStore heads and this machine's log), channels, heads, signed or not, live servers per branch; warns from 28 of the kernel's 32 stored branches |
 | `typetorch branch rm <branch>` | removes a dev branch's head from the DataStore heads (y/N or `--yes`; `--dry-run`). Refuses the default and prod-channel branches, a branch live servers run (the fleet API; without it only with `--force`), and a head that changed meanwhile. Servers' MemoryStore copy keeps it until it expires (up to 45 days) |
@@ -228,7 +232,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch kernel restore --version <n> [--dry-run] [--yes]` | republish place version `n` (a task on it calls SavePlaceAsync): the undo of a kernel deploy |
 | `typetorch kernel restore <file> [--dry-run] [--yes]` | publish a place file: a backup from `.typetorch/place-backups/`, or a dry run's patched file |
 | `typetorch backup refresh [--build <x>] [--dry-run] [--yes] [--force]` | make a proven-healthy prod build the place's backup build now (luau engine, only that slot); see "Backup build" |
-| `typetorch deploy --reupload <artifactId|#seq|commit|assetId> [--branch <b>]` | moderation took down an approved build: upload its kept bytes as a NEW asset, then deploy it (cloud test, approval, new seq, signed on prod); see "Backup build" |
+| `typetorch deploy --reupload <artifactId\|#seq\|commit\|assetId> [--branch <b>]` | moderation took down an approved build: upload its kept bytes as a NEW asset, then deploy it (cloud test, approval, new seq, signed on prod); see "Backup build" |
 | `typetorch approve [id] [--import <dir>] [--test] [--skip-test <reason>] [--rollout <1-99>] [--wait [s]]` | approve a proposal: details, y/N, publish (interactive terminal only); prod-channel ones are signed. A prod deploy or promote proposal without a passed (or skipped) cloud test runs it before the y/N. `--import`: a proposal state dir from automation you run yourself (see "No GitHub Actions") |
 | `typetorch test [--cloud] [<artifact>] [--branch] [--seconds <n>] [--no-swap]` | the cloud test on its own (see "Cloud test") |
 | `typetorch servers [--branch] [--watch]` | live servers from the fleet API (see "Fleet") |
@@ -238,7 +242,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch backend bless [--url <url>] [--no-open]` | trusts one browser for admin when you sign in with typetorch.dev: sends the public signing keys to the backend, signs its one-time challenge with the main prod key (it never leaves this PC) and opens the single-use link (5 minutes) |
 | `typetorch report <seq\|artifact\|latest> [--branch]` | what the servers did with one deploy; exits 1 when one failed or rolled back (see "Fleet") |
 | `typetorch keys init [--key-file]` / `keys init --fallback [--force] [--yes]` / `keys rotate [--yes]` / `keys resign` | the signing keys: see "Signing prod deploys" |
-| `typetorch keys create --name <name> --role <game\|lookup\|support\|analyst\|admin> [--expires 365d\|90d\|1y]` / `keys list [--all]` / `keys revoke <id>` | named API keys with roles on the backend (plans/31), with `TYPETORCH_ADMIN_TOKEN`: for tools that must not hold the admin token (a support bot reading one player's rows). `create` prints the key `ttk_<id>_<secret>` ONCE (`--json`: in `key`) and never writes it anywhere; `list` shows id, name, role, scopes, expiry, last use, built-in / revoked; `revoke` ends one at once (built-in `env:*` keys, the env tokens, are rotated in the backend's environment instead) |
+| `typetorch keys create --name <name> --role <game\|lookup\|support\|analyst\|admin> [--expires 365d\|90d\|1y]` / `keys list [--all]` / `keys revoke <id>` | (the next release after 0.18.1) named API keys with roles on the backend (plans/31), with `TYPETORCH_ADMIN_TOKEN`: for tools that must not hold the admin token (a support bot reading one player's rows). `create` prints the key `ttk_<id>_<secret>` ONCE (`--json`: in `key`) and never writes it anywhere; `list` shows id, name, role, scopes, expiry, last use, built-in / revoked; `revoke` ends one at once (built-in `env:*` keys, the env tokens, are rotated in the backend's environment instead) |
 | `typetorch pin <artifact> --branch <b> (--servers <ids> \| --pct <1-99>)` / `pin --unpin --branch <b> (--servers <ids> \| --all)` | A/B experiment pins, signed on prod-channel branches; `--by`, `--dry-run` |
 | `typetorch reject <id> [--reason]` / `typetorch proposals [--all]` | drop a proposal / list them |
 | `typetorch assets sync [--dry-run] [--deploy <branch>] [--place-version <n> \| --studio-export <file>]` | hot assets: export the instances marked `TypeTorchAsset` from the place's latest published version (or the Studio plugin's export), upload new and changed ones, write `typetorch.assets.lock.json`; see "Hot assets" |
@@ -370,15 +374,16 @@ goblox is selected and the tsconfig lists one. Set `"compiler": "rbxtsc"` to kee
   is gone are removed first; dev and prod never share one. Switching to goblox, or to another goblox version, is a full
   compile (the compiler is in the cache key; rbxtsc's keys are what they were before goblox). Needs `"incremental": true` with the tsbuildinfo inside
   outDir. `TYPETORCH_BUILD_CACHE=0` turns it off.
-- **Production pack (`src/pack.ts`):** `build` and `deploy` pack a transformed copy of the project's `$path` folders
+- **Production pack (`src/pack.ts`):** `build`, `upload` and `deploy` pack a transformed copy of the project's `$path` folders
   (`.typetorch/pack/`), so the artifact id, the signature and the `typetorch test` gate all cover the final bytes:
   comments and whitespace stripped by darklua's parser (lines stay where they are, so error traces and analytics still
   match), `__DEV__` set to false with its dead branches removed (skipped with a warning when game code sets it), and
   `*.story` modules no other module names left out. Packages are never shaken (their folder names aren't the names code
   requires them by). Needs darklua (`rokit add seaofvoices/darklua`; `TYPETORCH_DARKLUA` picks a binary): without it
   the build warns and packs unminified. Each module's output is cached by content hash in
-  `.typetorch/build-cache/pack/`, and a darklua failure fails the build. `--no-minify`, or `"minify": false` in
-  typetorch.json, turns it off. `typetorch serve` never packs. On a 1160-module game: about 2-3 s cold, under 0.5 s
+  `.typetorch/build-cache/pack/`, and a darklua failure fails the build. `--no-minify` (build, upload, deploy) turns it
+  off. The build also reads `"minify": false` from typetorch.json (and the darklua warning suggests it), but the config
+  check doesn't know the key yet: it warns `unknown key "minify" (ignored)` and drops it, so only `--no-minify` works. `typetorch serve` never packs. On a 1160-module game: about 2-3 s cold, under 0.5 s
   unchanged, the rbxm 26-27% smaller.
 - **Payload check:** the built `.rbxm` must be one `Model` holding only `Folder`s and `ModuleScript`s; anything else
   (Scripts, values from `.txt` files, models from `.rbxm` files...) fails the build with its path.
@@ -427,7 +432,8 @@ Kernel 0.3.8 reads ONE signed record instead of ConfigService (CLI 0.8 removed t
 push` and every `universe:write` / `universe:read` use): the game's DataStore `TypeTorch`, key `settings`,
 `{ v: 1, seq, at, body, sig, sigF }`. `body` is JSON text with `defaultBranch`, `channels`, `access` (`members`,
 `revoked`, `devBadgeId`), `backend` (`{url, key, analytics?, notify?}`; CLI 0.9; `analytics` = `{flushSeconds?, recordShare?,
-experiments?}`; `notify` = `{keys: {current, previous?, since}}`, the launch-data HMAC keys from `typetorch notify key
+experiments?}`, plus dials no CLI command writes yet that the framework reads (`techEvery`, `recordSeconds`, `positions`,
+`joinData`, `joinLaunchPrefix`) and `backend setup` keeps; `notify` = `{keys: {current, previous?, since}}`, the launch-data HMAC keys from `typetorch notify key
 rotate`, masked wherever shown and kept by `backend setup`), the old `fleet` (`{url, token}`) and `analytics` (the sink settings) derived from it for kernels before 0.4 and `game` (the game's live values,
 `TypeTorch.liveConfig`); at most 32 KB, `game` at most 16 KB. `sig` and `sigF` are Ed25519 by the main and the fallback
 prod key over the lines `tt1settings`, `<seq>`, `<at>` and `<body>` joined with `\n`: the body is the exact text stored,
@@ -577,6 +583,20 @@ branch back. Records written before have no `prev` (the kernel falls back to the
 `typetorch deployments` shows each row's branch channel (prod: the default branch or one configured prod), with the
 build's channel in brackets when it differs.
 
+### Chart marks on the backend
+
+CLI 0.9.1 (`src/marks.ts`): after a release or a place publish the CLI tells the backend, so the explorer's Deploys page
+and its chart markers show it. With typetorch.json `backend.url` and the game key (`TYPETORCH_API_KEY`), like alerts:
+
+| After | Request |
+|---|---|
+| every release: `deploy`, `approve`, `promote`, `rollback` (an automatic one too), `keys rotate` / `resign` | `POST /v1/fleet/deploy` `{ j: "cli", s, b, a, ch, t, k, fr?, m? }` (`k` = deploy, rollback, promote or resign; `fr` the build the branch ran before; `m` the note, at most 200 characters) |
+| `kernel deploy`, `kernel restore` | `POST /v1/fleet/mark` `{ j: "cli", k: "kernel", v?, pv?, m, t }` (`v` the kernel version, `pv` the new place version, `m` a one-line summary) |
+| `backup refresh`, manual or automatic | `POST /v1/fleet/mark` `{ j: "cli", k: "backup", b, s, a, ch: "prod", pv?, m, t }` |
+
+`t` is unix ms. Best effort: 5 s timeout, never fails or slows the command (one dim `mark ... no chart mark for ...` line
+when it didn't go through; nothing in `--json` runs). No `backend.url` or no game key: nothing is sent.
+
 ### Studio: typetorch serve
 
 `typetorch serve` replaces the terminals of the Studio loop (`bun run watch`, `bun run studio`, and anything else with
@@ -655,7 +675,8 @@ instead if you don't want the devDependency.
   `@typetorch/dev-server`) on this machine without a tunnel, and the plugin's **Claude** tab prompts it: Claude Code
   edits a copy of this branch (Code mode; a prod-channel branch works too, on `remote-claude/<branch>`), then the tab
   shows **Apply** (the change goes into this checkout, uncommitted, so Rojo syncs it to Studio), **Deploy to dev**
-  (`--dev-branch`) and **Discard**. Needs `@typetorch/dev-server` 0.3.4 or later. `--claude-users <ids>` lists the Roblox user ids allowed (remembered; before that, the owners in `typetorch.json`),
+  (`--dev-branch`) and **Discard**. Apply, Deploy to dev and the prod-channel branch need `@typetorch/dev-server`
+  0.4.0, which is on the dev-server's main branch but not released yet (npm has 0.3.3). `--claude-users <ids>` lists the Roblox user ids allowed (remembered; before that, the owners in `typetorch.json`),
   so add a remote helper's id there too: a remote Studio prompts as the Roblox user it paired with, and serve pairs with
   remote-claude for them (nobody handles a remote-claude code). A remote-claude you start yourself in the repo works the
   same way (serve finds it through `.typetorch/remote-claude.session.json`). The tab sends Code only (the Live / Code
@@ -805,8 +826,8 @@ you host. The CLI reads it:
     more of the servers that tried the seq (`skipped` ones don't count) report `failed` or `rolled_back`, with at least one failure, it rolls the branch back to the
     previous artifact through the same path as `typetorch rollback` (signed on prod-channel branches, with the key
     files on this PC). It decides early once the share can't drop below the threshold. It posts a critical
-    `auto_rollback` alert (with the ingest token; otherwise it prints it), shows "rolling back <branch> to <artifact> in
-    10 s: Ctrl+C keeps the new build" at a terminal (no wait without one), logs the reason on the rollback's deployment
+    `auto_rollback` alert (with the ingest token; otherwise it prints it), shows
+    `rolling back <branch> to <artifact> in 10 s: Ctrl+C keeps the new build` at a terminal (no wait without one), logs the reason on the rollback's deployment
     line (`autoRollback`) and on the proposal (an `auto_rollback` event), waits for the rollback's own reports, and
     exits 1. `--no-auto-rollback` turns it off;
   - failures below the threshold: a red summary, the rollback command, exit 1;
