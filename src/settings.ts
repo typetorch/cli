@@ -4,9 +4,13 @@
  *
  *   { v: 1, seq, at, body, sig, sigF }
  *   body = JSON text: { defaultBranch?, channels?, access?, backend?, fleet?, analytics?, game? }
- *   backend = { url, key, analytics?: { flushSeconds?, recordShare?, experiments? }, notify?: { keys: { current, previous?,
- *   since } } } (CLI 0.9, plans/21; `typetorch backend setup`; experiments: `typetorch experiment`, experiments.ts;
- *   notify: the launch-data HMAC keys, `typetorch notify key rotate`, plans/29).
+ *   backend = { url, key, ingest?, analytics?: { flushSeconds?, recordShare?, experiments? }, notify?: { keys: { current,
+ *   previous?, since } } } (CLI 0.9, plans/21; `typetorch backend setup`; experiments: `typetorch experiment`,
+ *   experiments.ts; notify: the launch-data HMAC keys, `typetorch notify key rotate`, plans/29; ingest: CLI 0.19, the
+ *   optional address of separate ingest servers, plans/35 C: framework 0.7.2 posts events there, the kernel ignores it).
+ *   With a Basin sink (CLI 0.19, `backend setup --analytics basin`, plans/35 B) `analytics` = { backend: "basin", events,
+ *   recordings, token, ...dials } is the real sink (frameworks 0.4+ read it whenever it names Basin) and `backend` serves
+ *   the fleet API, error logs and identities.
  *   For one release the CLI also writes the old `fleet` = { url, token } and `analytics` = { backend: "duckdb", events,
  *   token, ... } derived from it (`withLegacySections`): kernels 0.3.8/0.3.9 and their frameworks read only those.
  *   sig / sigF = Ed25519 by the main and the fallback prod key over  tt1settings \n seq \n at \n body
@@ -66,6 +70,11 @@ export interface BackendSection {
 	/** The backend's write-only game key (TYPETORCH_API_KEY). Never the admin token. */
 	key: string;
 	analytics?: BackendAnalytics;
+	/**
+	 * Optional separate ingest servers (plans/35 C, CLI 0.19): framework 0.7.2 posts events to `<ingest>/v1/ingest` with
+	 * the same key; the kernel keeps `url`. Absent: everything goes to `url` (the default, one server).
+	 */
+	ingest?: string;
 	/** Experience notifications (plans/29): the launch-data HMAC keys (`typetorch notify key rotate`). Server only. */
 	notify?: BackendNotify;
 }
@@ -96,28 +105,65 @@ export interface SettingsBody {
 	game?: Record<string, unknown>;
 }
 
+/** The fields of the old `analytics` section that name where events go (the sink); the rest are dials. */
+export const SINK_FIELDS = ["backend", "events", "recordings", "token", "identity", "identityToken"] as const;
+
 /**
- * The body with `backend` set and, for one release, the old `fleet` and `analytics` sections derived from it (kernels
- * 0.3.8/0.3.9 and frameworks before 0.4 read only those). The old analytics section keeps its other fields (experiments,
- * techEvery: the framework's live dials), and its sink becomes the backend's DuckDB ingest.
+ * A Basin sink (plans/35 B): the two stream URLs and the send token (BASIN_SEND_TOKEN), plus `identity` /
+ * `identityToken` when a kept sink had them (a new one leaves identities to the backend's /v1/identity).
  */
-export function withBackend(body: SettingsBody, backend: BackendSection): SettingsBody {
+export interface BasinSink {
+	backend: "basin";
+	events: string;
+	recordings: string;
+	token?: string;
+	identity?: string;
+	identityToken?: string;
+}
+
+/** The record's Basin sink (its `analytics` section's sink fields when it names Basin), or undefined. */
+export function basinSinkOf(body: SettingsBody): BasinSink | undefined {
+	const analytics = plainObject(body.analytics);
+	if (!analytics || analytics.backend !== "basin") return undefined;
+	const sink: Record<string, unknown> = {};
+	for (const field of SINK_FIELDS) if (analytics[field] !== undefined) sink[field] = analytics[field];
+	return sink as unknown as BasinSink;
+}
+
+export interface WithBackendOptions {
+	/** Where analytics goes: undefined or "duckdb" = the backend's DuckDB ingest (the default); a Basin sink = Basin. */
+	sink?: "duckdb" | BasinSink;
+	/** `backend.ingest`: a URL sets it, null removes it, undefined keeps the record's. */
+	ingest?: string | null;
+}
+
+/**
+ * The body with `backend` set and the old `fleet` and `analytics` sections derived from it (kernels 0.3.8/0.3.9 and
+ * frameworks before 0.4 read only those). The old analytics section keeps its other fields (experiments, techEvery: the
+ * framework's live dials); its sink becomes the backend's DuckDB ingest, or the Basin sink given (plans/35 B: then it
+ * is the real sink for every framework, and `backend` serves the fleet API, error logs and identities).
+ */
+export function withBackend(body: SettingsBody, backend: BackendSection, options: WithBackendOptions = {}): SettingsBody {
 	const url = backend.url.replace(/\/+$/, "");
 	// The notify keys (notify key rotate) stay unless the caller sets them: `backend setup` must not drop them.
 	const notify = backend.notify ?? body.backend?.notify;
+	const ingest = options.ingest === null ? undefined : (options.ingest ?? backend.ingest ?? body.backend?.ingest)?.replace(/\/+$/, "");
 	const section: BackendSection = {
 		url,
 		key: backend.key,
+		...(ingest ? { ingest } : {}),
 		...(backend.analytics && Object.keys(backend.analytics).length ? { analytics: { ...backend.analytics } } : {}),
 		...(notify ? { notify: JSON.parse(JSON.stringify(notify)) as BackendNotify } : {}),
 	};
 	const previous = { ...(body.analytics ?? {}) };
-	for (const sink of ["backend", "events", "recordings", "token", "identity"]) delete previous[sink];
+	for (const sink of SINK_FIELDS) delete previous[sink];
+	const sink: Record<string, unknown> =
+		options.sink && options.sink !== "duckdb" ? JSON.parse(JSON.stringify(options.sink)) : { backend: "duckdb", events: `${url}${INGEST_PATH}`, token: backend.key };
 	return {
 		...body,
 		backend: section,
 		fleet: { url, token: backend.key },
-		analytics: { ...previous, backend: "duckdb", events: `${url}${INGEST_PATH}`, token: backend.key, ...(section.analytics ?? {}) },
+		analytics: { ...previous, ...sink, ...(section.analytics ?? {}) },
 	};
 }
 
@@ -141,6 +187,9 @@ export function backendProblems(value: unknown): string[] {
 		}
 	}
 	if (raw.notify !== undefined) problems.push(...notifyProblems(raw.notify));
+	if (raw.ingest !== undefined && (typeof raw.ingest !== "string" || !/^https:\/\/[A-Za-z0-9.-]+[A-Za-z0-9:\-./_]*$/.test(raw.ingest) || raw.ingest.length > 300 || /\/v1(\/|$)/.test(new URL(raw.ingest).pathname))) {
+		problems.push("backend.ingest must be the ingest servers' https base address");
+	}
 	return problems;
 }
 
@@ -295,6 +344,7 @@ export function describeFields(body: SettingsBody): string[] {
 			dials?.recordShare !== undefined ? `record ${Math.round(dials.recordShare * 100)}%` : undefined,
 		].filter(Boolean);
 		lines.push(`backend        ${hostOf(body.backend.url)} (key hidden)${extra.length ? `, analytics ${extra.join(", ")}` : ""}`);
+		if (body.backend.ingest !== undefined) lines.push(`ingest         ${hostOf(body.backend.ingest)} (events; the rest goes to the backend)`);
 		const keys = body.backend.notify?.keys;
 		if (keys) lines.push(`notify keys    set (hidden) since ${typeof keys.since === "number" ? new Date(keys.since * 1000).toISOString() : "?"}${keys.previous ? ", previous kept" : ""}`);
 	}

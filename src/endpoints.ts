@@ -17,6 +17,10 @@
  *   admin    (backend) GET /v1/auth/check with TYPETORCH_ADMIN_TOKEN says role "admin" (the CLI's reads and the owner
  *            list need it); the game key in its place is refused.
  *
+ * With a Basin analytics sink (plans/35 B) the backend's key only needs the fleet part (`parts: ["fleet"]`). The
+ * optional ingest address (`backend.ingest`, plans/35 C) gets url, healthz and the game key (role "game", no parts);
+ * the OLD server of a move (`backend migrate --from`) url, healthz and its admin token (`checkOldBackend`).
+ *
  * Basin analytics has no /healthz and no documented side-effect-free authenticated call, so there the stream URLs must
  * answer any HTTP status and a 401/403 for the token is a failure; whether the token is right is otherwise unknown.
  *
@@ -36,7 +40,7 @@ const KERNEL_FLEET_URL = /^https:\/\/[A-Za-z0-9.-]+[A-Za-z0-9:\-./_]*$/;
 const KERNEL_FLEET_URL_MAX = 300;
 const ANALYTICS_TOKEN_MAX = 4096;
 
-export type EndpointTarget = "backend" | "fleet" | "analytics";
+export type EndpointTarget = "backend" | "fleet" | "analytics" | "ingest";
 export type StepName = "url" | "healthz" | "token" | "key" | "admin";
 
 export interface EndpointStep {
@@ -235,7 +239,7 @@ async function healthzStep(doFetch: typeof fetch, base: string, host: string, ti
 	return pass("healthz", `${host} answered in ${reply.ms} ms`, reply.ms);
 }
 
-type Part = "fleet" | "analytics";
+export type Part = "fleet" | "analytics";
 const PART_OFF = (parts: Part[]) =>
 	`the backend runs without its ${parts.join(" and ")} part${parts.length === 1 ? "" : "s"}: set TYPETORCH_PARTS=analytics,fleet (or leave it unset) in its environment and restart it`;
 
@@ -243,7 +247,7 @@ const PART_OFF = (parts: Part[]) =>
  * GET <base>/v1/auth/check with a game key (older servers: /v1/settings): role "game" (write-only) and the parts it
  * writes to running. `step` names it ("token" for the old record sections, "key" for the backend).
  */
-async function tokenStep(doFetch: typeof fetch, base: string, host: string, token: string, input: { parts: Part[]; target: EndpointTarget; step?: "token" | "key" }, timeoutMs: number): Promise<EndpointStep> {
+async function tokenStep(doFetch: typeof fetch, base: string, host: string, token: string, input: { parts: Part[]; target: Exclude<EndpointTarget, "ingest">; step?: "token" | "key"; note?: string }, timeoutMs: number): Promise<EndpointStep> {
 	const step = input.step ?? "token";
 	const hint = GAME_KEY_HINT(input.target);
 	const outcome = await get(doFetch, `${base}/v1/auth/check`, token, timeoutMs);
@@ -274,7 +278,7 @@ async function tokenStep(doFetch: typeof fetch, base: string, host: string, toke
 	const parts = typeof body.parts === "object" && body.parts !== null ? (body.parts as Record<string, unknown>) : typeof body.valid === "object" && body.valid !== null ? (body.valid as Record<string, unknown>) : undefined;
 	const off = parts ? input.parts.filter((part) => parts[part] !== true) : [];
 	if (off.length) return fail(step, `the key is accepted, but the backend doesn't run its ${off.join(" and ")} part${off.length === 1 ? "" : "s"}`, PART_OFF(off), reply.ms);
-	return pass(step, `accepted as the game key (write-only)${parts ? `, the backend runs ${input.parts.join(" and ")}` : ""}`, reply.ms);
+	return pass(step, `accepted as the game key (write-only)${parts && input.parts.length ? `, the backend runs ${input.parts.join(" and ")}` : ""}${input.note ?? ""}`, reply.ms);
 }
 
 /** Servers before /v1/auth/check: GET /v1/settings takes an ingest or admin token and changes nothing. */
@@ -289,11 +293,11 @@ async function legacyTokenStep(doFetch: typeof fetch, base: string, host: string
 	return pass(step, "accepted (an older server without /v1/auth/check: checked through /v1/settings, which can't tell an ingest token from the admin token; update the server for the full check)", outcome.reply!.ms);
 }
 
-/** GET <base>/v1/auth/check with the admin token: role "admin". */
-async function adminStep(doFetch: typeof fetch, base: string, host: string, token: string, timeoutMs: number): Promise<EndpointStep> {
+/** GET <base>/v1/auth/check with the admin token: role "admin". `name`: the variable it came from (messages). */
+async function adminStep(doFetch: typeof fetch, base: string, host: string, token: string, timeoutMs: number, name: string = ADMIN_TOKEN_VAR): Promise<EndpointStep> {
 	const outcome = await get(doFetch, `${base}/v1/auth/check`, token, timeoutMs);
-	const hint = `${ADMIN_TOKEN_VAR} must be the backend's admin token (its own ${ADMIN_TOKEN_VAR}), in the game repo's .env`;
-	if (outcome.reply && (outcome.reply.status === 401 || outcome.reply.status === 403)) return fail("admin", `the backend refused ${ADMIN_TOKEN_VAR} (HTTP ${outcome.reply.status})`, hint, outcome.reply.ms);
+	const hint = name === ADMIN_TOKEN_VAR ? `${ADMIN_TOKEN_VAR} must be the backend's admin token (its own ${ADMIN_TOKEN_VAR}), in the game repo's .env` : `${name} must be that backend's admin token (its own ${ADMIN_TOKEN_VAR}), in the game repo's .env or the environment`;
+	if (outcome.reply && (outcome.reply.status === 401 || outcome.reply.status === 403)) return fail("admin", `the backend refused ${name} (HTTP ${outcome.reply.status})`, hint, outcome.reply.ms);
 	if (outcome.reply?.status === 404) {
 		return fail("admin", `${host}/v1/auth/check answered 404 for the admin token`, "the backend's admin IP allow list (TYPETORCH_ADMIN_ALLOW_IPS) doesn't include this PC's address, or the server is older than /v1/auth/check: add this address, or update it", outcome.reply.ms);
 	}
@@ -301,8 +305,8 @@ async function adminStep(doFetch: typeof fetch, base: string, host: string, toke
 	const failed = failedRequest("admin", `${host}/v1/auth/check`, host, outcome, timeoutMs, token);
 	if (failed) return failed;
 	const body = parseJson(outcome.reply!.text);
-	if (body?.role === "admin") return pass("admin", `${ADMIN_TOKEN_VAR} accepted as the admin token (reads, the owner list)`, outcome.reply!.ms);
-	if (body?.role === "game" || body?.role === "ingest") return fail("admin", `${ADMIN_TOKEN_VAR} is the backend's GAME key, not its admin token`, hint, outcome.reply!.ms);
+	if (body?.role === "admin") return pass("admin", `${name} accepted as the admin token (reads, the owner list)`, outcome.reply!.ms);
+	if (body?.role === "game" || body?.role === "ingest") return fail("admin", `${name} is the backend's GAME key, not its admin token`, hint, outcome.reply!.ms);
 	return fail("admin", `${host}/v1/auth/check answered something unexpected: ${shortBody(scrub(outcome.reply!.text, token), 80)}`, "update the backend, or check the URL points at it", outcome.reply!.ms);
 }
 
@@ -323,6 +327,11 @@ export interface BackendEndpointInput extends EndpointOptions {
 	 * typetorch.json `backend.url` that only this CLI reads (http on localhost is fine).
 	 */
 	kernelRules?: boolean;
+	/**
+	 * The parts the game key must reach (default fleet and analytics). Just fleet when the record's analytics sink is
+	 * Basin: a fleet-only backend (TYPETORCH_PARTS=fleet) is then right (plans/35 B).
+	 */
+	parts?: Part[];
 }
 
 /** The checks for the backend: url, healthz, the game key (role game, parts fleet + analytics) and the admin token. */
@@ -353,12 +362,50 @@ export async function checkBackendEndpoint(input: BackendEndpointInput): Promise
 		const shape = fleetTokenShape(key);
 		if (sameAsAdmin) steps.push(sameStep());
 		else if (shape) steps.push(fail("key", `${BACKEND_KEY_VAR}: ${shape}`, GAME_KEY_HINT("backend")));
-		else steps.push(await tokenStep(doFetch, base, host, key, { parts: ["fleet", "analytics"], target: "backend", step: "key" }, timeoutMs));
+		else {
+			const parts = input.parts ?? ["fleet", "analytics"];
+			const note = parts.includes("analytics") ? undefined : " (analytics goes to Basin, so the analytics part may be off)";
+			steps.push(await tokenStep(doFetch, base, host, key, { parts, target: "backend", step: "key", note }, timeoutMs));
+		}
 	}
 	if (!admin) steps.push(input.requireAdmin ? fail("admin", `no ${ADMIN_TOKEN_VAR} (the backend's admin token)`, `put it in the game repo's .env: the CLI reads servers, reports and alerts with it and sends the owner list (PUT /v1/access)`) : skip("admin", `no ${ADMIN_TOKEN_VAR}`));
 	else if (admin === key) steps.push(skip("admin", "not checked: the same value as the game key"));
 	else steps.push(await adminStep(doFetch, base, host, admin, timeoutMs));
 	return reportOf("backend", steps, host);
+}
+
+/**
+ * The optional ingest address (`backend.ingest`, plans/35 C): url (the kernel's rules: game servers post there),
+ * healthz, and the game key answers role "game" there (GET /v1/auth/check, no side effects). No parts: an ingest node
+ * only takes events.
+ */
+export async function checkIngestEndpoint(input: EndpointOptions & { url: unknown; key: unknown }): Promise<EndpointReport> {
+	const doFetch = input.fetch ?? fetch;
+	const timeoutMs = input.timeoutMs ?? CHECK_TIMEOUT_MS;
+	const key = typeof input.key === "string" && input.key !== "" ? input.key : undefined;
+	if (key) registerSecret(key);
+	const { step: url, base, host } = fleetUrlStep(input.url, true, "backend");
+	if (!url.ok || !base || !host) return reportOf("ingest", [url, skip("healthz", "not checked: the URL is not usable"), skip("key", "not checked: the URL is not usable")], host);
+	const healthz = await healthzStep(doFetch, base, host, timeoutMs, key);
+	if (!healthz.ok) return reportOf("ingest", [url, healthz, skip("key", "not checked: the server didn't answer")], host);
+	if (!key) return reportOf("ingest", [url, healthz, fail("key", `no ${BACKEND_KEY_VAR} (the backend's game key)`, GAME_KEY_HINT("backend"))], host);
+	const keyStep = await tokenStep(doFetch, base, host, key, { parts: [], target: "backend", step: "key", note: " at the ingest address" }, timeoutMs);
+	return reportOf("ingest", [url, healthz, keyStep], host);
+}
+
+/**
+ * The OLD server of a move (`backend migrate --from`): url, healthz, and its admin token (TYPETORCH_OLD_ADMIN_TOKEN)
+ * answers role "admin" there. The CLI only reads with it; the new server pulls the history with it.
+ */
+export async function checkOldBackend(input: EndpointOptions & { url: unknown; admin: string; name: string }): Promise<EndpointReport> {
+	const doFetch = input.fetch ?? fetch;
+	const timeoutMs = input.timeoutMs ?? CHECK_TIMEOUT_MS;
+	registerSecret(input.admin);
+	const { step: url, base, host } = fleetUrlStep(input.url, false, "backend");
+	if (!url.ok || !base || !host) return reportOf("backend", [url, skip("healthz", "not checked: the URL is not usable"), skip("admin", "not checked: the URL is not usable")], host);
+	const healthz = await healthzStep(doFetch, base, host, timeoutMs, input.admin);
+	if (!healthz.ok) return reportOf("backend", [url, healthz, skip("admin", "not checked: the server didn't answer")], host);
+	return reportOf("backend", [url, healthz, await adminStep(doFetch, base, host, input.admin, timeoutMs, input.name)], host);
 }
 
 // Fleet -----------------------------------------------------------------------------------------------------------------

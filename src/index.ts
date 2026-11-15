@@ -321,7 +321,7 @@ ${ROLLOUT_USAGE}`,
 	backend: {
 		flags: backendFlags,
 		run: (args) => backendCommand(args),
-		summary: "point game servers at the TypeTorch backend (checked first); `backend run`: it on this PC behind a quick tunnel",
+		summary: "point game servers at the TypeTorch backend (checked first; analytics there or in Basin); `backend run`: it on this PC behind a quick tunnel; `backend migrate`: move history between servers and Basin",
 		usage: BACKEND_USAGE,
 	},
 	fleet: {

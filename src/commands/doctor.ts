@@ -51,7 +51,7 @@ import { ADMIN_TOKEN_VAR, API_KEY_VARS, BACKEND_KEY_VAR, NOTIFY_KEY_VAR, CHILD_E
 import { gitInfo } from "../git.ts";
 import { bold, dim, emitJson, green, info, isJson, red, yellow } from "../log.ts";
 import { OpenCloud } from "../opencloud.ts";
-import { checkAnalyticsEndpoint, checkBackendEndpoint, checkFleetEndpoint, type EndpointOptions, type EndpointReport } from "../endpoints.ts";
+import { checkAnalyticsEndpoint, checkBackendEndpoint, checkFleetEndpoint, checkIngestEndpoint, type EndpointOptions, type EndpointReport, type Part } from "../endpoints.ts";
 import { backendCredentials, backendUrl, getAccessList, ownersOf, type BackendCredentials } from "../backend.ts";
 import { httpFleetClient } from "../fleet.ts";
 import { safeText } from "../httphints.ts";
@@ -63,7 +63,7 @@ import { hasZstd, isBun, runtimeName } from "../runtime.ts";
 import { rojoBinary } from "../build.ts";
 import { COMPILER_VAR, compilerVersion, GOBLOX_INSTALL, pluginsIgnoredByGoblox, resolveCompiler, type ResolveOptions } from "../compiler.ts";
 import { readTsconfig } from "../debug-macros.ts";
-import { describeFields, readSettings, verifySettingsRecord, type SettingsBody, type SettingsRead } from "../settings.ts";
+import { basinSinkOf, describeFields, readSettings, verifySettingsRecord, type SettingsBody, type SettingsRead } from "../settings.ts";
 import { DS_READ_SCOPE, DS_WRITE_SCOPES, HEADS_KEY, readSharedSeq, SEQ_DATASTORE } from "../seqstore.ts";
 import { defaultBranchHead, liveServerChecks, versionBeforeKernel } from "../livecheck.ts";
 import { branchCapWarning, HEADS_MAX_BRANCHES } from "../branches.ts";
@@ -155,8 +155,10 @@ export async function backendChecks(input: BackendCheckInput): Promise<Check[]> 
 	const { creds, body, configUrl } = input;
 	const checks: Check[] = [];
 	let adminOk = false;
+	// A Basin analytics sink (plans/35 B): the backend serves only the fleet API, so a fleet-only one is right.
+	const parts: Part[] | undefined = body && basinSinkOf(body) ? ["fleet"] : undefined;
 	if (configUrl) {
-		const report = await checkBackendEndpoint({ url: configUrl, key: creds.key?.value, admin: creds.admin?.value, requireKey: false, kernelRules: false, ...options });
+		const report = await checkBackendEndpoint({ url: configUrl, key: creds.key?.value, admin: creds.admin?.value, requireKey: false, kernelRules: false, parts, ...options });
 		for (const check of reportChecks(report, "backend")) {
 			if (check.name === "backend key" && !creds.key) check.detail = `no ${BACKEND_KEY_VAR}${creds.refused ? ` (${creds.refused})` : ""}: the CLI posts no alerts (auto_rollback, server_stuck) and backend setup can't run`;
 			if (check.name === "backend admin" && !creds.admin) {
@@ -187,13 +189,17 @@ export async function backendChecks(input: BackendCheckInput): Promise<Check[]> 
 				checks.push({ name: "record backend", status: "ok", detail: `the settings record's backend is typetorch.json backend.url with your ${BACKEND_KEY_VAR} (checked above)` });
 			} else {
 				// Its own address and key, with the kernel's rules (game servers use these); no admin token goes there.
-				const report = await checkBackendEndpoint({ url: record.url, key: record.key, requireAdmin: false, kernelRules: true, ...options });
+				const report = await checkBackendEndpoint({ url: record.url, key: record.key, requireAdmin: false, kernelRules: true, parts, ...options });
 				checks.push(...reportChecks(report, "record backend").filter((check) => check.name !== "record backend admin"));
 				if (configUrl && !sameAddress) {
 					checks.push({ name: "record backend url", status: "warn", detail: `typetorch.json backend.url (${hostOf(configUrl)}) differs from the settings record's (${hostOf(record.url)}): game servers use the record's, the CLI the file's. Run typetorch backend setup --url <the right one>` });
 				}
 				if (creds.key && !sameKey) checks.push({ name: "record backend key", status: "warn", detail: `the settings record's backend key differs from your ${BACKEND_KEY_VAR}: run typetorch backend setup` });
 			}
+			// Separate ingest servers (plans/35 C): game servers post events there with the record's key.
+			if (record.ingest) checks.push(...reportChecks(await checkIngestEndpoint({ url: record.ingest, key: record.key, ...options }), "record ingest"));
+			// A Basin sink: its streams answer and the token isn't refused.
+			if (parts) checks.push(...reportChecks(await checkAnalyticsEndpoint(body.analytics, options), "record analytics"));
 			if (!body.fleet || body.fleet.url !== record.url || body.fleet.token !== record.key) {
 				checks.push({ name: "record fleet", status: "warn", detail: "the record's fleet section (what kernels before 0.4 read) doesn't match its backend section: run typetorch backend setup" });
 			}
