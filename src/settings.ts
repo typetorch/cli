@@ -4,7 +4,7 @@
  *
  *   { v: 1, seq, at, body, sig, sigF }
  *   body = JSON text: { defaultBranch?, channels?, access?, backend?, fleet?, analytics?, game? }
- *   backend = { url, key, ingest?, analytics?: { flushSeconds?, recordShare?, experiments? }, notify?: { keys: { current,
+ *   backend = { url, key, ingest?, analytics?: { flushSeconds?, recordShare?, experiments?, extended? }, notify?: { keys: { current,
  *   previous?, since } } } (CLI 0.9, plans/21; `typetorch backend setup`; experiments: `typetorch experiment`,
  *   experiments.ts; notify: the launch-data HMAC keys, `typetorch notify key rotate`, plans/29; ingest: CLI 0.19, the
  *   optional address of separate ingest servers, plans/35 C: framework 0.7.2 posts events there, the kernel ignores it).
@@ -30,6 +30,7 @@ import type { OpenCloud } from "./opencloud.ts";
 import { DEPLOY_TOPIC } from "./opencloud.ts";
 import { SEQ_DATASTORE } from "./seqstore.ts";
 import { describeOverride, experimentsDiffer, experimentsOf, experimentsProblems, type Experiments } from "./experiments.ts";
+import { describeExtended, extendedDiffer, extendedOf, extendedProblems, type ExtendedDials } from "./extended.ts";
 import { signCanonical, verifyCanonical, type DualSigner } from "./signing.ts";
 
 export const SETTINGS_KEY = "settings";
@@ -62,6 +63,8 @@ export interface BackendAnalytics {
 	recordShare?: number;
 	/** Live experiment overrides (`typetorch experiment`; the framework's parseExperiments). */
 	experiments?: Experiments;
+	/** The extended recording's dials (`typetorch analytics extended`, extended.ts; framework 0.7.2+, plans/36). */
+	extended?: ExtendedDials;
 }
 
 /** The backend section (CLI 0.9): one URL and the game key for heartbeats, reports, alerts, events and errors. */
@@ -184,6 +187,7 @@ export function backendProblems(value: unknown): string[] {
 			if (a.flushSeconds !== undefined && !inRange(a.flushSeconds, FLUSH_SECONDS_BOUNDS)) problems.push(`backend.analytics.flushSeconds must be ${FLUSH_SECONDS_BOUNDS[0]}-${FLUSH_SECONDS_BOUNDS[1]}`);
 			if (a.recordShare !== undefined && !inRange(a.recordShare, RECORD_SHARE_BOUNDS)) problems.push(`backend.analytics.recordShare must be ${RECORD_SHARE_BOUNDS[0]}-${RECORD_SHARE_BOUNDS[1]}`);
 			if (a.experiments !== undefined) problems.push(...experimentsProblems(a.experiments, "backend.analytics.experiments"));
+			if (a.extended !== undefined) problems.push(...extendedProblems(a.extended, "backend.analytics.extended"));
 		}
 	}
 	if (raw.notify !== undefined) problems.push(...notifyProblems(raw.notify));
@@ -253,6 +257,8 @@ export function bodyProblems(body: SettingsBody): string[] {
 		for (const [branch, channel] of Object.entries(body.channels)) if (channel !== "prod" && channel !== "dev") problems.push(`channels.${branch} must be prod or dev`);
 	}
 	if (body.backend !== undefined) problems.push(...backendProblems(body.backend));
+	const oldExtended = plainObject(body.analytics)?.extended;
+	if (oldExtended !== undefined) problems.push(...extendedProblems(oldExtended, "analytics.extended"));
 	if (body.game !== undefined) {
 		const size = Buffer.byteLength(JSON.stringify(body.game), "utf8");
 		if (size > SETTINGS_GAME_MAX) problems.push(`game is ${size} bytes of JSON, over ${SETTINGS_GAME_MAX}`);
@@ -365,6 +371,11 @@ export function describeFields(body: SettingsBody): string[] {
 	if (experiments.length) {
 		lines.push(`experiments    ${experiments.length} override${experiments.length === 1 ? "" : "s"}${differ}`);
 		for (const [name, override] of experiments) lines.push(`  ${name}: ${describeOverride(override)}`);
+	}
+	const extended = extendedOf(body);
+	if (Object.keys(extended).length) {
+		const differ = extendedDiffer(body) ? " (the two analytics sections differ: `typetorch analytics extended set` rewrites both)" : "";
+		lines.push(`extended rec.  ${describeExtended(extended)}${differ}`);
 	}
 	if (body.game) {
 		const keys = Object.keys(body.game);
