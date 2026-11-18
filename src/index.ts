@@ -12,6 +12,7 @@ import { BACKEND_USAGE, backendCommand, backendFlags } from "./commands/backend.
 import { buildCommand, buildFlags, uploadCommand, uploadFlags } from "./commands/build.ts";
 import { SETTINGS_USAGE, settingsCommand, settingsFlags } from "./commands/settings.ts";
 import { EXPERIMENT_USAGE, experimentCommand, experimentFlags } from "./commands/experiment.ts";
+import { ANALYTICS_USAGE, analyticsCommand, analyticsFlags } from "./commands/analytics.ts";
 import { deployCommand, deployFlags } from "./commands/deploy.ts";
 import { doctorCommand, doctorFlags } from "./commands/doctor.ts";
 import {
@@ -196,6 +197,12 @@ typetorch branch rm <branch> [--dry-run] [--yes] [--force] [--json]
 		run: (args) => settingsCommand(args),
 		summary: "the signed settings record (branches, dev access, game values)",
 		usage: SETTINGS_USAGE,
+	},
+	analytics: {
+		flags: analyticsFlags,
+		run: (args) => analyticsCommand(args),
+		summary: "extended recording dials (analytics.extended: seconds, hz, streams, ...) in the signed settings, no deploy",
+		usage: ANALYTICS_USAGE,
 	},
 	experiment: {
 		flags: experimentFlags,

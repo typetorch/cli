@@ -29,6 +29,7 @@ import { sleep, which } from "../runtime.ts";
 import { backendCredentialsWarned, blessChallenge, blessMessage, syncBlessKeys } from "../backend.ts";
 import { capture } from "../proc.ts";
 import { experimentsOf } from "../experiments.ts";
+import { extendedOf } from "../extended.ts";
 import { backendUrlError, updateProjectConfig, type Project } from "../config.ts";
 import { checkAnalyticsEndpoint, checkBackendEndpoint, checkIngestEndpoint, enforceEndpoints, reportsJson, type EndpointReport } from "../endpoints.ts";
 import { ADMIN_TOKEN_VAR, BACKEND_KEY_VAR, BASIN_SEND_TOKEN_VAR, childEnv, registerSecret, settings } from "../env.ts";
@@ -139,7 +140,8 @@ function dial(args: ParsedArgs, flag: string, [low, high]: readonly [number, num
 /**
  * The analytics dials to write: the flags, else what the record has (its backend section, else the old analytics).
  * The experiment overrides always carry over (`typetorch experiment` owns them): the backend's, else the old
- * section's, so a record from before they moved to `backend.analytics` keeps them.
+ * section's, so a record from before they moved to `backend.analytics` keeps them. So do the extended recording dials
+ * (`typetorch analytics extended`; with a Basin sink the analytics section's, extended.ts `extendedOf`).
  */
 export function analyticsDials(body: SettingsBody, flags: BackendAnalytics): BackendAnalytics | undefined {
 	const old: BackendAnalytics = body.backend?.analytics ?? {
@@ -147,9 +149,12 @@ export function analyticsDials(body: SettingsBody, flags: BackendAnalytics): Bac
 		...(typeof body.analytics?.recordShare === "number" ? { recordShare: body.analytics.recordShare } : {}),
 	};
 	const experiments = experimentsOf(body);
+	const extended = extendedOf(body);
 	const dials: BackendAnalytics = { ...old, ...flags };
 	delete dials.experiments;
+	delete dials.extended;
 	if (Object.keys(experiments).length) dials.experiments = JSON.parse(JSON.stringify(experiments)) as BackendAnalytics["experiments"];
+	if (Object.keys(extended).length) dials.extended = extended;
 	return Object.keys(dials).length ? dials : undefined;
 }
 

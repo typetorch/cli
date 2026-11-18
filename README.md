@@ -229,6 +229,7 @@ show whether signing is ready, with placeholders instead of real signatures. Any
 | `typetorch branch rm <branch>` | removes a dev branch's head from the DataStore heads (y/N or `--yes`; `--dry-run`). Refuses the default and prod-channel branches, a branch live servers run (the fleet API; without it only with `--force`), and a head that changed meanwhile. Servers' MemoryStore copy keeps it until it expires (up to 45 days) |
 | `typetorch settings status` / `get [field\|game.<key>]` / `set game.<key> <json\|->` / `unset <field>` / `push` | the signed settings record (see "Settings"); `push` writes `defaultBranch`, `channels` and dev access from typetorch.json. `--dry-run`, `--force`, `--no-ping` |
 | `typetorch experiment list` / `weights <name> <w1,w2,...>` / `settle <name> <variant>` / `stop <name>` / `resume <name>` / `clear <name>` / `force <name> <player> <variant>` / `unforce <name> <player>` | live analytics experiment overrides in the signed settings record, no deploy (see "Experiments"). `--variants a,b`, `--dry-run`, `--force`, `--no-ping` |
+| `typetorch analytics extended show` / `set <dial> <value> [<dial> <value> ...]` / `unset <dial>... \| all` | the extended recording's dials (`analytics.extended`: `seconds`, `hz`, `entMax`, `streams.ui`, ...) in the signed settings record, no deploy (see "Extended recording"). `--dry-run`, `--force`, `--no-ping` |
 | `typetorch notify push [--dry-run]` / `status` / `templates` / `templates set <kind> <message_id>` / `test <userId> <kind> [--param k=v]... [--data x]` / `send <userId> <template> [--param k=v]... [--data x]` / `key rotate [--dry-run] [--no-ping]` / `key rotate --backend-only` / `pause [<kind>]` / `resume [<kind>]` | experience notifications on the backend, with `TYPETORCH_ADMIN_TOKEN` (see "Notifications"): push typetorch.json `notifications`, the backend's state (halted kinds stand out), the template texts to make by hand in the Creator Dashboard (and writing their ids back), a test or one-off send, a new launch-data signing key (the settings record's `backend.notify.keys` first, then the backend), and the runtime setting `notify.enabled` (or one kind's) |
 | `typetorch access push [--dry-run]` / `access status` | typetorch.json `members`, `revoked`, `devBadgeId` into the settings record's `access` / compare it with typetorch.json |
 | `typetorch kernel deploy [--dry-run] [--yes] [--install] [--base published\|latest\|<n>] [--engine luau\|splice\|lune] [--place-file <file>] [--timeout <s>] [--kernel <dir>] [--no-backup] [--loadstring]` | patch the kernel (and the backup build) into the live place (check, y/N, save, verify); no download: Luau Execution tasks do it (the luau engine), or `--place-file` patches a Studio copy (splice); `--replace-place --yes` for the template/test place only; see below |
@@ -436,7 +437,7 @@ Kernel 0.3.8 reads ONE signed record instead of ConfigService (CLI 0.8 removed t
 push` and every `universe:write` / `universe:read` use): the game's DataStore `TypeTorch`, key `settings`,
 `{ v: 1, seq, at, body, sig, sigF }`. `body` is JSON text with `defaultBranch`, `channels`, `access` (`members`,
 `revoked`, `devBadgeId`), `backend` (`{url, key, ingest?, analytics?, notify?}`; CLI 0.9; `ingest`: CLI 0.19, separate ingest servers' address, `backend setup --ingest`; `analytics` = `{flushSeconds?, recordShare?,
-experiments?}`, plus dials no CLI command writes yet that the framework reads (`techEvery`, `recordSeconds`, `positions`,
+experiments?, extended?}` (`extended`: `typetorch analytics extended`), plus dials no CLI command writes yet that the framework reads (`techEvery`, `recordSeconds`, `positions`,
 `joinData`, `joinLaunchPrefix`) and `backend setup` keeps; `notify` = `{keys: {current, previous?, since}}`, the launch-data HMAC keys from `typetorch notify key
 rotate`, masked wherever shown and kept by `backend setup`), the old `fleet` (`{url, token}`) and `analytics` (the sink settings) derived from it for kernels before 0.4 (or, with `backend setup --analytics basin`, the Basin sink `{backend: "basin", events, recordings, token, ...dials}`, which every framework reads) and `game` (the game's live values,
 `TypeTorch.liveConfig`); at most 32 KB, `game` at most 16 KB. `sig` and `sigF` are Ed25519 by the main and the fallback
@@ -517,6 +518,43 @@ in the last 7 days (`--days`), through `POST /v1/sql` with `TYPETORCH_ADMIN_TOKE
 is written. `--dry-run` shows the override before and after and writes nothing. `settings status` lists the overrides
 and `settings get backend` shows them (the key stays hidden). Every change is logged to `experiments.jsonl` in the
 state dir.
+
+#### Extended recording
+
+The extended recording (framework 0.7.2+, plans/36: poses, entities, animations and the UI tree, codec tt-ext-1) has
+its dials in the record's `analytics.extended`. `typetorch analytics extended` changes them live, through the same
+signed flow as `typetorch experiment` (read, verify with your keys, change only these dials, sign with both keys at
+seq + 1, write, ping servers):
+
+```sh
+typetorch analytics extended show                          # each dial: the record's value or the default, and who gets it
+typetorch analytics extended set seconds 600 --dry-run     # before and after, nothing written
+typetorch analytics extended set seconds 600               # record 10 minutes after the first input (the most)
+typetorch analytics extended set hz 5 streams.ui off       # several at once
+typetorch analytics extended unset seconds                 # back to the default (300); `unset all` drops every dial
+```
+
+| Dial | Range | Default | What |
+|---|---|---|---|
+| `seconds` | 10-600 | 300 | seconds an extended session records after the first input (its tt-rec-1 stream runs as long) |
+| `maxPlaytime` | 0-86400 | 60 | eligible while total playtime at the join is under this many seconds |
+| `afkSeconds` | 5-600 | 30 | no input and no movement this long = AFK |
+| `hz` | 1-10 | 3.33 | pose / move / UI polls a second |
+| `entMax` | 0-255, whole | 24 | the most entities recorded at once, nearest first |
+| `entRadius` | 10-2000 | 150 | entities farther from the camera (studs) aren't recorded |
+| `uiBudgetMs` | 0.05-4 | 0.25 | UI poll time per frame, ms (phones and tablets: 0.6 of it) |
+| `uiKeyframeSeconds` | 10-600 | 60 | seconds between UI keyframes |
+| `dryRun` | true / false | false | build everything, send nothing, report the counts |
+| `streams.pose`, `streams.ent`, `streams.ui`, `streams.view` | true / false | true | which streams run |
+
+The framework clamps a value out of range; the CLI refuses it instead, before anything is read. The dials are written
+to `backend.analytics.extended` (the DuckDB sink) and, the same, to the old `analytics.extended` (what a Basin sink and
+frameworks before 0.4 read); the URLs and keys, experiments, `flushSeconds`, `recordShare` and the sink stay as they
+are, and `backend setup` keeps the dials. A dial a newer framework adds is kept by `set` and `unset`. `settings status`
+shows them on the `extended rec.` line. Who gets an extended recording is the built-in experiment
+`tt_extended_recording` (variants `off`, `on`), and only in sessions recorded in detail (`recordShare`): with no
+override nobody does, so `typetorch experiment weights tt_extended_recording 1,1` (half) or `typetorch experiment settle
+tt_extended_recording on` (all) turns it on.
 
 `--no-registry` (deploy, rollback, promote, approve, kernel deploy) is accepted and prints a one-line note.
 `--require-shared-seq` and `--require-registry` are gone (CLI 0.9).
