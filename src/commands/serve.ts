@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { flagBool, flagInt, flagString, UsageError, type ParsedArgs } from "../args.ts";
 import { rojoBinary } from "../build.ts";
 import { findProjectRoot, loadProject } from "../config.ts";
+import { userIdOf } from "../init/roblox.ts";
 import { safeText } from "../httphints.ts";
 import { bold, cyan, dim, emitJson, info, isJson, red, yellow } from "../log.ts";
 import { run } from "../proc.ts";
@@ -43,7 +44,7 @@ export const serveFlags = {
 } as const;
 
 export const SERVE_USAGE = `typetorch serve [--detach] [--project <file>] [--port <n>] [--no-watch] [--no-live] [--with <script,...>] [--dev-branch <b>] [--remote [--remote-port <n>] [--url <your tunnel> | --no-tunnel]] [--claude [--claude-users <ids>]] [--json]
-typetorch serve pair [--url <tunnel URL>] [--claude-user <id>] [--json]
+typetorch serve pair [--url <tunnel URL>] [--claude-user <id or username>] [--json]
 typetorch serve devices [--json]
 typetorch serve unpair (--name <device> | --all) [--json]
 typetorch serve status [--json]
@@ -78,8 +79,8 @@ typetorch serve logs [--studio] [--since <seq>] [--limit <n>] [--follow] [--json
                this repo works as well
   pair         another one-time pairing link (15 min): the tunnel's address with the code in it (serve's own tunnel, or
                --url once; remembered). The other person pastes it into the plugin's Remote card; their Studio stays
-               paired for 30 days. --claude-user <id>: the Roblox user id that device uses the Claude tab as (you
-               choose it, the device can't; without it, that device gets no Claude tab)
+               paired for 30 days. --claude-user <id or username>: the Roblox user that device uses the Claude tab as
+               (you choose it, the device can't; a username is looked up on Roblox; without it, no Claude tab)
   devices      the paired devices; unpair --name <device> (or --all) revokes them
   --json       foreground: one JSON line per log line; subcommands: one JSON document
   status       children, attached Studios (edit / playtest), sync state, last compile result and its errors
@@ -145,6 +146,29 @@ export function extraScripts(args: ParsedArgs, root: string): string[] {
 	return names;
 }
 
+/**
+ * `serve pair --claude-user`: a Roblox user id as is, or a username looked up on Roblox (users.roblox.com, public)
+ * to its id; `name` is the account's exact name when it was looked up.
+ */
+export async function resolveClaudeUser(value: string, fetchFn: typeof fetch): Promise<{ id: number; name?: string }> {
+	const text = value.trim().replace(/^@/, "");
+	if (/^\d+$/.test(text)) {
+		const id = Number(text);
+		if (!Number.isSafeInteger(id) || id < 1) throw new UsageError(`--claude-user must be a Roblox user id or username, got "${value}"`);
+		return { id };
+	}
+	// Roblox usernames: 3-20 letters, digits and at most one underscore (not first or last); checked loosely here.
+	if (!/^[A-Za-z0-9_]{3,20}$/.test(text)) throw new UsageError(`--claude-user must be a Roblox user id or username, got "${value}"`);
+	let found: { id: number; name: string } | undefined;
+	try {
+		found = await userIdOf(fetchFn, text);
+	} catch (e) {
+		throw new UsageError(`couldn't look up the Roblox user "${text}" (${e instanceof Error ? e.message : String(e)}); pass their user id instead`);
+	}
+	if (!found || !Number.isSafeInteger(found.id) || found.id < 1) throw new UsageError(`no Roblox user is named "${text}"`);
+	return found;
+}
+
 export function printLine(line: { source: string; level: string; text: string; at?: string }) {
 	const color = line.level === "error" ? red : line.level === "warn" ? yellow : (s: string) => s;
 	console.log(`${dim(`[${safeText(line.source)}]`)} ${color(safeText(line.text))}`);
@@ -174,10 +198,11 @@ export async function serveCommand(args: ParsedArgs) {
 		case "logs":
 			return logs(args, flagBool(args, "studio") ? "studio" : "serve");
 		case "pair": {
-			const claudeUser = flagString(args, "claude-user");
-			if (claudeUser !== undefined && (!/^\d+$/.test(claudeUser) || !Number.isSafeInteger(Number(claudeUser)) || Number(claudeUser) < 1)) throw new UsageError(`--claude-user must be a Roblox user id, got "${claudeUser}"`);
-			const r = await servePairCode(gameRoot(args), flagString(args, "url"), claudeUser === undefined ? undefined : Number(claudeUser));
-			if (isJson()) return emitJson(r);
+			const flag = flagString(args, "claude-user");
+			const claudeUser = flag === undefined ? undefined : await resolveClaudeUser(flag, fetch);
+			const r = await servePairCode(gameRoot(args), flagString(args, "url"), claudeUser?.id);
+			if (isJson()) return emitJson(claudeUser?.name ? { ...r, userName: claudeUser.name } : r);
+			if (claudeUser) info(`for the Claude tab as ${claudeUser.name ? `${bold(claudeUser.name)} (${claudeUser.id})` : bold(String(claudeUser.id))}`);
 			const until = new Date(r.expiresAt).toLocaleTimeString();
 			if (r.link) {
 				info(`pairing link: ${bold(r.link)} (works once, until ${until})`);
