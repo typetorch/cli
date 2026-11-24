@@ -3,7 +3,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pluginProject, printLine } from "../src/commands/serve";
+import { pluginProject, printLine, resolveClaudeUser } from "../src/commands/serve";
 import { CompileTracker } from "../src/serve/compile";
 import { call, ServeClientError } from "../src/serve/client";
 import { handleMessage, TOOLS } from "../src/commands/mcp";
@@ -488,5 +488,35 @@ describe("orphans of a killed serve", () => {
 		expect(stopOrphans(file, (text) => lines.push(text))).toBe(1);
 		await sleeper.exited;
 		expect(lines[0]).toContain("stopped rojo");
+	});
+});
+
+describe("serve pair --claude-user", () => {
+	const calls: unknown[] = [];
+	const roblox = (async (_url: string, init?: RequestInit) => {
+		const asked = JSON.parse(String(init?.body)).usernames[0] as string;
+		calls.push(asked);
+		if (asked.toLowerCase() === "phasenull") return new Response(JSON.stringify({ data: [{ id: 409950512, name: "phasenull", requestedUsername: asked }] }));
+		return new Response(JSON.stringify({ data: [] }));
+	}) as unknown as typeof fetch;
+	const down = (async () => new Response("busy", { status: 503 })) as unknown as typeof fetch;
+
+	test("an id is used as is, without asking Roblox", async () => {
+		calls.length = 0;
+		expect(await resolveClaudeUser("409950512", roblox)).toEqual({ id: 409950512 });
+		expect(calls).toEqual([]);
+	});
+
+	test("a username (any case, an @ in front) is looked up to its id and exact name", async () => {
+		expect(await resolveClaudeUser("PhaseNull", roblox)).toEqual({ id: 409950512, name: "phasenull" });
+		expect(await resolveClaudeUser("@phasenull", roblox)).toEqual({ id: 409950512, name: "phasenull" });
+	});
+
+	test("an unknown name, a bad value or Roblox down is a usage error", async () => {
+		await expect(resolveClaudeUser("nobody_here", roblox)).rejects.toThrow('no Roblox user is named "nobody_here"');
+		await expect(resolveClaudeUser("0", roblox)).rejects.toThrow("user id or username");
+		await expect(resolveClaudeUser("a b", roblox)).rejects.toThrow("user id or username");
+		await expect(resolveClaudeUser("x", roblox)).rejects.toThrow("user id or username");
+		await expect(resolveClaudeUser("phasenull", down)).rejects.toThrow("pass their user id instead");
 	});
 });
